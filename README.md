@@ -1,9 +1,15 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/banner-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/brand/banner-light.svg">
+  <img alt="Adminwright — agents build the admin console; the gate decides if it is real." src="assets/brand/banner-light.svg">
+</picture>
+
 # Adminwright
 
 **An Agent Skill that makes any coding agent build a real admin console — not a mock one.**
 
 [![CI](https://github.com/TarikAI/adminwright/actions/workflows/ci.yml/badge.svg)](https://github.com/TarikAI/adminwright/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Agent Skill](https://img.shields.io/badge/Agent%20Skill-SKILL.md-8A2BE2)](SKILL.md)
 
 Ask an AI agent for an admin dashboard and you reliably get the same thing: a sidebar, four
@@ -186,4 +192,6 @@ python -m unittest discover -s tests -v
 
 ## License
 
-[MIT](LICENSE).
+[Apache 2.0](LICENSE). Chosen over MIT for two reasons that matter to a project
+agents will run inside other people's systems: it grants patent rights explicitly, and it
+does not grant trademark rights — the code is yours to use, the name stays ours.

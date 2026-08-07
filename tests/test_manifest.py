@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TarikAI
 """Regression tests for admin_console_manifest.py.
 
 Standard library only (unittest), so `python -m unittest discover tests` works

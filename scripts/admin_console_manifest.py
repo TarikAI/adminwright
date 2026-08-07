@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 TarikAI
 """Model, validate, and audit admin-console capability manifests (manifest v2).
 
 Standard library only. Runs on Windows and POSIX.
