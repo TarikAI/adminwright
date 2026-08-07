@@ -1,0 +1,36 @@
+name: Validator bypass
+description: A manifest built on mocks, fake evidence, or disconnected controls passes release validation
+labels: [bypass, high-priority]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you — this is the most important bug class in the project. A green result that
+        means nothing is worse than no check at all.
+
+        If you would rather not post it publicly, use the
+        [security advisory form](https://github.com/TarikAI/adminwright/security/advisories/new).
+  - type: textarea
+    id: bypass
+    attributes:
+      label: What gets past the check, and how
+    validations: {required: true}
+  - type: textarea
+    id: manifest
+    attributes:
+      label: Manifest that validates cleanly despite being dishonest
+      render: json
+    validations: {required: true}
+  - type: textarea
+    id: output
+    attributes:
+      label: Validator output showing it passing
+      render: shell
+    validations: {required: true}
+  - type: dropdown
+    id: profiles
+    attributes:
+      label: Which profiles does it pass at?
+      multiple: true
+      options: [internal, standard, regulated]
+    validations: {required: true}

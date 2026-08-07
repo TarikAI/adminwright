@@ -1,0 +1,12 @@
+# Normalize to LF in the repository. Windows checkouts still get CRLF locally
+# where the platform expects it; the committed bytes stay consistent so diffs
+# are readable and CI behaves the same on every runner.
+* text=auto eol=lf
+
+# Shell scripts must keep LF even on Windows checkouts.
+*.sh text eol=lf
+
+# Binary-ish assets, never touched.
+*.png binary
+*.jpg binary
+*.zip binary

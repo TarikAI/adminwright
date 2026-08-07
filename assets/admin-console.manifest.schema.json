@@ -1,0 +1,493 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://adminify.local/schemas/admin-console.manifest.schema.json",
+  "title": "Admin Console Capability Manifest",
+  "description": "Manifest v2. The schema describes shape; scripts/admin_console_manifest.py enforces the profile-scaled rules, evidence resolution, placeholder scanning, and structural coverage that the schema cannot express.",
+  "type": "object",
+  "required": [
+    "manifestVersion",
+    "profile",
+    "platform",
+    "roles",
+    "entities",
+    "workQueues",
+    "screens",
+    "integrations",
+    "crossCutting",
+    "qualityGates",
+    "decisions",
+    "gaps",
+    "declaredStatic",
+    "feedback",
+    "agents"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "manifestVersion": { "const": "2.0" },
+    "profile": {
+      "$ref": "#/$defs/profile",
+      "description": "Scales gate severity. Choosing one is a recorded decision, not a default."
+    },
+    "platform": {
+      "type": "object",
+      "required": [
+        "name",
+        "summary",
+        "archetypes",
+        "tenancy",
+        "regulatedData",
+        "sourceSystems",
+        "operationalObjectives",
+        "stack",
+        "researchSources",
+        "volumes"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "summary": { "type": "string" },
+        "archetypes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "tenancy": { "enum": ["single-tenant", "multi-tenant", "hybrid", "unknown"] },
+        "regulatedData": { "type": "array", "items": { "type": "string" } },
+        "sourceSystems": { "type": "array", "items": { "type": "string" } },
+        "operationalObjectives": { "type": "array", "items": { "type": "string" } },
+        "stack": {
+          "type": "object",
+          "description": "The seams implementation must map onto. Resolve from the repository, never from assumption.",
+          "properties": {
+            "frontend": { "type": "string" },
+            "backend": { "type": "string" },
+            "database": { "type": "string" },
+            "auth": { "type": "string" },
+            "jobs": { "type": "string" },
+            "hosting": { "type": "string" },
+            "designSystem": { "type": "string" },
+            "adminFramework": { "type": "string" }
+          }
+        },
+        "researchSources": {
+          "type": "array",
+          "description": "Authoritative documentation actually consulted for this stack. Guessing at a framework's auth, policy, or job idioms is a defect.",
+          "items": {
+            "type": "object",
+            "required": ["topic", "url", "appliedTo"],
+            "properties": {
+              "topic": { "type": "string" },
+              "url": { "type": "string" },
+              "appliedTo": { "type": "array", "items": { "type": "string" } },
+              "checkedOn": { "type": "string" }
+            }
+          }
+        },
+        "volumes": {
+          "type": "object",
+          "description": "Production-shaped numbers. Performance budgets and pagination strategy depend on these.",
+          "properties": {
+            "entityCounts": { "type": "string" },
+            "peakConcurrentOperators": { "type": "string" },
+            "retentionHorizon": { "type": "string" }
+          }
+        }
+      }
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "responsibilities", "scopes", "mfaRequired"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "name": { "type": "string" },
+          "responsibilities": { "type": "array", "items": { "type": "string" } },
+          "scopes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Which tenants, regions, products, amounts, or classifications this role may reach. Scope is the column implementations get wrong."
+          },
+          "mfaRequired": { "type": "boolean" },
+          "authenticationStrength": { "type": "string" },
+          "separationOfDuties": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "sourceOfTruth",
+          "sensitivity",
+          "tenantScoped",
+          "lifecycleStates",
+          "retention",
+          "capabilities"
+        ],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "name": { "type": "string" },
+          "sourceOfTruth": { "type": "string" },
+          "sensitivity": { "enum": ["public", "internal", "confidential", "restricted"] },
+          "tenantScoped": { "type": "boolean" },
+          "lifecycleStates": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "lifecycleTransitions": {
+            "type": "array",
+            "description": "A transition is a business command with rules and effects, not a status field write.",
+            "items": {
+              "type": "object",
+              "required": ["from", "to", "command"],
+              "properties": {
+                "from": { "type": "string" },
+                "to": { "type": "string" },
+                "command": {
+                  "type": "string",
+                  "description": "Must resolve to a capability id."
+                },
+                "actorRoles": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          },
+          "retention": { "type": "string" },
+          "capabilities": { "type": "array", "items": { "$ref": "#/$defs/capability" } }
+        }
+      }
+    },
+    "workQueues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "purpose", "roles", "source", "priorityRule", "sla", "actions", "status", "rationale"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "purpose": { "type": "string" },
+          "roles": { "type": "array", "items": { "type": "string" } },
+          "source": { "type": "string" },
+          "priorityRule": { "type": "string" },
+          "sla": { "type": "string" },
+          "actions": { "type": "array", "items": { "type": "string" } },
+          "status": { "$ref": "#/$defs/status" },
+          "rationale": { "type": "string" },
+          "tests": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "screens": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "route",
+          "purpose",
+          "roles",
+          "dataSources",
+          "capabilities",
+          "actions",
+          "states",
+          "responsive",
+          "accessibilityStatus",
+          "status",
+          "rationale",
+          "tests"
+        ],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "route": { "type": "string" },
+          "purpose": { "type": "string" },
+          "roles": { "type": "array", "items": { "type": "string" } },
+          "dataSources": { "type": "array", "items": { "type": "string" } },
+          "capabilities": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "actions": { "type": "array", "items": { "type": "string" } },
+          "states": {
+            "type": "array",
+            "items": { "type": "string" },
+            "uniqueItems": true,
+            "description": "loading, populated, error and forbidden are required at release; success is required whenever the screen has actions."
+          },
+          "responsive": { "type": "boolean" },
+          "accessibilityStatus": { "$ref": "#/$defs/status" },
+          "status": { "$ref": "#/$defs/status" },
+          "rationale": { "type": "string" },
+          "tests": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "integrations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "direction",
+          "sourceOfTruth",
+          "operations",
+          "failureHandling",
+          "reconciliation",
+          "monitoring",
+          "status",
+          "rationale"
+        ],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "direction": { "enum": ["inbound", "outbound", "bidirectional"] },
+          "sourceOfTruth": { "type": "string" },
+          "credentialBoundary": { "type": "string" },
+          "operations": { "type": "array", "items": { "type": "string" } },
+          "failureHandling": { "type": "string" },
+          "reconciliation": { "type": "string" },
+          "monitoring": { "type": "string" },
+          "status": { "$ref": "#/$defs/status" },
+          "rationale": { "type": "string" },
+          "tests": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "crossCutting": {
+      "type": "object",
+      "required": ["authentication", "authorization", "audit", "safety", "data", "experience", "observability"],
+      "description": "A boolean set to true is a claim. The evidence array is what makes it checkable.",
+      "properties": {
+        "authentication": {
+          "type": "object",
+          "properties": {
+            "implemented": { "type": "boolean" },
+            "mfaForPrivilegedRoles": { "type": "boolean" },
+            "sessionRevocation": { "type": "boolean" },
+            "stepUpForSensitiveActions": { "type": "boolean" },
+            "evidence": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "authorization": {
+          "type": "object",
+          "properties": {
+            "serverEnforced": { "type": "boolean" },
+            "defaultDeny": { "type": "boolean" },
+            "objectAndScopeChecks": { "type": "boolean" },
+            "policyTests": { "type": "array", "items": { "type": "string" } },
+            "evidence": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "audit": {
+          "type": "object",
+          "properties": {
+            "privilegedMutations": { "type": "boolean" },
+            "privilegedReadsWhenRequired": { "type": "boolean" },
+            "capturesActorTargetReasonResult": { "type": "boolean" },
+            "capturesSafeBeforeAfter": { "type": "boolean" },
+            "tamperProtected": { "type": "boolean" },
+            "evidence": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "safety": {
+          "type": "object",
+          "properties": {
+            "riskClassifiedActions": { "type": "boolean" },
+            "recoveryDefined": { "type": "boolean" },
+            "bulkPreviewAndPartialFailure": { "type": "boolean" },
+            "highRiskApprovalOrStepUp": { "type": "boolean" },
+            "evidence": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "releaseUsesRealSources": { "type": "boolean" },
+            "sensitiveFieldsClassified": { "type": "boolean" },
+            "retentionDefined": { "type": "boolean" },
+            "tenantIsolationTested": { "type": "boolean" },
+            "evidence": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "experience": {
+          "type": "object",
+          "properties": {
+            "wcagTarget": { "type": "string" },
+            "keyboardCriticalFlowsTested": { "type": "boolean" },
+            "responsiveCriticalFlowsTested": { "type": "boolean" },
+            "localizationRequirementsHandled": { "type": "boolean" },
+            "evidence": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "observability": {
+          "type": "object",
+          "properties": {
+            "adminApiInstrumented": { "type": "boolean" },
+            "jobsAndIntegrationsMonitored": { "type": "boolean" },
+            "highRiskActionsDetectable": { "type": "boolean" },
+            "correlationIdsExposedSafely": { "type": "boolean" },
+            "evidence": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "qualityGates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "threshold", "evidence", "rationale"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "status": { "enum": ["pending", "passed", "failed", "not-applicable"] },
+          "threshold": {
+            "type": "string",
+            "description": "A measurable threshold or a named review artifact. 'reasonable', 'fast' and 'secure' are not thresholds."
+          },
+          "evidence": { "type": "array", "items": { "type": "string" } },
+          "rationale": { "type": "string" }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "decision", "reason", "evidence", "status"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "decision": { "type": "string" },
+          "reason": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } },
+          "status": { "enum": ["assumed", "confirmed", "superseded"] },
+          "appliesTo": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Capability, screen, entity, or role ids this decision governs."
+          }
+        }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "description", "status", "rationale", "evidence"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "severity": { "enum": ["critical", "high", "medium", "low"] },
+          "description": { "type": "string" },
+          "status": { "enum": ["open", "fixed", "accepted", "blocked"] },
+          "rationale": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "declaredStatic": {
+      "type": "array",
+      "description": "The only sanctioned exception to the no-mock, no-hardcoded-value rule. An unregistered placeholder in an implementation field is a release-blocking defect.",
+      "items": {
+        "type": "object",
+        "required": ["id", "path", "value", "reason", "approvedBy", "evidence"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "path": {
+            "type": "string",
+            "description": "The manifest path this registration covers."
+          },
+          "value": { "type": "string" },
+          "reason": { "type": "string" },
+          "approvedBy": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "feedback": {
+      "type": "array",
+      "description": "Observations captured during this build. Promoted into skill lessons under the bar in references/skill-evolution.md.",
+      "items": {
+        "type": "object",
+        "required": ["id", "observation", "category", "proposedChange", "evidence", "status"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "observation": { "type": "string" },
+          "category": { "enum": ["gap", "friction", "incorrect-guidance", "new-pattern", "tooling"] },
+          "proposedChange": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } },
+          "status": { "enum": ["open", "promoted", "rejected"] }
+        }
+      }
+    },
+    "agents": {
+      "type": "array",
+      "description": "Multi-agent coordination state. Written by the claim and release-claim commands, never by hand during concurrent work.",
+      "items": {
+        "type": "object",
+        "required": ["id", "role", "ownsCapabilities", "ownsScreens", "status"],
+        "properties": {
+          "id": { "type": "string" },
+          "role": { "enum": ["architect", "implementer", "ux-reviewer", "qa", "security"] },
+          "ownsCapabilities": { "type": "array", "items": { "type": "string" } },
+          "ownsScreens": { "type": "array", "items": { "type": "string" } },
+          "status": { "enum": ["active", "done", "handed-off"] },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$" },
+    "profile": { "enum": ["internal", "standard", "regulated"] },
+    "status": {
+      "enum": ["discovered", "planned", "in-progress", "implemented", "blocked", "deferred", "not-applicable"]
+    },
+    "capability": {
+      "type": "object",
+      "required": [
+        "id",
+        "outcome",
+        "kind",
+        "roles",
+        "risk",
+        "status",
+        "rationale",
+        "entityStates",
+        "uiRoutes",
+        "serverOperations",
+        "authorizationPolicies",
+        "auditEvents",
+        "safeguards",
+        "dataBinding",
+        "tests",
+        "evidence"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "outcome": {
+          "type": "string",
+          "description": "The operator outcome, not the UI element."
+        },
+        "kind": { "enum": ["query", "command", "job", "export", "subscription"] },
+        "roles": { "type": "array", "items": { "type": "string" } },
+        "risk": { "enum": ["low", "moderate", "high", "critical"] },
+        "status": { "$ref": "#/$defs/status" },
+        "rationale": { "type": "string" },
+        "entityStates": {
+          "type": "object",
+          "description": "Which lifecycle states this capability reads or moves between. Drives the reachability and observability checks.",
+          "properties": {
+            "from": { "type": "array", "items": { "type": "string" } },
+            "to": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "uiRoutes": { "type": "array", "items": { "type": "string" } },
+        "serverOperations": { "type": "array", "items": { "type": "string" } },
+        "authorizationPolicies": { "type": "array", "items": { "type": "string" } },
+        "auditEvents": { "type": "array", "items": { "type": "string" } },
+        "safeguards": { "type": "array", "items": { "type": "string" } },
+        "dataBinding": {
+          "type": "string",
+          "description": "Where the data actually comes from, as a resolvable expression such as 'postgres:orders via OrderRepository.findForAdmin'. Placeholder-scanned."
+        },
+        "idempotency": {
+          "type": "string",
+          "description": "The idempotency mechanism, or 'not-required: <reason>'. Required at release for command, job and export kinds."
+        },
+        "concurrency": { "type": "string" },
+        "recovery": { "type": "string" },
+        "tests": { "type": "array", "items": { "type": "string" } },
+        "evidence": { "type": "array", "items": { "type": "string" } },
+        "owner": { "type": "string" },
+        "reviewStatus": { "enum": ["unreviewed", "reviewed", "contested"] }
+      }
+    }
+  }
+}

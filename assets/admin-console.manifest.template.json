@@ -1,0 +1,150 @@
+{
+  "$schema": "./admin-console.manifest.schema.json",
+  "manifestVersion": "2.0",
+  "profile": "standard",
+  "platform": {
+    "name": "",
+    "summary": "",
+    "archetypes": [],
+    "tenancy": "unknown",
+    "regulatedData": [],
+    "sourceSystems": [],
+    "operationalObjectives": [],
+    "stack": {
+      "frontend": "",
+      "backend": "",
+      "database": "",
+      "auth": "",
+      "jobs": "",
+      "hosting": "",
+      "designSystem": "",
+      "adminFramework": ""
+    },
+    "researchSources": [],
+    "volumes": {
+      "entityCounts": "",
+      "peakConcurrentOperators": "",
+      "retentionHorizon": ""
+    }
+  },
+  "roles": [],
+  "entities": [],
+  "workQueues": [],
+  "screens": [],
+  "integrations": [],
+  "crossCutting": {
+    "authentication": {
+      "implemented": false,
+      "mfaForPrivilegedRoles": false,
+      "sessionRevocation": false,
+      "stepUpForSensitiveActions": false,
+      "evidence": []
+    },
+    "authorization": {
+      "serverEnforced": false,
+      "defaultDeny": false,
+      "objectAndScopeChecks": false,
+      "policyTests": [],
+      "evidence": []
+    },
+    "audit": {
+      "privilegedMutations": false,
+      "privilegedReadsWhenRequired": false,
+      "capturesActorTargetReasonResult": false,
+      "capturesSafeBeforeAfter": false,
+      "tamperProtected": false,
+      "evidence": []
+    },
+    "safety": {
+      "riskClassifiedActions": false,
+      "recoveryDefined": false,
+      "bulkPreviewAndPartialFailure": false,
+      "highRiskApprovalOrStepUp": false,
+      "evidence": []
+    },
+    "data": {
+      "releaseUsesRealSources": false,
+      "sensitiveFieldsClassified": false,
+      "retentionDefined": false,
+      "tenantIsolationTested": false,
+      "evidence": []
+    },
+    "experience": {
+      "wcagTarget": "2.2 AA",
+      "keyboardCriticalFlowsTested": false,
+      "responsiveCriticalFlowsTested": false,
+      "localizationRequirementsHandled": false,
+      "evidence": []
+    },
+    "observability": {
+      "adminApiInstrumented": false,
+      "jobsAndIntegrationsMonitored": false,
+      "highRiskActionsDetectable": false,
+      "correlationIdsExposedSafely": false,
+      "evidence": []
+    }
+  },
+  "qualityGates": [
+    {
+      "id": "build",
+      "status": "pending",
+      "threshold": "Project build succeeds",
+      "evidence": [],
+      "rationale": ""
+    },
+    {
+      "id": "typecheck",
+      "status": "pending",
+      "threshold": "Configured type checks succeed",
+      "evidence": [],
+      "rationale": ""
+    },
+    {
+      "id": "lint",
+      "status": "pending",
+      "threshold": "Configured lint checks succeed",
+      "evidence": [],
+      "rationale": ""
+    },
+    {
+      "id": "tests",
+      "status": "pending",
+      "threshold": "Required automated tests succeed",
+      "evidence": [],
+      "rationale": ""
+    },
+    {
+      "id": "browser",
+      "status": "pending",
+      "threshold": "Critical role workflows pass in a real browser",
+      "evidence": [],
+      "rationale": ""
+    },
+    {
+      "id": "accessibility",
+      "status": "pending",
+      "threshold": "WCAG target and keyboard checks pass",
+      "evidence": [],
+      "rationale": ""
+    },
+    {
+      "id": "security",
+      "status": "pending",
+      "threshold": "Authorization, tenant, and high-risk action checks pass",
+      "evidence": [],
+      "rationale": ""
+    },
+    {
+      "id": "performance",
+      "status": "pending",
+      "threshold": "Project-defined production-volume budgets pass",
+      "evidence": [],
+      "rationale": ""
+    }
+  ],
+  "decisions": [],
+  "gaps": [],
+  "declaredStatic": [],
+  "feedback": [],
+  "agents": []
+}

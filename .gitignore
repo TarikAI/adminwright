@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Adminwright working state
+.admin-console/locks/
+.admin-console/.lock
+
+# The cross-project observation store lives in the user's home directory,
+# never in a repository. Ignored here in case anyone points it at a checkout.
+.adminwright/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

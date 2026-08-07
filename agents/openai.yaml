@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adminwright"
+  short_description: "Build complete enterprise admin consoles"
+  default_prompt: "Use $adminwright to design, build, connect, and verify a complete admin console for this platform."

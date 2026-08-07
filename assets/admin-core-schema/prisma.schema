@@ -1,0 +1,588 @@
+// Adminwright admin control-plane core schema — Prisma
+//
+// Faithful translation of postgres.sql. Read ./README.md before adapting.
+//
+// WHAT PRISMA CANNOT ENFORCE — these must be added by hand in a migration created
+// with `prisma migrate dev --create-only`, and they are not optional:
+//
+//   1. CHECK constraints. Prisma has no CHECK support. Every enum-like column below
+//      is modelled as a Prisma enum, which enforces at the client but NOT in the
+//      database — a raw query or another service can still write garbage. The
+//      cross-column checks (no self-grant, revocation completeness, grant window)
+//      have no Prisma equivalent at all.
+//   2. Partial unique indexes. `adminActorRoleLiveUnique` (unique while
+//      revoked_at IS NULL) and `adminJobIdempotency` (unique while
+//      idempotency_key IS NOT NULL) cannot be expressed here. Declared below as
+//      comments; add them as raw SQL.
+//   3. Triggers. Append-only enforcement on audit_event and approval_decision, and
+//      the separation-of-duties trigger on approval_decision.
+//
+// Append the raw statements at the end of the generated migration:
+//   ALTER TABLE admin_actor_role ADD CONSTRAINT admin_actor_role_no_self_grant
+//     CHECK (granted_by <> actor_id);
+//   CREATE UNIQUE INDEX admin_actor_role_live_unique ON admin_actor_role
+//     (actor_id, role_id, COALESCE(scope_tenant_id, '*')) WHERE revoked_at IS NULL;
+//   CREATE UNIQUE INDEX admin_job_idempotency ON admin_job
+//     (kind, idempotency_key) WHERE idempotency_key IS NOT NULL;
+//   -- plus the three triggers from postgres.sql
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AdminActorKind {
+  human
+  service
+  agent
+}
+
+enum AuthStrength {
+  password
+  mfa
+  phishing_resistant
+  sso
+}
+
+enum RiskLevel {
+  low
+  moderate
+  high
+  critical
+}
+
+enum AuditActorKind {
+  human
+  service
+  agent
+  system
+}
+
+enum AuditResult {
+  succeeded
+  failed
+  denied
+  partial
+  unknown
+}
+
+enum ApprovalState {
+  pending
+  approved
+  rejected
+  expired
+  executed
+  cancelled
+}
+
+enum ApprovalDecisionKind {
+  approved
+  rejected
+}
+
+enum JobState {
+  queued
+  running
+  succeeded
+  partial
+  failed
+  cancelled
+  expired
+}
+
+enum ViewVisibility {
+  private
+  shared
+}
+
+enum ExportState {
+  queued
+  running
+  ready
+  failed
+  expired
+  revoked
+}
+
+enum DsrKind {
+  access
+  erasure
+  rectification
+  portability
+  restriction
+  objection
+}
+
+enum DsrState {
+  open
+  in_progress
+  fulfilled
+  refused
+  withdrawn
+}
+
+enum ConfigTarget {
+  config_setting
+  feature_flag
+}
+
+// ---------------------------------------------------------------------------
+// Actors, roles, permissions, grants
+// ---------------------------------------------------------------------------
+
+/// Drop this model and add isPrivileged / authStrength / mfaEnrolled to the app's
+/// user model when operators share the product's lifecycle and identity provider.
+/// Credentials are never stored here; authSubject holds the IdP subject claim.
+model AdminActor {
+  id             BigInt         @id @default(autoincrement())
+  actorUuid      String         @unique @default(uuid()) @map("actor_uuid") @db.Uuid
+  appUserId      BigInt?        @map("app_user_id")
+  authSubject    String         @unique @map("auth_subject")
+  displayName    String         @map("display_name")
+  email          String?
+  kind           AdminActorKind @default(human)
+  authStrength   AuthStrength   @default(password) @map("auth_strength")
+  mfaEnrolled    Boolean        @default(false) @map("mfa_enrolled")
+  isActive       Boolean        @default(true) @map("is_active")
+  deactivatedAt  DateTime?      @map("deactivated_at") @db.Timestamptz
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz
+
+  grantsHeld     AdminActorRole[] @relation("GrantHolder")
+  grantsIssued   AdminActorRole[] @relation("GrantIssuer")
+  grantsRevoked  AdminActorRole[] @relation("GrantRevoker")
+  auditActed     AuditEvent[]     @relation("AuditActor")
+  auditEffective AuditEvent[]     @relation("AuditEffectiveActor")
+  impersonations ImpersonationSession[] @relation("Impersonator")
+  impersonationRevocations ImpersonationSession[] @relation("ImpersonationRevoker")
+  approvalsRequested ApprovalRequest[]
+  approvalDecisions  ApprovalDecision[]
+  jobs           AdminJob[]
+  savedViews     SavedView[]
+  configChanges  ConfigChange[]
+  exports        ExportRequest[]
+  dsrAssignments DataSubjectRequest[]
+
+  @@map("admin_actor")
+}
+
+model AdminRole {
+  id          BigInt  @id @default(autoincrement())
+  key         String  @unique // matches manifest roles[].id
+  name        String
+  description String  @default("")
+  requiresMfa Boolean @default(true) @map("requires_mfa")
+  maxScope    Json    @default("{}") @map("max_scope")
+  isActive    Boolean @default(true) @map("is_active")
+
+  permissions AdminRolePermission[]
+  grants      AdminActorRole[]
+
+  @@map("admin_role")
+}
+
+/// Key it <resource>.<action> so it equals the manifest capability.id exactly.
+/// That equality is what makes capability -> permission -> audit_event.action
+/// traceable. Obligations live here, not at the call site, so a new call site
+/// cannot silently skip them.
+model AdminPermission {
+  id               BigInt    @id @default(autoincrement())
+  key              String    @unique // manifest capability.id
+  resource         String
+  action           String
+  risk             RiskLevel @default(low)
+  requiresReason   Boolean   @default(false) @map("requires_reason")
+  requiresStepUp   Boolean   @default(false) @map("requires_step_up")
+  requiresApproval Boolean   @default(false) @map("requires_approval")
+  description      String    @default("")
+
+  roles            AdminRolePermission[]
+  approvalRequests ApprovalRequest[]
+
+  @@map("admin_permission")
+}
+
+model AdminRolePermission {
+  roleId       BigInt @map("role_id")
+  permissionId BigInt @map("permission_id")
+
+  role       AdminRole       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission AdminPermission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("admin_role_permission")
+}
+
+/// A grant, not a join row: where it applies, when it expires, who granted it and
+/// why, and how it was revoked.
+/// RAW SQL REQUIRED: CHECK (granted_by <> actor_id) — no self-granting.
+/// RAW SQL REQUIRED: partial unique index on (actor_id, role_id,
+///   COALESCE(scope_tenant_id,'*')) WHERE revoked_at IS NULL. Duplicate live
+///   grants make revocation unreliable.
+model AdminActorRole {
+  id             BigInt    @id @default(autoincrement())
+  actorId        BigInt    @map("actor_id")
+  roleId         BigInt    @map("role_id")
+  scope          Json      @default("{}")
+  scopeTenantId  String?   @map("scope_tenant_id") // denormalized hot path
+  startsAt       DateTime  @default(now()) @map("starts_at") @db.Timestamptz
+  expiresAt      DateTime? @map("expires_at") @db.Timestamptz // null = permanent
+  grantedBy      BigInt    @map("granted_by")
+  grantedReason  String    @map("granted_reason")
+  ticketRef      String?   @map("ticket_ref")
+  grantedAt      DateTime  @default(now()) @map("granted_at") @db.Timestamptz
+  revokedAt      DateTime? @map("revoked_at") @db.Timestamptz
+  revokedBy      BigInt?   @map("revoked_by")
+  revokeReason   String?   @map("revoke_reason")
+
+  actor   AdminActor  @relation("GrantHolder", fields: [actorId], references: [id])
+  role    AdminRole   @relation(fields: [roleId], references: [id])
+  granter AdminActor  @relation("GrantIssuer", fields: [grantedBy], references: [id])
+  revoker AdminActor? @relation("GrantRevoker", fields: [revokedBy], references: [id])
+
+  @@index([actorId])
+  @@map("admin_actor_role")
+}
+
+/// Which rules were in force when a decision was made. audit_event.policyVersion
+/// points here so a past decision stays explainable after the policy changes.
+model AdminPolicyVersion {
+  id          BigInt    @id @default(autoincrement())
+  version     String    @unique
+  sourceRef   String    @map("source_ref") // manifest capability.authorizationPolicies[]
+  checksum    String
+  activatedAt DateTime  @default(now()) @map("activated_at") @db.Timestamptz
+  retiredAt   DateTime? @map("retired_at") @db.Timestamptz
+
+  @@map("admin_policy_version")
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+/// Append-only. RAW SQL REQUIRED: BEFORE UPDATE and BEFORE DELETE triggers that
+/// raise. Prisma cannot express this, and application-level guards are bypassed by
+/// raw queries and other services.
+model AuditEvent {
+  id        BigInt   @id @default(autoincrement())
+  eventUuid String   @unique @default(uuid()) @map("event_uuid") @db.Uuid
+  chainId   String   @default("default") @map("chain_id")
+  chainSeq  BigInt   @map("chain_seq")
+
+  occurredAt DateTime @map("occurred_at") @db.Timestamptz
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz
+
+  actorId   BigInt?        @map("actor_id")
+  actorKind AuditActorKind @default(human) @map("actor_kind")
+  /// Null unless impersonating. Never overwrite actorId with the impersonated
+  /// identity: that is the most common way impersonation audit is destroyed.
+  effectiveActorId       BigInt? @map("effective_actor_id")
+  impersonationSessionId BigInt? @map("impersonation_session_id")
+
+  tenantId    String? @map("tenant_id")
+  environment String
+  sourceIp    String? @map("source_ip") @db.Inet
+  userAgent   String? @map("user_agent")
+
+  action     String  // admin_permission.key, never free text
+  targetType String  @map("target_type")
+  targetId   String? @map("target_id")
+
+  reason            String?
+  ticketRef         String? @map("ticket_ref")
+  approvalRequestId BigInt? @map("approval_request_id")
+
+  requestId      String? @map("request_id")
+  correlationId  String? @map("correlation_id")
+  idempotencyKey String? @map("idempotency_key")
+
+  result    AuditResult
+  errorCode String?     @map("error_code")
+
+  beforeState     Json?   @map("before_state")
+  afterState      Json?   @map("after_state")
+  beforeHash      String? @map("before_hash")
+  afterHash       String? @map("after_hash")
+  redactionPolicy String  @default("none") @map("redaction_policy")
+
+  policyVersion String? @map("policy_version")
+
+  prevHash      String? @map("prev_hash")
+  rowHash       String  @map("row_hash")
+  hashAlgorithm String  @default("sha256") @map("hash_algorithm")
+
+  actor          AdminActor?           @relation("AuditActor", fields: [actorId], references: [id])
+  effectiveActor AdminActor?           @relation("AuditEffectiveActor", fields: [effectiveActorId], references: [id])
+  impersonation  ImpersonationSession? @relation(fields: [impersonationSessionId], references: [id])
+  configChanges  ConfigChange[]
+
+  @@unique([chainId, chainSeq])
+  @@index([occurredAt(sort: Desc), id(sort: Desc)])
+  @@index([targetType, targetId, occurredAt(sort: Desc)])
+  @@index([actorId, occurredAt(sort: Desc)])
+  @@index([tenantId, occurredAt(sort: Desc)])
+  @@index([action, occurredAt(sort: Desc)])
+  @@index([correlationId])
+  @@index([requestId])
+  @@index([idempotencyKey])
+  @@map("audit_event")
+}
+
+// ---------------------------------------------------------------------------
+// Impersonation
+// ---------------------------------------------------------------------------
+
+model ImpersonationSession {
+  id                BigInt    @id @default(autoincrement())
+  sessionUuid       String    @unique @default(uuid()) @map("session_uuid") @db.Uuid
+  realActorId       BigInt    @map("real_actor_id")
+  targetSubjectId   String    @map("target_subject_id")
+  targetTenantId    String?   @map("target_tenant_id")
+  reason            String
+  ticketRef         String?   @map("ticket_ref")
+  scopeRestrictions Json      @default("{}") @map("scope_restrictions")
+  startedAt         DateTime  @default(now()) @map("started_at") @db.Timestamptz
+  expiresAt         DateTime  @map("expires_at") @db.Timestamptz
+  endedAt           DateTime? @map("ended_at") @db.Timestamptz
+  endedReason       String?   @map("ended_reason")
+  revokedBy         BigInt?   @map("revoked_by")
+
+  realActor AdminActor  @relation("Impersonator", fields: [realActorId], references: [id])
+  revoker   AdminActor? @relation("ImpersonationRevoker", fields: [revokedBy], references: [id])
+  events    AuditEvent[]
+
+  @@index([realActorId, expiresAt])
+  @@map("impersonation_session")
+}
+
+// ---------------------------------------------------------------------------
+// Approvals and separation of duties
+// ---------------------------------------------------------------------------
+
+model ApprovalRequest {
+  id                BigInt        @id @default(autoincrement())
+  requestUuid       String        @unique @default(uuid()) @map("request_uuid") @db.Uuid
+  commandKey        String        @map("command_key")
+  payload           Json
+  payloadHash       String        @map("payload_hash")
+  targetType        String        @map("target_type")
+  targetId          String?       @map("target_id")
+  tenantId          String?       @map("tenant_id")
+  requestedBy       BigInt        @map("requested_by")
+  requestedAt       DateTime      @default(now()) @map("requested_at") @db.Timestamptz
+  reason            String
+  requiredApprovals Int           @default(1) @map("required_approvals") @db.SmallInt
+  state             ApprovalState @default(pending)
+  expiresAt         DateTime      @map("expires_at") @db.Timestamptz
+  executedAt        DateTime?     @map("executed_at") @db.Timestamptz
+  executionResult   String?       @map("execution_result")
+
+  permission AdminPermission    @relation(fields: [commandKey], references: [key])
+  requester  AdminActor         @relation(fields: [requestedBy], references: [id])
+  decisions  ApprovalDecision[]
+
+  @@index([state, expiresAt])
+  @@map("approval_request")
+}
+
+/// RAW SQL REQUIRED: the separation-of-duties trigger. The requester must not be
+/// able to approve their own request, and enforcing that only in application code
+/// means the control is absent for anything writing this table directly.
+model ApprovalDecision {
+  id         BigInt               @id @default(autoincrement())
+  requestId  BigInt               @map("request_id")
+  approverId BigInt               @map("approver_id")
+  decision   ApprovalDecisionKind
+  reason     String
+  decidedAt  DateTime             @default(now()) @map("decided_at") @db.Timestamptz
+
+  request  ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  approver AdminActor      @relation(fields: [approverId], references: [id])
+
+  // One approver decides once. Without this a single approver satisfies a
+  // two-approval requirement by voting twice.
+  @@unique([requestId, approverId])
+  @@map("approval_decision")
+}
+
+// ---------------------------------------------------------------------------
+// Jobs
+// ---------------------------------------------------------------------------
+
+/// RAW SQL REQUIRED: partial unique index on (kind, idempotency_key)
+/// WHERE idempotency_key IS NOT NULL. A repeated key must return the existing job
+/// rather than start a second one.
+model AdminJob {
+  id              BigInt    @id @default(autoincrement())
+  jobUuid         String    @unique @default(uuid()) @map("job_uuid") @db.Uuid
+  kind            String // manifest capability.id where kind = job
+  initiatedBy     BigInt    @map("initiated_by")
+  tenantId        String?   @map("tenant_id")
+  environment     String
+  inputSummary    Json      @map("input_summary")
+  inputHash       String    @map("input_hash")
+  idempotencyKey  String?   @map("idempotency_key")
+  correlationId   String?   @map("correlation_id")
+  state           JobState  @default(queued)
+  totalCount      Int?      @map("total_count")
+  processedCount  Int       @default(0) @map("processed_count")
+  failedCount     Int       @default(0) @map("failed_count")
+  queuedAt        DateTime  @default(now()) @map("queued_at") @db.Timestamptz
+  startedAt       DateTime? @map("started_at") @db.Timestamptz
+  finishedAt      DateTime? @map("finished_at") @db.Timestamptz
+  resultArtifact  String?   @map("result_artifact")
+  cancelRequested Boolean   @default(false) @map("cancel_requested")
+
+  initiator AdminActor        @relation(fields: [initiatedBy], references: [id])
+  failures  AdminJobFailure[]
+
+  @@index([state, queuedAt(sort: Desc)])
+  @@map("admin_job")
+}
+
+/// Per-item failures. A job reporting only an aggregate count cannot tell the
+/// operator which rows to retry.
+model AdminJobFailure {
+  id          BigInt   @id @default(autoincrement())
+  jobId       BigInt   @map("job_id")
+  targetType  String   @map("target_type")
+  targetId    String   @map("target_id")
+  errorCode   String   @map("error_code")
+  errorDetail String?  @map("error_detail")
+  failedAt    DateTime @default(now()) @map("failed_at") @db.Timestamptz
+
+  job AdminJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, failedAt])
+  @@map("admin_job_failure")
+}
+
+// ---------------------------------------------------------------------------
+// Saved views and configuration
+// ---------------------------------------------------------------------------
+
+/// A shared saved view is a disclosure surface: it can carry one tenant's filter
+/// values to another operator. Apply the same row policy when loading it.
+model SavedView {
+  id         BigInt         @id @default(autoincrement())
+  ownerId    BigInt         @map("owner_id")
+  route      String // manifest screens[].route
+  name       String
+  filters    Json           @default("{}")
+  columns    Json           @default("[]")
+  sort       Json           @default("[]")
+  visibility ViewVisibility @default(private)
+  tenantId   String?        @map("tenant_id")
+  createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  owner AdminActor @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, route, name])
+  @@map("saved_view")
+}
+
+model ConfigSetting {
+  id          BigInt   @id @default(autoincrement())
+  key         String   @unique
+  value       Json
+  valueType   String   @map("value_type")
+  /// Secret values are never displayed after write. Support rotation and
+  /// revocation instead.
+  isSecret    Boolean  @default(false) @map("is_secret")
+  tenantId    String?  @map("tenant_id")
+  environment String
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("config_setting")
+}
+
+model FeatureFlag {
+  id          BigInt   @id @default(autoincrement())
+  key         String   @unique
+  description String   @default("")
+  isEnabled   Boolean  @default(false) @map("is_enabled")
+  rollout     Json     @default("{}")
+  environment String
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("feature_flag")
+}
+
+/// Every configuration change is a privileged mutation and gets its own history
+/// row in addition to its audit event.
+model ConfigChange {
+  id           BigInt       @id @default(autoincrement())
+  targetTable  ConfigTarget @map("target_table")
+  targetKey    String       @map("target_key")
+  beforeValue  Json?        @map("before_value")
+  afterValue   Json?        @map("after_value")
+  changedBy    BigInt       @map("changed_by")
+  reason       String
+  changedAt    DateTime     @default(now()) @map("changed_at") @db.Timestamptz
+  auditEventId BigInt?      @map("audit_event_id")
+
+  changer AdminActor  @relation(fields: [changedBy], references: [id])
+  event   AuditEvent? @relation(fields: [auditEventId], references: [id])
+
+  @@index([targetTable, targetKey, changedAt(sort: Desc)])
+  @@map("config_change")
+}
+
+// ---------------------------------------------------------------------------
+// Exports and data-subject requests
+// ---------------------------------------------------------------------------
+
+model ExportRequest {
+  id           BigInt      @id @default(autoincrement())
+  exportUuid   String      @unique @default(uuid()) @map("export_uuid") @db.Uuid
+  resource     String
+  requestedBy  BigInt      @map("requested_by")
+  tenantId     String?     @map("tenant_id")
+  filters      Json
+  /// Record which policy was applied, not merely that one was. An export is the
+  /// easiest way for field-level policy to be silently bypassed.
+  rowPolicy    String      @map("row_policy")
+  fieldPolicy  String      @map("field_policy")
+  reason       String
+  state        ExportState @default(queued)
+  rowCount     Int?        @map("row_count")
+  byteSize     BigInt?     @map("byte_size")
+  artifactRef  String?     @map("artifact_ref")
+  requestedAt  DateTime    @default(now()) @map("requested_at") @db.Timestamptz
+  readyAt      DateTime?   @map("ready_at") @db.Timestamptz
+  expiresAt    DateTime    @map("expires_at") @db.Timestamptz
+  downloadCount Int        @default(0) @map("download_count")
+  lastDownloadedAt DateTime? @map("last_downloaded_at") @db.Timestamptz
+
+  requester AdminActor @relation(fields: [requestedBy], references: [id])
+
+  @@index([state, expiresAt])
+  @@map("export_request")
+}
+
+/// Erasure interacts with retention, legal hold and backups. legalHold blocks
+/// fulfilment; it does not silently drop the request.
+model DataSubjectRequest {
+  id          BigInt    @id @default(autoincrement())
+  requestUuid String    @unique @default(uuid()) @map("request_uuid") @db.Uuid
+  kind        DsrKind
+  subjectRef  String    @map("subject_ref")
+  tenantId    String?   @map("tenant_id")
+  receivedAt  DateTime  @default(now()) @map("received_at") @db.Timestamptz
+  dueAt       DateTime  @map("due_at") @db.Timestamptz
+  state       DsrState  @default(open)
+  legalHold   Boolean   @default(false) @map("legal_hold")
+  assignedTo  BigInt?   @map("assigned_to")
+  resolution  String?
+  resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz
+
+  assignee AdminActor? @relation(fields: [assignedTo], references: [id])
+
+  @@index([state, dueAt])
+  @@map("data_subject_request")
+}

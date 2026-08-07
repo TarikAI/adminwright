@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+        env:
+          PYTHONIOENCODING: utf-8
+
+  integrity:
+    name: skill integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Manifest schema and template are valid JSON and agree
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          schema = json.loads(pathlib.Path("assets/admin-console.manifest.schema.json").read_text())
+          template = json.loads(pathlib.Path("assets/admin-console.manifest.template.json").read_text())
+          missing = [k for k in schema["required"] if k not in template]
+          if missing:
+              sys.exit("template missing schema-required keys: " + ", ".join(missing))
+          print("schema and template agree")
+          PY
+
+      - name: Every internal link resolves
+        run: |
+          python - <<'PY'
+          import re, pathlib, sys
+          broken = []
+          for f in pathlib.Path(".").rglob("*.md"):
+              if ".github" in f.parts:
+                  continue
+              for m in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", f.read_text(encoding="utf-8")):
+                  target = m.group(2).split("#")[0].strip()
+                  if not target or target.startswith(("http", "mailto")):
+                      continue
+                  if not (f.parent / target).exists():
+                      broken.append(f"{f.as_posix()} -> {target}")
+          if broken:
+              sys.exit("broken links:\n  " + "\n  ".join(broken))
+          print("no broken links")
+          PY
+
+      - name: Schema translations cover the same tables
+        run: |
+          python - <<'PY'
+          import re, pathlib, sys
+          d = pathlib.Path("assets/admin-core-schema")
+          canon = re.findall(r"CREATE TABLE (\w+)", (d / "postgres.sql").read_text())
+          patterns = {
+              "prisma.schema": r'@@map\("(\w+)"\)',
+              "drizzle.ts": r'adminCore\.table\(\s*"(\w+)"',
+              "django_models.py": r'db_table = "(\w+)"',
+              "laravel_migration.php": r"Schema::create\('(\w+)'",
+              "rails_migration.rb": r"create_table :(\w+)",
+          }
+          problems = []
+          for name, pattern in patterns.items():
+              found = set(re.findall(pattern, (d / name).read_text()))
+              missing = [t for t in canon if t not in found]
+              if missing:
+                  problems.append(f"{name} missing: {', '.join(missing)}")
+          if problems:
+              sys.exit("schema drift:\n  " + "\n  ".join(problems))
+          print(f"all translations cover {len(canon)} tables")
+          PY
+
+      - name: Reference files stay within budget
+        run: |
+          python - <<'PY'
+          import pathlib, sys
+          over = []
+          for f in sorted(pathlib.Path("references").glob("*.md")):
+              n = len(f.read_text(encoding="utf-8").splitlines())
+              if n > 450:
+                  over.append(f"{f.name}: {n}")
+          if over:
+              sys.exit("over the 450-line ceiling:\n  " + "\n  ".join(over))
+          print("all references within ceiling")
+          PY

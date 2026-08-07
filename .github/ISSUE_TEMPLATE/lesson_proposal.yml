@@ -1,0 +1,45 @@
+name: Lesson from a real build
+description: Propose a change to the guidance, based on what a build actually taught you
+labels: [lesson]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The bar is documented in [references/skill-evolution.md](../blob/main/references/skill-evolution.md).
+        In short: corrections of wrong guidance are accepted immediately; anything else needs
+        to have been seen on two or more distinct projects.
+
+        If you ran `promote`, paste its output — that is exactly the evidence this asks for.
+  - type: textarea
+    id: trigger
+    attributes:
+      label: What happened
+      description: The build, the platform shape, and what went wrong or cost rework.
+    validations: {required: true}
+  - type: textarea
+    id: rule
+    attributes:
+      label: The durable rule
+      description: Written as guidance, not as a story. What should an agent do differently?
+    validations: {required: true}
+  - type: input
+    id: scope
+    attributes:
+      label: Which reference file should it land in
+      placeholder: references/security-governance.md
+    validations: {required: true}
+  - type: dropdown
+    id: basis
+    attributes:
+      label: Why it clears the bar
+      options:
+        - It corrects guidance that is factually wrong
+        - Seen on two or more distinct projects
+        - A new archetype or stack seam, encountered more than once
+    validations: {required: true}
+  - type: textarea
+    id: pays_for
+    attributes:
+      label: What it replaces or trims
+      description: References have a line budget. An addition that only appends is rejected.
+    validations: {required: true}
