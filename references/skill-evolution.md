@@ -9,11 +9,12 @@
 5. The promotion bar
 6. Never promote
 7. Was it the skill or was it me?
-8. Anti-drift rules
-9. Consolidation pass
-10. Regression safety and scoping
-11. Cadence and ownership
-12. Versioning the guidance
+8. The regression floor
+9. Anti-drift rules
+10. Consolidation pass
+11. Regression safety and scoping
+12. Cadence and ownership
+13. Versioning the guidance
 
 ## The loop
 
@@ -201,6 +202,33 @@ Apply before every `lesson add`. All five must hold.
 
 Failing any question closes the lesson `rejected` with that reason. Keep the file; it is
 what stops the same idea returning every build.
+
+## The regression floor
+
+Guidance changes are not self-validating. A rule tightened for one project can start failing
+builds that were always correct, and the loop has no way to notice — that is drift wearing
+improvement's clothes.
+
+`evals/` holds golden fixtures: one truthful platform that must pass at every profile, one
+with named defects that must each be caught. CI asserts the exact set of rules that fire, per
+profile, with severity.
+
+Before adopting any lesson that changes a rule or the validator:
+
+```text
+python evals/run.py
+```
+
+If a fixture flips, one of two things is true and the adopting session must decide which:
+
+| Finding | Meaning | Action |
+|---|---|---|
+| A defect stopped being caught | the change removed a guarantee | scope it to a profile, or reject it |
+| An honest fixture started failing | the change blocks legitimate work | scope or reject; this is the regression-safety rule in section 9, made mechanical |
+| Behaviour changed and both are correct | the expectation was stale | update it in the same commit, with the reason in the message |
+
+Never re-record expectations to make the suite quiet. A silent `--update` is how a validator
+stops validating. Details in [../evals/README.md](../evals/README.md).
 
 ## Anti-drift rules
 

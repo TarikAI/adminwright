@@ -1,0 +1,561 @@
+{
+  "$schema": "./admin-console.manifest.schema.json",
+  "manifestVersion": "2.0",
+  "profile": "regulated",
+  "platform": {
+    "name": "saas-clean",
+    "summary": "Multi-tenant B2B SaaS admin console slice.",
+    "archetypes": [
+      "b2b-saas"
+    ],
+    "tenancy": "multi-tenant",
+    "regulatedData": [
+      "billing"
+    ],
+    "sourceSystems": [
+      "PostgreSQL primary",
+      "Stripe"
+    ],
+    "operationalObjectives": [
+      "Suspend abusive tenants without engineering involvement"
+    ],
+    "stack": {
+      "frontend": "React 18",
+      "backend": "NestJS",
+      "database": "PostgreSQL 16",
+      "auth": "OIDC",
+      "jobs": "BullMQ",
+      "hosting": "Fly.io",
+      "designSystem": "in-house",
+      "adminFramework": "none"
+    },
+    "researchSources": [
+      {
+        "topic": "Idempotent money operations",
+        "url": "https://docs.stripe.com/api/idempotent_requests",
+        "appliedTo": [
+          "subscription.cancel"
+        ],
+        "checkedOn": "2026-08-08"
+      }
+    ],
+    "volumes": {
+      "entityCounts": "12k tenants",
+      "peakConcurrentOperators": "9",
+      "retentionHorizon": "7 years"
+    }
+  },
+  "roles": [
+    {
+      "id": "ops",
+      "name": "Operations",
+      "responsibilities": [
+        "Tenant administration"
+      ],
+      "scopes": [
+        "all tenants"
+      ],
+      "mfaRequired": true,
+      "separationOfDuties": [
+        "tenant.suspend"
+      ]
+    }
+  ],
+  "entities": [
+    {
+      "id": "tenant",
+      "name": "Tenant",
+      "sourceOfTruth": "postgres:tenants",
+      "sensitivity": "confidential",
+      "tenantScoped": true,
+      "lifecycleStates": [
+        "active",
+        "suspended"
+      ],
+      "lifecycleTransitions": [
+        {
+          "from": "active",
+          "to": "suspended",
+          "command": "tenant.suspend",
+          "actorRoles": [
+            "ops"
+          ]
+        }
+      ],
+      "retention": "7 years after closure",
+      "capabilities": [
+        {
+          "id": "tenant.list",
+          "outcome": "Find a tenant",
+          "kind": "query",
+          "roles": [
+            "ops"
+          ],
+          "risk": "low",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "active",
+              "suspended"
+            ],
+            "to": []
+          },
+          "uiRoutes": [
+            "/admin/tenants"
+          ],
+          "serverOperations": [
+            "TenantRepository.findForAdmin"
+          ],
+          "authorizationPolicies": [
+            "policy/tenant.read"
+          ],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "postgres:tenants via TenantRepository.findForAdmin",
+          "tests": [
+            "tests/tenant.spec.ts"
+          ],
+          "evidence": [
+            "evidence/tests.log"
+          ],
+          "owner": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa"
+        },
+        {
+          "id": "tenant.suspend",
+          "outcome": "Suspend an abusive tenant",
+          "kind": "command",
+          "roles": [
+            "ops"
+          ],
+          "risk": "high",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "active"
+            ],
+            "to": [
+              "suspended"
+            ]
+          },
+          "uiRoutes": [
+            "/admin/tenants"
+          ],
+          "serverOperations": [
+            "TenantService.suspend"
+          ],
+          "authorizationPolicies": [
+            "policy/tenant.suspend"
+          ],
+          "auditEvents": [
+            "tenant.suspended"
+          ],
+          "safeguards": [
+            "reason capture",
+            "typed confirmation",
+            "step-up auth"
+          ],
+          "dataBinding": "postgres:tenants via TenantService.suspend",
+          "tests": [
+            "tests/tenant.spec.ts"
+          ],
+          "evidence": [
+            "evidence/tests.log"
+          ],
+          "owner": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa",
+          "idempotency": "state-conditional; repeat on suspended tenant is a no-op",
+          "concurrency": "row version check",
+          "recovery": "tenant.restore reverses within the retention window"
+        }
+      ]
+    },
+    {
+      "id": "subscription",
+      "name": "Subscription",
+      "sourceOfTruth": "stripe:subscriptions mirrored to postgres:subscriptions",
+      "sensitivity": "confidential",
+      "tenantScoped": true,
+      "lifecycleStates": [
+        "trialing",
+        "active",
+        "cancelled"
+      ],
+      "lifecycleTransitions": [
+        {
+          "from": "active",
+          "to": "cancelled",
+          "command": "subscription.cancel",
+          "actorRoles": [
+            "ops"
+          ]
+        },
+        {
+          "from": "trialing",
+          "to": "cancelled",
+          "command": "subscription.cancel",
+          "actorRoles": [
+            "ops"
+          ]
+        }
+      ],
+      "retention": "7 years",
+      "capabilities": [
+        {
+          "id": "subscription.list",
+          "outcome": "Review a tenant's plan",
+          "kind": "query",
+          "roles": [
+            "ops"
+          ],
+          "risk": "low",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "trialing",
+              "active",
+              "cancelled"
+            ],
+            "to": []
+          },
+          "uiRoutes": [
+            "/admin/subscriptions"
+          ],
+          "serverOperations": [
+            "SubscriptionRepository.findForAdmin"
+          ],
+          "authorizationPolicies": [
+            "policy/billing.read"
+          ],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "postgres:subscriptions via SubscriptionRepository.findForAdmin",
+          "tests": [
+            "tests/subscription.spec.ts"
+          ],
+          "evidence": [
+            "evidence/tests.log"
+          ],
+          "owner": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa"
+        },
+        {
+          "id": "subscription.cancel",
+          "outcome": "Cancel a subscription",
+          "kind": "command",
+          "roles": [
+            "ops"
+          ],
+          "risk": "high",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "trialing",
+              "active"
+            ],
+            "to": [
+              "cancelled"
+            ]
+          },
+          "uiRoutes": [
+            "/admin/subscriptions"
+          ],
+          "serverOperations": [
+            "BillingService.cancel"
+          ],
+          "authorizationPolicies": [
+            "policy/billing.write"
+          ],
+          "auditEvents": [
+            "subscription.cancelled"
+          ],
+          "safeguards": [
+            "reason capture",
+            "impact preview",
+            "step-up auth"
+          ],
+          "dataBinding": "stripe:subscriptions via BillingService.cancel",
+          "tests": [
+            "tests/subscription.spec.ts"
+          ],
+          "evidence": [
+            "evidence/tests.log"
+          ],
+          "owner": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa",
+          "idempotency": "provider idempotency key per cancellation request",
+          "concurrency": "provider is authoritative; reconcile on mismatch",
+          "recovery": "resubscribe flow; provider record retained"
+        }
+      ]
+    }
+  ],
+  "workQueues": [],
+  "screens": [
+    {
+      "id": "tenants",
+      "route": "/admin/tenants",
+      "purpose": "Search and act on tenants",
+      "roles": [
+        "ops"
+      ],
+      "dataSources": [
+        "postgres:tenants via TenantRepository.findForAdmin"
+      ],
+      "capabilities": [
+        "tenant.list",
+        "tenant.suspend"
+      ],
+      "actions": [
+        "suspend"
+      ],
+      "states": [
+        "loading",
+        "populated",
+        "filtered-empty",
+        "error",
+        "forbidden",
+        "conflict",
+        "success"
+      ],
+      "responsive": true,
+      "accessibilityStatus": "implemented",
+      "status": "implemented",
+      "rationale": "",
+      "tests": [
+        "tests/tenant.spec.ts"
+      ]
+    },
+    {
+      "id": "subscriptions",
+      "route": "/admin/subscriptions",
+      "purpose": "Review and cancel subscriptions",
+      "roles": [
+        "ops"
+      ],
+      "dataSources": [
+        "postgres:subscriptions via SubscriptionRepository.findForAdmin"
+      ],
+      "capabilities": [
+        "subscription.list",
+        "subscription.cancel"
+      ],
+      "actions": [
+        "cancel"
+      ],
+      "states": [
+        "loading",
+        "populated",
+        "error",
+        "forbidden",
+        "success"
+      ],
+      "responsive": true,
+      "accessibilityStatus": "implemented",
+      "status": "implemented",
+      "rationale": "",
+      "tests": [
+        "tests/subscription.spec.ts"
+      ]
+    }
+  ],
+  "integrations": [
+    {
+      "id": "stripe",
+      "direction": "bidirectional",
+      "sourceOfTruth": "Stripe for billing state",
+      "credentialBoundary": "server-side secret key, never exposed to the admin client",
+      "operations": [
+        "cancel subscription",
+        "read invoices"
+      ],
+      "failureHandling": "retry with backoff; unknown results go to the reconciliation queue",
+      "reconciliation": "nightly job compares local mirror against Stripe",
+      "monitoring": "alert on webhook lag over 15 minutes",
+      "status": "implemented",
+      "rationale": "",
+      "tests": [
+        "tests/subscription.spec.ts"
+      ]
+    }
+  ],
+  "crossCutting": {
+    "authentication": {
+      "implemented": true,
+      "mfaForPrivilegedRoles": true,
+      "sessionRevocation": true,
+      "stepUpForSensitiveActions": true,
+      "evidence": [
+        "evidence/authentication.md"
+      ]
+    },
+    "authorization": {
+      "serverEnforced": true,
+      "defaultDeny": true,
+      "objectAndScopeChecks": true,
+      "policyTests": [
+        "tests/authz.spec.ts"
+      ],
+      "evidence": [
+        "evidence/authorization.md"
+      ]
+    },
+    "audit": {
+      "privilegedMutations": true,
+      "privilegedReadsWhenRequired": true,
+      "capturesActorTargetReasonResult": true,
+      "capturesSafeBeforeAfter": true,
+      "tamperProtected": true,
+      "evidence": [
+        "evidence/audit.md"
+      ]
+    },
+    "safety": {
+      "riskClassifiedActions": true,
+      "recoveryDefined": true,
+      "bulkPreviewAndPartialFailure": true,
+      "highRiskApprovalOrStepUp": true,
+      "evidence": [
+        "evidence/safety.md"
+      ]
+    },
+    "data": {
+      "releaseUsesRealSources": true,
+      "sensitiveFieldsClassified": true,
+      "retentionDefined": true,
+      "tenantIsolationTested": true,
+      "evidence": [
+        "evidence/data.md"
+      ]
+    },
+    "experience": {
+      "wcagTarget": "2.2 AA",
+      "keyboardCriticalFlowsTested": true,
+      "responsiveCriticalFlowsTested": true,
+      "localizationRequirementsHandled": true,
+      "evidence": [
+        "evidence/experience.md"
+      ]
+    },
+    "observability": {
+      "adminApiInstrumented": true,
+      "jobsAndIntegrationsMonitored": true,
+      "highRiskActionsDetectable": true,
+      "correlationIdsExposedSafely": true,
+      "evidence": [
+        "evidence/observability.md"
+      ]
+    }
+  },
+  "qualityGates": [
+    {
+      "id": "build",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/build.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "typecheck",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/typecheck.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "lint",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/lint.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "tests",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/tests.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "browser",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/browser.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "accessibility",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/accessibility.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "security",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/security.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "performance",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/performance.log"
+      ],
+      "rationale": ""
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec.profile",
+      "decision": "Run at the regulated profile",
+      "reason": "Billing data and money movement are in scope",
+      "evidence": [
+        "evidence/security.log"
+      ],
+      "status": "confirmed",
+      "appliesTo": [
+        "subscription.cancel"
+      ]
+    }
+  ],
+  "gaps": [
+    {
+      "id": "gap.subscription-active",
+      "severity": "low",
+      "description": "No admin command moves a subscription into 'active'.",
+      "status": "accepted",
+      "rationale": "State 'active' is set by the Stripe webhook on successful payment. Granting operators a way to mark a subscription active would let them grant paid access without money moving, so its absence is deliberate.",
+      "evidence": [
+        "evidence/security.log"
+      ]
+    }
+  ],
+  "declaredStatic": [],
+  "feedback": [],
+  "agents": []
+}

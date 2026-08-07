@@ -28,6 +28,11 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
+      - name: Run golden-fixture evals
+        run: python evals/run.py
+        env:
+          PYTHONIOENCODING: utf-8
+
   integrity:
     name: skill integrity
     runs-on: ubuntu-latest

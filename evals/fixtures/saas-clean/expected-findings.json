@@ -1,0 +1,14 @@
+{
+  "internal": {
+    "exit": 0,
+    "findings": {}
+  },
+  "regulated": {
+    "exit": 0,
+    "findings": {}
+  },
+  "standard": {
+    "exit": 0,
+    "findings": {}
+  }
+}

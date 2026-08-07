@@ -1,0 +1,354 @@
+{
+  "$schema": "./admin-console.manifest.schema.json",
+  "manifestVersion": "2.0",
+  "profile": "standard",
+  "platform": {
+    "name": "logistics-gaps",
+    "summary": "Dispatch and delivery operations console.",
+    "archetypes": [
+      "logistics-mobility"
+    ],
+    "tenancy": "single-tenant",
+    "regulatedData": [],
+    "sourceSystems": [
+      "PostgreSQL primary"
+    ],
+    "operationalObjectives": [
+      "Reassign stuck deliveries without engineering"
+    ],
+    "stack": {
+      "frontend": "",
+      "backend": "",
+      "database": "",
+      "auth": "",
+      "jobs": "",
+      "hosting": "",
+      "designSystem": "",
+      "adminFramework": ""
+    },
+    "researchSources": [],
+    "volumes": {
+      "entityCounts": "",
+      "peakConcurrentOperators": "",
+      "retentionHorizon": ""
+    }
+  },
+  "roles": [
+    {
+      "id": "dispatcher",
+      "name": "Dispatcher",
+      "responsibilities": [
+        "Assign jobs"
+      ],
+      "scopes": [
+        "all regions"
+      ],
+      "mfaRequired": true,
+      "separationOfDuties": []
+    },
+    {
+      "id": "auditor",
+      "name": "Auditor",
+      "responsibilities": [
+        "Review"
+      ],
+      "scopes": [
+        "all"
+      ],
+      "mfaRequired": true,
+      "separationOfDuties": []
+    }
+  ],
+  "entities": [
+    {
+      "id": "job",
+      "name": "Delivery job",
+      "sourceOfTruth": "postgres:jobs",
+      "sensitivity": "internal",
+      "tenantScoped": false,
+      "lifecycleStates": [
+        "queued",
+        "dispatched",
+        "delivered",
+        "cancelled"
+      ],
+      "lifecycleTransitions": [
+        {
+          "from": "queued",
+          "to": "dispatched",
+          "command": "job.dispatch",
+          "actorRoles": [
+            "dispatcher"
+          ]
+        }
+      ],
+      "retention": "3 years",
+      "capabilities": [
+        {
+          "id": "job.list",
+          "outcome": "Find a delivery job",
+          "kind": "query",
+          "roles": [
+            "dispatcher"
+          ],
+          "risk": "low",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "queued",
+              "dispatched",
+              "delivered"
+            ],
+            "to": []
+          },
+          "uiRoutes": [
+            "/admin/jobs"
+          ],
+          "serverOperations": [
+            "JobRepository.findForAdmin"
+          ],
+          "authorizationPolicies": [
+            "policy/job.read"
+          ],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "postgres:jobs via JobRepository.findForAdmin",
+          "tests": [
+            "tests/job.spec.ts"
+          ],
+          "evidence": [
+            "evidence/tests.log"
+          ],
+          "owner": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa"
+        },
+        {
+          "id": "job.dispatch",
+          "outcome": "Dispatch a queued job",
+          "kind": "command",
+          "roles": [
+            "dispatcher"
+          ],
+          "risk": "high",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "queued"
+            ],
+            "to": [
+              "dispatched"
+            ]
+          },
+          "uiRoutes": [
+            "/admin/jobs"
+          ],
+          "serverOperations": [
+            "DispatchService.dispatch"
+          ],
+          "authorizationPolicies": [
+            "policy/job.dispatch"
+          ],
+          "auditEvents": [
+            "job.dispatched"
+          ],
+          "safeguards": [],
+          "dataBinding": "postgres:jobs via DispatchService.dispatch",
+          "tests": [
+            "tests/job.spec.ts"
+          ],
+          "evidence": [
+            "evidence/empty.log"
+          ],
+          "owner": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa"
+        }
+      ]
+    }
+  ],
+  "workQueues": [],
+  "screens": [
+    {
+      "id": "jobs",
+      "route": "/admin/jobs",
+      "purpose": "Dispatch board",
+      "roles": [
+        "dispatcher"
+      ],
+      "dataSources": [
+        "postgres:jobs via JobRepository.findForAdmin"
+      ],
+      "capabilities": [
+        "job.list",
+        "job.dispatch"
+      ],
+      "actions": [
+        "dispatch"
+      ],
+      "states": [
+        "loading",
+        "populated",
+        "error",
+        "forbidden"
+      ],
+      "responsive": true,
+      "accessibilityStatus": "implemented",
+      "status": "implemented",
+      "rationale": "",
+      "tests": [
+        "tests/job.spec.ts"
+      ]
+    }
+  ],
+  "integrations": [],
+  "crossCutting": {
+    "authentication": {
+      "implemented": true,
+      "mfaForPrivilegedRoles": true,
+      "sessionRevocation": true,
+      "stepUpForSensitiveActions": true,
+      "evidence": [
+        "evidence/authentication.md"
+      ]
+    },
+    "authorization": {
+      "serverEnforced": true,
+      "defaultDeny": true,
+      "objectAndScopeChecks": true,
+      "policyTests": [
+        "tests/authz.spec.ts"
+      ],
+      "evidence": [
+        "evidence/authorization.md"
+      ]
+    },
+    "audit": {
+      "privilegedMutations": true,
+      "privilegedReadsWhenRequired": true,
+      "capturesActorTargetReasonResult": true,
+      "capturesSafeBeforeAfter": true,
+      "tamperProtected": true,
+      "evidence": [
+        "evidence/audit.md"
+      ]
+    },
+    "safety": {
+      "riskClassifiedActions": true,
+      "recoveryDefined": true,
+      "bulkPreviewAndPartialFailure": true,
+      "highRiskApprovalOrStepUp": true,
+      "evidence": [
+        "evidence/safety.md"
+      ]
+    },
+    "data": {
+      "releaseUsesRealSources": true,
+      "sensitiveFieldsClassified": true,
+      "retentionDefined": true,
+      "tenantIsolationTested": true,
+      "evidence": [
+        "evidence/data.md"
+      ]
+    },
+    "experience": {
+      "wcagTarget": "2.2 AA",
+      "keyboardCriticalFlowsTested": true,
+      "responsiveCriticalFlowsTested": true,
+      "localizationRequirementsHandled": true,
+      "evidence": [
+        "evidence/experience.md"
+      ]
+    },
+    "observability": {
+      "adminApiInstrumented": true,
+      "jobsAndIntegrationsMonitored": true,
+      "highRiskActionsDetectable": true,
+      "correlationIdsExposedSafely": true,
+      "evidence": [
+        "evidence/observability.md"
+      ]
+    }
+  },
+  "qualityGates": [
+    {
+      "id": "build",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/build.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "typecheck",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/typecheck.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "lint",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/lint.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "tests",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/tests.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "browser",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/browser.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "accessibility",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/accessibility.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "security",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/security.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "performance",
+      "status": "passed",
+      "threshold": "command exits zero",
+      "evidence": [
+        "evidence/performance.log"
+      ],
+      "rationale": ""
+    }
+  ],
+  "decisions": [],
+  "gaps": [],
+  "declaredStatic": [],
+  "feedback": [],
+  "agents": []
+}

@@ -1183,7 +1183,6 @@ def structural_findings(manifest, findings, release):
                 )
             else:
                 transition_targets.add(text_of(transition.get("to")))
-            check_roles(transition.get("actorRoles"), role_ids, tpath.replace(".actorRoles", ""), findings) if False else None
             unknown = sorted(
                 value
                 for value in as_list(transition.get("actorRoles"))
@@ -1212,7 +1211,15 @@ def structural_findings(manifest, findings, release):
                 )
             if position == 0:
                 continue
-            if state not in reached and state not in transition_targets:
+            # Same escape as observability: a state entered only by an external
+            # system -- a payment webhook, a device callback -- is legitimately
+            # unreachable by any operator command. Recording why in gaps[] is the
+            # honest answer, and it must count here too, not only above.
+            if (
+                state not in reached
+                and state not in transition_targets
+                and state.lower() not in escape_text
+            ):
                 findings.add(
                     "lifecycle-reachable",
                     path + ".lifecycleStates",

@@ -171,7 +171,8 @@ assets/admin-core-schema/   audit log, RBAC with scopes, impersonation, approval
                             Laravel, Rails
 assets/agent-contract.template.md   drop into your repo as AGENTS.md / CLAUDE.md
 scripts/                    the validator (stdlib only)
-tests/                      35 regression tests, every one from a real defect
+tests/                      47 regression tests, every one from a real defect
+evals/                      golden fixtures pinning validator behaviour in CI
 lessons/                    durable lessons, version-controlled and shared
 ```
 
@@ -199,8 +200,14 @@ Lessons from real builds are the most valuable contribution — see
 it's documented rather than a matter of taste.
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v   # regression tests
+python evals/run.py                       # golden fixtures
 ```
+
+The evals are the regression floor for guidance changes: one truthful platform that must pass
+at every profile, one with deliberate defects that must each be caught. If a change flips a
+fixture, either the change is wrong or the expectation was — decide which, and say so in the
+commit.
 
 ## License
 

@@ -1,0 +1,47 @@
+{
+  "internal": {
+    "exit": 1,
+    "findings": {
+      "evidence-file-empty": "warn",
+      "evidence-not-resolvable": "warn",
+      "high-risk-controls": "error",
+      "idempotency-missing": "error",
+      "lifecycle-observable": "warn",
+      "lifecycle-reachable": "warn",
+      "research-sources-missing": "warn",
+      "role-unused": "warn",
+      "screen-state-missing": "error",
+      "stack-incomplete": "warn"
+    }
+  },
+  "regulated": {
+    "exit": 1,
+    "findings": {
+      "evidence-file-empty": "error",
+      "evidence-not-resolvable": "error",
+      "high-risk-controls": "error",
+      "idempotency-missing": "error",
+      "lifecycle-observable": "error",
+      "lifecycle-reachable": "error",
+      "research-sources-missing": "error",
+      "role-unused": "error",
+      "screen-state-missing": "error",
+      "stack-incomplete": "error"
+    }
+  },
+  "standard": {
+    "exit": 1,
+    "findings": {
+      "evidence-file-empty": "error",
+      "evidence-not-resolvable": "error",
+      "high-risk-controls": "error",
+      "idempotency-missing": "error",
+      "lifecycle-observable": "error",
+      "lifecycle-reachable": "error",
+      "research-sources-missing": "error",
+      "role-unused": "error",
+      "screen-state-missing": "error",
+      "stack-incomplete": "error"
+    }
+  }
+}
