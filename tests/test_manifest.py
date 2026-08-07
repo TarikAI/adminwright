@@ -509,6 +509,64 @@ class TestGlobalLearning(unittest.TestCase):
         self.assertNotIn("Seed plan must include a cross-tenant neighbour", scopes,
                          "a single-project observation must not clear the bar")
 
+    def test_export_bundle_is_sanitised(self):
+        """Poisoned fixtures: nothing identifying may survive an export."""
+        manifest = self.make_project("AcmeBank Portal", [(
+            "gap",
+            r"Bulk suspend at C:\srv\acme\api\bulk.ts leaked rows; "
+            r"mail ops@acmebank.com or https://acme.atlassian.net/OPS-4417 on 10.2.14.8",
+            "Authorize per row; see db-prod-eu1.acmebank.internal runbook",
+        )])
+        run("harvest", "--manifest", manifest, "--date", "2026-08-08", env=self.env)
+        bundle_path = self.tmp / "bundle.json"
+        code, _out, err = run("promote", "--min-projects", "1",
+                              "--export", bundle_path, env=self.env)
+        self.assertEqual(code, 0, err)
+        raw = bundle_path.read_text(encoding="utf-8").lower()
+        for secret in ("acmebank", "atlassian", "10.2.14.8", "ops@", "srv", "c:\\",
+                       "prod-eu1", "ops-4417"):
+            self.assertNotIn(secret, raw, "export leaked " + secret)
+        self.assertIn("<path>", raw)
+        self.assertIn("p_", raw, "project names must become fingerprints")
+
+    def test_export_drops_evidence_paths(self):
+        manifest = self.make_project("Zenith", [("gap", "obs", "change")])
+        run("harvest", "--manifest", manifest, "--date", "2026-08-08", env=self.env)
+        bundle_path = self.tmp / "b.json"
+        run("promote", "--min-projects", "1", "--export", bundle_path, env=self.env)
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        for observation in bundle["observations"]:
+            self.assertNotIn("evidence", observation)
+
+    def test_community_records_corroborate_across_the_bar(self):
+        """One local project plus one community record clears a 2-project bar."""
+        skill_root = self.tmp / "skill"
+        (skill_root / "community" / "observations").mkdir(parents=True)
+        (skill_root / "community" / "observations" / "contrib.json").write_text(
+            json.dumps({
+                "bundleVersion": "1",
+                "observations": [{
+                    "fingerprint": "shared-fp", "category": "gap",
+                    "scope": "references/security-governance.md",
+                    "observation": "batch authorized once", "proposedChange": "per-row authz",
+                    "projects": ["p_other"], "projectCount": 1,
+                }],
+            }), encoding="utf-8")
+
+        manifest = self.make_project("LocalProj", [
+            ("gap", "batch authorized once", "per-row authz")])
+        run("harvest", "--manifest", manifest, "--date", "2026-08-08", env=self.env)
+
+        alone = json.loads(run("promote", "--json", env=self.env)[1])
+        self.assertEqual(alone["candidates"], [], "one project alone must not clear the bar")
+
+        with_community = json.loads(run(
+            "promote", "--json", "--include-community", "--skill-root", skill_root,
+            env=self.env)[1])
+        self.assertTrue(with_community["candidates"],
+                        "community evidence should corroborate across the bar")
+        self.assertEqual(with_community["communityRecords"], 1)
+
     def test_harvest_is_idempotent(self):
         manifest = self.make_project("ProjectC", [("gap", "obs", "change")])
         run("harvest", "--manifest", manifest, "--date", "2026-08-07", env=self.env)

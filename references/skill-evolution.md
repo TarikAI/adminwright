@@ -3,16 +3,17 @@
 ## Contents
 
 1. The loop
-2. Capture an observation
-3. Open a lesson
-4. The promotion bar
-5. Never promote
-6. Was it the skill or was it me?
-7. Anti-drift rules
-8. Consolidation pass
-9. Regression safety and scoping
-10. Cadence and ownership
-11. Versioning the guidance
+2. Across devices and across people
+3. Capture an observation
+4. Open a lesson
+5. The promotion bar
+6. Never promote
+7. Was it the skill or was it me?
+8. Anti-drift rules
+9. Consolidation pass
+10. Regression safety and scoping
+11. Cadence and ownership
+12. Versioning the guidance
 
 ## The loop
 
@@ -40,6 +41,36 @@ thing in different words and reports only those that clear the bar.
 The store is an accumulation buffer, not the record. Adopted lessons live in the skill's own
 `lessons/` directory under version control, which is how they reach anyone else.
 
+## Across devices and across people
+
+Two lanes widen the evidence base without weakening the bar.
+
+**Your own devices.** `store init --remote <private-git-url>` turns the store into a git
+repository; `store sync` pushes and pulls it. Observations are merged by id union rather than
+by git's line merge, so two machines that both appended never lose each other's work, and the
+file is normalised after every join so repeated syncs converge instead of accumulating
+duplicates. `store status` reports where the store is and when it last synced. Use a private
+repository: observations quote your engineering notes. If you would rather not use git, point
+`ADMINWRIGHT_HOME` at any folder your file-sync tool already mirrors.
+
+**Other people, opt-in.** `promote --export <file>` writes a sanitised bundle of promotion
+candidates: emails, URLs, paths, addresses, hostnames, domains, tokens and hashes replaced by
+markers, project names replaced by one-way fingerprints, stacks coarsened to families, and
+evidence references dropped. Contribution is a pull request adding the bundle under
+`community/observations/`, so review is the trust gate.
+`promote --include-community` then lets contributed records corroborate a local observation
+across the bar.
+
+Three rules keep that safe:
+
+- Community records **corroborate only**. They never adopt guidance on their own, and they
+  are labelled in `promote` output so a reviewer can weigh them differently.
+- Their fingerprints are **recomputed on load**, never trusted from the bundle, so a stale or
+  hand-edited file cannot group itself with unrelated observations.
+- No pattern can scrub a company or person's name written as an ordinary word. The exporter
+  says so; the contributor is the only one who can catch it. See
+  [../PRIVACY.md](../PRIVACY.md).
+
 Commands, and exactly what each writes:
 
 | Stage | Command | Writes |
@@ -48,6 +79,9 @@ Commands, and exactly what each writes:
 | Open a lesson in the skill | `lesson add --title <t> --category <c> --scope <ref> --trigger <s> --rule <s> [--evidence <path> ...]` | `lessons/NNNN-<slug>.md` with `status: proposed`, plus one row in `lessons/index.md` |
 | Collect across projects | `harvest --manifest <path> --date <YYYY-MM-DD>` | appends to `observations.jsonl` in the store; sets the harvested entries to `promoted` |
 | Apply the bar | `promote [--min-projects 2] [--json]` | nothing; reports candidates and why each qualifies |
+| Sync across devices | `store sync --date <YYYY-MM-DD>` | commits, merges by id union, pushes to your private remote |
+| Share, opt-in | `promote --export <file>` | a sanitised bundle; sharing happens only when you open a pull request |
+| Weigh contributions | `promote --include-community` | nothing; adds contributed evidence to the bar calculation |
 | Read the queue | `lesson list --status proposed` | nothing |
 | Adopt | edit of the one reference named in `scope` | the guidance change |
 | Close the lesson | edit of the lesson frontmatter and its index row to `status: adopted` | the lesson and the index |

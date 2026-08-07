@@ -1,0 +1,68 @@
+name: Promotion review
+
+# Surfaces what has earned promotion. It never adopts anything: adoption is a
+# judgement call about guidance others follow literally, and stays a deliberate,
+# reviewed edit by a human or a capable model.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  candidates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Collect community promotion candidates
+        id: collect
+        run: |
+          mkdir -p /tmp/store
+          echo "" > /tmp/store/observations.jsonl
+          ADMINWRIGHT_HOME=/tmp/store python scripts/admin_console_manifest.py \
+            promote --include-community --min-projects 2 > /tmp/candidates.md || true
+          {
+            echo 'body<<CANDIDATES'
+            cat /tmp/candidates.md
+            echo ''
+            echo '---'
+            echo 'Generated weekly from `community/observations/`. Community records'
+            echo 'corroborate; they never adopt guidance on their own. Apply the bar in'
+            echo '`references/skill-evolution.md` before changing any reference.'
+            echo 'CANDIDATES'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the standing review issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = process.env.BODY;
+            const title = 'Promotion review: current candidates';
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'lesson',
+            });
+            const existing = issues.find(i => i.title === title);
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: existing.number, body,
+              });
+              core.info(`Updated #${existing.number}`);
+            } else {
+              const { data: created } = await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['lesson'],
+              });
+              core.info(`Created #${created.number}`);
+            }
+        env:
+          BODY: ${{ steps.collect.outputs.body }}

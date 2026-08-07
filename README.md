@@ -125,6 +125,17 @@ stops it degrading into a pile of anecdotes.
 ... promote                 # what has earned promotion, and why
 ```
 
+**Across your devices.** `store init --remote <private-git-url>` makes the store a git
+repository and `store sync` keeps every machine current. Observations merge by id union, not
+by git's line merge, so two laptops that both appended never lose each other's work.
+
+**Across people, opt-in.** `promote --export` writes a *sanitised* bundle — emails, URLs,
+paths, hostnames, tokens replaced by markers; project names replaced by one-way fingerprints;
+evidence references dropped. Contributing is a pull request, so review is the trust gate, and
+contributed records can only ever *corroborate* — they never adopt guidance on their own.
+Nothing leaves your machine unless you export it and choose to share it. See
+[PRIVACY.md](PRIVACY.md).
+
 Adoption is a judgement call and should be made by a capable model, not a cheap one — see
 [references/skill-evolution.md](references/skill-evolution.md) for the promotion bar,
 the never-promote list, and the "was it the skill or was it me?" test.
@@ -140,7 +151,8 @@ emit      authz-matrix | test-plan | nav-map | seed-plan | operator-handbook | g
 add/set   safe partial writes under a lock (never rewrite the whole file)
 claim     multi-agent capability ownership                    (3 = conflict)
 harvest   move this project's feedback into the cross-project store
-promote   list observations that clear the promotion bar
+promote   list what clears the promotion bar; --export to share, --include-community to weigh
+store     init | sync | status for the cross-device observation store
 lesson    record and list durable lessons
 ```
 

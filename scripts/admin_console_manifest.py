@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -2663,6 +2664,54 @@ def slugify(value):
     return (slug[:60].rstrip("-")) or "lesson"
 
 
+# Patterns scrubbed before an observation can leave the machine. Deliberately
+# aggressive: a false scrub costs a little readability, a missed one leaks a
+# customer name or an internal hostname into a public pull request.
+SCRUB_PATTERNS = (
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "<email>"),
+    (re.compile(r"\bhttps?://\S+"), "<url>"),
+    (re.compile(r"\b(?:sk|pk|ghp|gho|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b"), "<secret>"),
+    (re.compile(r"\b[A-Fa-f0-9]{32,}\b"), "<hash>"),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
+    # Hostnames including every leading label: db-prod-eu1.acme.internal must not
+    # survive as db-prod-eu1.<host>, which still names the machine.
+    (re.compile(r"\b[\w-]+(?:\.[\w-]+)*\.(?:internal|local|corp|lan|test|intranet)\b", re.I), "<host>"),
+    (re.compile(r"\b[\w-]+(?:\.[\w-]+)+\.(?:com|net|org|io|dev|ai|co|app|cloud|sh)\b", re.I), "<domain>"),
+    (re.compile(r"\b[\w-]+\.(?:com|net|org|io|dev|ai|co|app|cloud|sh)\b", re.I), "<domain>"),
+    # Windows and POSIX paths, and bare Windows drive roots.
+    (re.compile(r"\b[A-Za-z]:[\\/][^\s,;]*"), "<path>"),
+    (re.compile(r"(?<!\w)~?/(?:[\w.-]+/)+[\w.-]*"), "<path>"),
+    (re.compile(r"\b(?:[\w.-]+\\)+[\w.-]+"), "<path>"),
+)
+
+# Stacks coarsened to a family, so "PostgreSQL 16.2 on prod-eu-1" becomes "postgres".
+STACK_FAMILIES = (
+    "next.js", "remix", "react", "vue", "svelte", "angular",
+    "laravel", "django", "rails", "nestjs", "express", "fastapi", "spring",
+    "postgres", "mysql", "sqlite", "mongodb", "supabase", "dynamodb",
+    "go", "dotnet", ".net", "php", "python", "node", "typescript", "java", "ruby",
+)
+
+
+def scrub_text(value):
+    """Remove anything that could identify a project, person, or host."""
+    text = text_of(value)
+    for pattern, replacement in SCRUB_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return " ".join(text.split())
+
+
+def coarsen_stack(value):
+    """Reduce a stack string to recognised family names only."""
+    lowered = text_of(value).lower()
+    return sorted({family for family in STACK_FAMILIES if family in lowered})
+
+
+def project_fingerprint(name):
+    """Stable pseudonym for a project, so recurrence is countable without naming it."""
+    return "p_" + hashlib.sha256(text_of(name).encode("utf-8")).hexdigest()[:12]
+
+
 def global_store_dir(override=None):
     """Where observations from every project accumulate.
 
@@ -2678,6 +2727,51 @@ def global_store_dir(override=None):
     return Path.home() / ".adminwright"
 
 
+def run_git(store, *args, check=True):
+    """Run git inside the store. Only the store subcommand needs git."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(store)] + list(args),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except FileNotFoundError:
+        raise ManifestError(
+            "git is not on PATH. Store sync needs git; every other command does not. "
+            "Alternatively point ADMINWRIGHT_HOME at a folder your file-sync tool already "
+            "mirrors between devices."
+        )
+    if check and completed.returncode != 0:
+        raise ManifestError(
+            "git " + " ".join(args) + " failed:\n" + (completed.stderr or completed.stdout).strip()
+        )
+    return completed
+
+
+def merge_observation_files(*paths):
+    """Union of observation records by id, order-stable.
+
+    observations.jsonl is append-only, so a sync conflict is never a real
+    disagreement -- it is two devices having appended different lines. Merging
+    by id union means neither device loses work, which git's default
+    line-oriented merge cannot guarantee.
+    """
+    merged = {}
+    for path in paths:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = text_of(record.get("id")) or observation_fingerprint(record)
+            merged.setdefault(key, record)
+    return list(merged.values())
+
+
 def observation_fingerprint(record):
     """Group observations that say the same thing in different words."""
     basis = (
@@ -2688,6 +2782,44 @@ def observation_fingerprint(record):
         + re.sub(r"[^a-z0-9 ]+", "", text_of(record.get("proposedChange")).lower())[:160]
     )
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def read_community_observations(skill_root=None):
+    """Contributed bundles from the skill checkout.
+
+    Untrusted by construction: these arrived through a pull request from someone
+    else's machine. They may corroborate a local observation across the promotion
+    bar; they can never adopt guidance on their own, and they are always labelled
+    in output so a reviewer can weigh them differently.
+    """
+    base = Path(skill_root) if skill_root else SKILL_ROOT
+    directory = base / "community" / "observations"
+    records = []
+    if not directory.exists():
+        return records
+    for path in sorted(directory.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        for index, record in enumerate(as_list(payload.get("observations"))):
+            if not isinstance(record, dict):
+                continue
+            record["community"] = True
+            # Recompute rather than trust the bundle's own fingerprint. A stale
+            # or hand-edited value would either fail to group with matching local
+            # observations, or group with unrelated ones -- and grouping is what
+            # decides whether something clears the bar.
+            record["fingerprint"] = observation_fingerprint(record)
+            # One contributor may report the same idea from several projects;
+            # keep them distinct so projectCount stays meaningful.
+            contributors = as_list(record.get("projects"))
+            record["project"] = (
+                text_of(contributors[0]) if contributors
+                else "community:" + path.stem + ":" + str(index)
+            )
+            records.append(record)
+    return records
 
 
 def read_observations(store):
@@ -3265,9 +3397,175 @@ def cmd_harvest(args):
     return 0
 
 
+def cmd_store(args):
+    store = global_store_dir(args.store)
+    action = args.action
+
+    if action == "status":
+        records = read_observations(store)
+        projects = {text_of(r.get("project")) for r in records if text_of(r.get("project"))}
+        print("Store: " + str(store))
+        print("Exists: " + ("yes" if store.exists() else "no"))
+        print("Observations: " + str(len(records)) + " across " + str(len(projects)) + " project(s)")
+        if (store / ".git").exists():
+            remote = run_git(store, "remote", "get-url", "origin", check=False)
+            url = remote.stdout.strip() if remote.returncode == 0 else "(none)"
+            head = run_git(store, "log", "-1", "--format=%h %ci", check=False)
+            print("Git remote: " + url)
+            print("Last commit: " + (head.stdout.strip() or "(none)"))
+        else:
+            print("Git: not initialised. Run `store init` to sync across devices.")
+        return 0
+
+    if action == "init":
+        store.mkdir(parents=True, exist_ok=True)
+        observations = store / "observations.jsonl"
+        if not observations.exists():
+            observations.write_text("", encoding="utf-8")
+        if not (store / ".git").exists():
+            run_git(store, "init", "-q")
+            run_git(store, "checkout", "-q", "-B", "main", check=False)
+        # Repo-local identity so merges and commits work without touching the
+        # user's global git config. A merge commit needs this as much as a
+        # regular commit does, which is why it is set once here rather than
+        # passed per-command.
+        run_git(store, "config", "user.name", "adminwright", check=False)
+        run_git(store, "config", "user.email", "adminwright@localhost", check=False)
+        gitignore = store / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text(".lock\nlocks/\n", encoding="utf-8")
+        readme = store / "README.md"
+        if not readme.exists():
+            readme.write_text(
+                "# Adminwright observation store\n\n"
+                "Observations harvested from every project on this machine.\n"
+                "Private by default. Nothing here leaves the machine unless you run\n"
+                "`promote --export` and choose to share the result.\n",
+                encoding="utf-8",
+            )
+        if args.remote:
+            existing = run_git(store, "remote", "get-url", "origin", check=False)
+            if existing.returncode == 0:
+                run_git(store, "remote", "set-url", "origin", args.remote)
+            else:
+                run_git(store, "remote", "add", "origin", args.remote)
+        print("Store ready at " + str(store))
+        if args.remote:
+            print("Remote: " + args.remote)
+            print("Run `store sync` to push. Use a PRIVATE repository: observations quote your code.")
+        else:
+            print("No remote set. Add one with --remote <git-url> to sync across devices.")
+        return 0
+
+    if action == "sync":
+        if not (store / ".git").exists():
+            raise ManifestError("store is not a git repository; run `store init --remote <url>` first")
+        if not run_git(store, "config", "user.email", check=False).stdout.strip():
+            run_git(store, "config", "user.name", "adminwright", check=False)
+            run_git(store, "config", "user.email", "adminwright@localhost", check=False)
+        has_remote = run_git(store, "remote", "get-url", "origin", check=False).returncode == 0
+        run_git(store, "add", "-A")
+        status = run_git(store, "status", "--porcelain", check=False)
+        if status.stdout.strip():
+            message = "observations: " + (text_of(args.date) or "sync")
+            run_git(store, "-c", "user.name=adminwright", "-c",
+                    "user.email=adminwright@localhost", "commit", "-q", "-m", message)
+            print("Committed local observations.")
+        else:
+            print("Nothing new to commit.")
+        if not has_remote:
+            print("No remote configured; nothing to push.")
+            return 0
+        fetched = run_git(store, "fetch", "-q", "origin", check=False)
+        if fetched.returncode != 0:
+            raise ManifestError("could not reach the remote:\n" + fetched.stderr.strip())
+        remote_ref = "origin/" + args.branch
+        exists = run_git(store, "rev-parse", "--verify", "-q", remote_ref, check=False)
+        if exists.returncode == 0:
+            local_path = store / "observations.jsonl"
+            theirs = run_git(store, "show", remote_ref + ":observations.jsonl", check=False)
+            if theirs.returncode == 0:
+                incoming = store / ".incoming.jsonl"
+                incoming.write_text(theirs.stdout, encoding="utf-8")
+                merged = merge_observation_files(local_path, incoming)
+                incoming.unlink()
+                with open(str(local_path), "w", encoding="utf-8") as handle:
+                    for record in merged:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                print("Merged " + str(len(merged)) + " observation(s) by id union.")
+                # Commit the union BEFORE joining histories. git merge rewrites
+                # the working tree from the merge result, so an uncommitted union
+                # is silently discarded -- which loses exactly the remote lines
+                # this step exists to keep.
+                run_git(store, "add", "-A")
+                if run_git(store, "status", "--porcelain", check=False).stdout.strip():
+                    run_git(store, "-c", "user.name=adminwright", "-c",
+                            "user.email=adminwright@localhost", "commit", "-q", "-m",
+                            "merge remote observations")
+            # Join histories with our committed union winning any conflict.
+            # --allow-unrelated-histories is required, not optional: each device
+            # runs `store init` independently, so two stores pointed at the same
+            # remote genuinely have no common ancestor the first time they meet.
+            joined = run_git(
+                store, "merge", "-q", "--no-edit", "--allow-unrelated-histories",
+                "-X", "ours", remote_ref, check=False,
+            )
+            if joined.returncode != 0:
+                run_git(store, "merge", "--abort", check=False)
+                raise ManifestError(
+                    "could not join the remote history:\n"
+                    + (joined.stderr or joined.stdout).strip()
+                    + "\nThe local store is unchanged. Resolve by hand in " + str(store)
+                )
+            # git resolves the file line by line and happily keeps both sides of
+            # a non-conflicting hunk, which duplicates records our id-union had
+            # already collapsed. Normalise the file itself as the last word.
+            local_path = store / "observations.jsonl"
+            deduped = merge_observation_files(local_path)
+            before = local_path.read_text(encoding="utf-8") if local_path.exists() else ""
+            after = "".join(
+                json.dumps(record, ensure_ascii=False) + "\n" for record in deduped
+            )
+            if after != before:
+                local_path.write_text(after, encoding="utf-8")
+                run_git(store, "add", "-A")
+                if run_git(store, "status", "--porcelain", check=False).stdout.strip():
+                    run_git(store, "commit", "-q", "-m", "normalise observations")
+                print("Deduplicated to " + str(len(deduped)) + " observation(s).")
+        pushed = run_git(store, "push", "-q", "origin", "HEAD:" + args.branch, check=False)
+        if pushed.returncode != 0:
+            raise ManifestError("push failed:\n" + (pushed.stderr or pushed.stdout).strip())
+        print("Synced with " + args.branch + ".")
+        return 0
+
+    raise ManifestError("unknown store action: " + str(action))
+
+
+def sanitise_candidate(candidate):
+    """Strip a promotion candidate down to what is safe to publish."""
+    return {
+        "fingerprint": candidate["fingerprint"],
+        "category": candidate["category"],
+        "scope": candidate["scope"],
+        "observation": scrub_text(candidate["observation"]),
+        "proposedChange": scrub_text(candidate["proposedChange"]),
+        "archetypes": sorted({scrub_text(a) for a in candidate["archetypes"] if a}),
+        "stacks": sorted({family for stack in candidate["stacks"] for family in coarsen_stack(stack)}),
+        "projectCount": candidate["projectCount"],
+        "projects": [project_fingerprint(name) for name in candidate["projects"]],
+        # Evidence paths are dropped entirely: they name files in someone's
+        # private repository and prove nothing to a reader who cannot open them.
+    }
+
+
 def cmd_promote(args):
     store = global_store_dir(args.store)
     records = read_observations(store)
+    community_count = 0
+    if getattr(args, "include_community", False):
+        community = read_community_observations(getattr(args, "skill_root", None))
+        community_count = len(community)
+        records = records + community
     if not records:
         print("No observations in " + str(store) + ". Run `harvest` after a build.")
         return 0
@@ -3298,12 +3596,40 @@ def cmd_promote(args):
                     "observation": text_of(items[0].get("observation")),
                     "evidence": sorted({e for item in items for e in as_list(item.get("evidence"))}),
                     "reason": "correction" if immediate else "seen on " + str(len(projects)) + " projects",
+                    "communityEvidence": sum(1 for item in items if item.get("community")),
                 }
             )
     candidates.sort(key=lambda c: (-c["projectCount"], c["scope"]))
 
+    if getattr(args, "export", None):
+        bundle = {
+            "bundleVersion": "1",
+            "generatedFor": "adminwright community observations",
+            "note": "Sanitised. Project names are one-way fingerprints; paths, hosts, "
+                    "emails, URLs and evidence references are removed.",
+            "observations": [sanitise_candidate(c) for c in candidates],
+        }
+        out_path = Path(args.export).resolve()
+        write_text_file(out_path, json.dumps(bundle, indent=2, ensure_ascii=False) + "\n")
+        print("Wrote " + str(len(bundle["observations"])) + " sanitised candidate(s) to " + str(out_path))
+        print()
+        print("READ THE FILE BEFORE SHARING IT.")
+        print("Patterns removed emails, URLs, paths, IP addresses, hostnames, domains,")
+        print("tokens and hashes, replaced project names with one-way fingerprints, and")
+        print("dropped evidence references entirely.")
+        print()
+        print("What no pattern can catch: a company, product, customer or person's name")
+        print("written as an ordinary word. Only you can see those. Read every line.")
+        print()
+        print("To contribute, open a pull request adding this file under")
+        print("community/observations/ in the skill repository. Contribution is opt-in,")
+        print("and anything contributed can be withdrawn by a pull request that deletes it.")
+        return 0
+
     if args.json:
-        print(json.dumps({"store": str(store), "candidates": candidates}, indent=2, ensure_ascii=False))
+        print(json.dumps(
+            {"store": str(store), "communityRecords": community_count, "candidates": candidates},
+            indent=2, ensure_ascii=False))
         return 0
 
     print("# Promotion candidates")
@@ -3311,6 +3637,9 @@ def cmd_promote(args):
     print("Store: " + str(store))
     print("Observations: " + str(len(records)) + " across " + str(len(groups)) + " distinct ideas")
     print("Bar: " + str(args.min_projects) + "+ distinct projects, or category incorrect-guidance")
+    if community_count:
+        print("Community records included: " + str(community_count)
+              + " (corroborating only; they never adopt guidance on their own)")
     print()
     if not candidates:
         print("Nothing clears the bar yet. Keep harvesting.")
@@ -3320,6 +3649,9 @@ def cmd_promote(args):
         print()
         print("- Category: " + candidate["category"])
         print("- Projects: " + ", ".join(candidate["projects"]))
+        if candidate.get("communityEvidence"):
+            print("- Community-sourced records: " + str(candidate["communityEvidence"])
+                  + " (weigh separately; unverified)")
         if candidate["archetypes"]:
             print("- Archetypes: " + ", ".join(candidate["archetypes"]))
         if candidate["stacks"]:
@@ -3565,7 +3897,28 @@ def build_parser():
     promote.add_argument("--store", help="defaults to $ADMINWRIGHT_HOME or ~/.adminwright")
     promote.add_argument("--min-projects", type=int, default=2)
     promote.add_argument("--json", action="store_true")
+    promote.add_argument(
+        "--include-community",
+        action="store_true",
+        help="also weigh contributed observations from community/observations/",
+    )
+    promote.add_argument("--skill-root", help="override where community/ is read from")
+    promote.add_argument(
+        "--export",
+        metavar="FILE",
+        help="write sanitised candidates as a shareable bundle instead of printing",
+    )
     promote.set_defaults(func=cmd_promote)
+
+    store_parser = subparsers.add_parser(
+        "store", help="Manage the cross-project observation store (multi-device sync)"
+    )
+    store_parser.add_argument("action", choices=("init", "sync", "status"))
+    store_parser.add_argument("--store", help="defaults to $ADMINWRIGHT_HOME or ~/.adminwright")
+    store_parser.add_argument("--remote", help="git URL to sync with; use a PRIVATE repository")
+    store_parser.add_argument("--branch", default="main")
+    store_parser.add_argument("--date", help="caller-supplied date; the script never reads the clock")
+    store_parser.set_defaults(func=cmd_store)
 
     lesson_list = lesson_sub.add_parser("list", help="Print the lessons index")
     lesson_list.add_argument("--status", choices=LESSON_STATUSES)
