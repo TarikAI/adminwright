@@ -10,6 +10,13 @@ release-claim, lesson.
 
 Exit codes: 0 ok, 1 findings at error severity, 2 usage or IO failure,
 3 capability claim conflict.
+
+`add` and `set` refuse a write that would introduce new errors, and exit 2 for
+it. That is deliberate: the manifest was not modified, so the caller's request
+could not be carried out -- the same class of outcome as a bad path or malformed
+JSON. Exit 1 is reserved for "the manifest was read and it has findings", which
+is what a caller polling validate needs to distinguish. Pass --allow-invalid to
+write anyway; it reports everything it waved through.
 """
 
 from __future__ import annotations
@@ -245,6 +252,8 @@ RULES = {
     # advisory
     "plan-note": W3,
     "declared-static-unused": W3,
+    "research-source-incomplete": QUALITY,
+    "reviewer-identity": LATE,
     "archetype-coverage": W3,
 }
 
@@ -862,11 +871,20 @@ def static_index(manifest, findings):
         if not target:
             findings.add("required-field-empty", path + ".path", "declaredStatic entry needs the manifest path it covers")
             continue
-        if not text_of(entry.get("reason")) or not text_of(entry.get("approvedBy")):
+        missing = [
+            key
+            for key in ("value", "reason", "approvedBy")
+            if not text_of(entry.get(key))
+        ]
+        if missing:
+            # value matters as much as reason: a registration that does not say
+            # WHAT is static exempts a field from the placeholder scan without
+            # recording what was exempted.
             findings.add(
                 "declared-static-incomplete",
                 path,
-                "declaredStatic entry for '" + target + "' needs both reason and approvedBy to be a valid escape",
+                "declaredStatic entry for '" + target + "' is missing " + ", ".join(missing)
+                + "; an incomplete registration is not a valid escape",
             )
             continue
         allowed.add(target)
@@ -1389,6 +1407,16 @@ def validate_platform(manifest, findings, release):
             findings.add("manifest-type", path, "must be an object")
             continue
         check_nonempty(source, ("topic", "url"), path, findings)
+        # The schema requires appliedTo and the validator did not check it, so a
+        # source could be recorded without saying what it actually informed --
+        # which is the only part that makes it auditable later.
+        if not as_list(source.get("appliedTo")):
+            findings.add(
+                "research-source-incomplete",
+                path + ".appliedTo",
+                "name the capabilities or decisions this source informed; "
+                "an unattributed link is a citation, not evidence of research",
+            )
 
 
 def validate_roles(manifest, findings):
@@ -1506,6 +1534,7 @@ def validate_entities(manifest, findings, release, role_ids):
                     path + ".reviewStatus",
                     "an implemented capability must be reviewed by an agent other than its implementer",
                 )
+            check_reviewer_identity(capability, path, findings)
 
 
 def validate_screens(manifest, findings, release, role_ids):
@@ -1803,6 +1832,34 @@ def validate_agents(manifest, findings):
             findings.add("unknown-capability-reference", path + ".ownsScreens", "unknown screens: " + ", ".join(unknown_screens))
 
 
+def check_reviewer_identity(capability, path, findings):
+    """Verify the reviewer is not the implementer.
+
+    `capability-unreviewed` claimed review was done "by an agent other than its
+    implementer", but nothing recorded who reviewed, so the same agent could set
+    reviewStatus on its own work. reviewedBy makes the claim checkable.
+    """
+    if capability.get("reviewStatus") != "reviewed":
+        return
+    reviewer = text_of(capability.get("reviewedBy"))
+    owner = text_of(capability.get("owner"))
+    if not reviewer:
+        findings.add(
+            "reviewer-identity",
+            path + ".reviewedBy",
+            "reviewStatus is 'reviewed' but no reviewer is recorded; "
+            "an unattributed review cannot be distinguished from self-review",
+        )
+        return
+    if owner and reviewer == owner:
+        findings.add(
+            "reviewer-identity",
+            path + ".reviewedBy",
+            "reviewer '" + reviewer + "' is the implementer; review must be a separate pass "
+            "by a different agent, or an explicitly declared pass that re-reads the code",
+        )
+
+
 def validate_evidence(manifest, findings, project_root):
     """Release-phase file checks for capability, screen, and queue evidence."""
     for path, _entity, capability in iter_capabilities(manifest):
@@ -1833,8 +1890,33 @@ def validate_evidence(manifest, findings, project_root):
                 "the link between manifest and test is unproven",
             )
     for path, screen in iter_named(manifest, "screens"):
-        if screen.get("status") == "implemented":
-            check_evidence_list(screen.get("tests"), path + ".tests", findings, project_root, True)
+        if screen.get("status") != "implemented":
+            continue
+        screen_tests = check_evidence_list(
+            screen.get("tests"), path + ".tests", findings, project_root, True
+        )
+        # Same asymmetry the capability check closes: a screen could cite a real
+        # but unrelated test file forever.
+        if findings.severity_for("evidence-token-match") == OFF:
+            continue
+        screen_tokens = {
+            token
+            for token in (text_of(screen.get("id")), text_of(screen.get("route")))
+            if token
+        }
+        if not screen_tokens or not screen_tests:
+            continue
+        if not any(
+            token.lower() in read_head(candidate).lower()
+            for candidate in screen_tests
+            for token in screen_tokens
+        ):
+            findings.add(
+                "evidence-token-match",
+                path + ".tests",
+                "no listed test file mentions the screen id or its route; "
+                "the link between manifest and test is unproven",
+            )
     for key in ("workQueues", "integrations"):
         for path, item in iter_named(manifest, key):
             if item.get("status") == "implemented":

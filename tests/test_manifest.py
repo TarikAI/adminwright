@@ -212,6 +212,128 @@ class TestPlaceholderScanner(unittest.TestCase):
         self.assertTrue(tokens, "short ids must not silently disable evidence-token matching")
 
 
+class TestSchemaParity(TempProject):
+    """Fields the schema requires but the validator used to ignore."""
+
+    profile = "regulated"
+
+    def test_research_source_without_appliedTo_is_flagged(self):
+        data = self.read()
+        data["platform"]["researchSources"] = [{"topic": "t", "url": "https://example.dev"}]
+        self.write(data)
+        _code, out, _err = self.validate()
+        self.assertIn("research-source-incomplete", out)
+
+    def test_research_source_with_appliedTo_is_accepted(self):
+        data = self.read()
+        data["platform"]["researchSources"] = [
+            {"topic": "t", "url": "https://example.dev", "appliedTo": ["user.list"]}
+        ]
+        self.write(data)
+        _code, out, _err = self.validate()
+        self.assertNotIn("research-source-incomplete", out)
+
+    def test_declared_static_without_value_is_not_a_valid_escape(self):
+        data = self.read()
+        data["declaredStatic"] = [{
+            "id": "s1", "path": "entities[e].sourceOfTruth",
+            "reason": "fixed by contract", "approvedBy": "ops-lead",
+        }]
+        self.write(data)
+        _code, out, _err = self.validate()
+        self.assertIn("declared-static-incomplete", out)
+        self.assertIn("missing value", out)
+
+
+class TestReviewerIdentity(TempProject):
+    """`reviewed` is a claim; reviewedBy is what makes it checkable."""
+
+    profile = "regulated"
+
+    def capability(self, **overrides):
+        capability = {
+            "id": "e.list", "outcome": "Find", "kind": "query", "roles": [],
+            "risk": "low", "status": "implemented", "rationale": "",
+            "entityStates": {"from": ["a"], "to": []}, "uiRoutes": [],
+            "serverOperations": ["R.f"], "authorizationPolicies": ["p"],
+            "auditEvents": [], "safeguards": [], "dataBinding": "pg:e via R.f",
+            "tests": [], "evidence": [], "reviewStatus": "reviewed",
+        }
+        capability.update(overrides)
+        data = self.read()
+        data["entities"] = [{
+            "id": "e", "name": "E", "sourceOfTruth": "pg:e", "sensitivity": "internal",
+            "tenantScoped": False, "lifecycleStates": ["a"], "retention": "1y",
+            "capabilities": [capability],
+        }]
+        self.write(data)
+        return self.validate()
+
+    def test_review_without_a_reviewer_is_flagged(self):
+        _code, out, _err = self.capability(owner="agent-1")
+        self.assertIn("reviewer-identity", out)
+
+    def test_self_review_is_flagged(self):
+        _code, out, _err = self.capability(owner="agent-1", reviewedBy="agent-1")
+        self.assertIn("reviewer-identity", out)
+        self.assertIn("is the implementer", out)
+
+    def test_independent_review_is_accepted(self):
+        _code, out, _err = self.capability(owner="agent-1", reviewedBy="agent-2")
+        self.assertNotIn("reviewer-identity", out)
+
+    def test_reviewer_identity_is_advisory_below_regulated(self):
+        data = self.read()
+        data["entities"] = [{
+            "id": "e", "name": "E", "sourceOfTruth": "pg:e", "sensitivity": "internal",
+            "tenantScoped": False, "lifecycleStates": ["a"], "retention": "1y",
+            "capabilities": [{
+                "id": "e.list", "outcome": "Find", "kind": "query", "roles": [],
+                "risk": "low", "status": "implemented", "rationale": "",
+                "entityStates": {"from": ["a"], "to": []}, "uiRoutes": [],
+                "serverOperations": ["R.f"], "authorizationPolicies": ["p"],
+                "auditEvents": [], "safeguards": [], "dataBinding": "pg:e via R.f",
+                "tests": [], "evidence": [], "owner": "agent-1",
+                "reviewStatus": "reviewed", "reviewedBy": "agent-1",
+            }],
+        }]
+        self.write(data)
+        _code, out, _err = self.validate(profile="standard")
+        for line in out.splitlines():
+            if "reviewer-identity" in line:
+                self.assertTrue(line.startswith("WARN"), "must warn, not error, below regulated")
+
+
+class TestScreenEvidenceTokens(TempProject):
+    """A screen could cite a real but unrelated test file forever."""
+
+    profile = "regulated"
+
+    def screen_with_test(self, body):
+        (self.root / "tests").mkdir(exist_ok=True)
+        (self.root / "tests" / "screen.spec.ts").write_text(body, encoding="utf-8")
+        data = self.read()
+        data["roles"] = [{"id": "ops", "name": "O", "responsibilities": ["r"],
+                          "scopes": ["s"], "mfaRequired": True}]
+        data["screens"] = [{
+            "id": "users", "route": "/admin/users", "purpose": "p", "roles": ["ops"],
+            "dataSources": ["pg:users"], "capabilities": [], "actions": [],
+            "states": ["loading", "populated", "error", "forbidden"],
+            "responsive": True, "accessibilityStatus": "implemented",
+            "status": "implemented", "rationale": "", "tests": ["tests/screen.spec.ts"],
+        }]
+        self.write(data)
+        return self.validate()
+
+    def test_unrelated_test_file_is_flagged(self):
+        _code, out, _err = self.screen_with_test("test('something entirely unrelated', () => {});")
+        self.assertIn("evidence-token-match", out)
+
+    def test_test_mentioning_the_route_is_accepted(self):
+        _code, out, _err = self.screen_with_test("test('/admin/users renders', () => {});")
+        self.assertNotIn("evidence-token-match", out)
+
+
 class TestEvidenceIntegrity(TempProject):
     def test_directory_is_not_evidence(self):
         target = self.root / "evidence-dir"
@@ -447,7 +569,7 @@ class TestHonestTiering(TempProject):
                 "authorizationPolicies": ["policy/user.admin"], "auditEvents": [],
                 "safeguards": [], "dataBinding": "postgres:users via UserRepository.findForAdmin",
                 "tests": ["tests/user.spec.ts"], "evidence": ["evidence/tests.log"],
-                "owner": "impl", "reviewStatus": "reviewed",
+                "owner": "impl", "reviewStatus": "reviewed", "reviewedBy": "qa",
             }],
         }]
         data["screens"] = [{

@@ -214,8 +214,10 @@ python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <projec
 python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report
 ```
 
-Exit 0 is clean, 1 means findings at error severity, 2 a usage or IO failure. Both `validate`
-and `coverage` must exit 0 before any release claim.
+Exit 0 is clean, 1 means findings at error severity, 2 a usage or IO failure, 3 a claim
+conflict. Both `validate` and `coverage` must exit 0 before any release claim. A refused
+`add` or `set` also exits 2 — the manifest was left unmodified, so the request could not be
+carried out; exit 1 always means "read it, and it has findings".
 
 `emit` also produces the working documents the verification pass needs: `authz-matrix`,
 `test-plan`, `seed-plan`, `nav-map`, and `operator-handbook`.
