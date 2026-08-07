@@ -10,6 +10,41 @@ major version or behind a profile.
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-device store sync**: `store init | sync | status` makes the observation store a git
+  repository pointed at a remote you own. Observations merge by id union rather than git's
+  line merge, and the file is normalised after each join so repeated syncs converge.
+- **Opt-in community lane**: `promote --export` writes a sanitised bundle (emails, URLs,
+  paths, addresses, hostnames, domains, tokens and hashes replaced; project names replaced by
+  one-way fingerprints; stacks coarsened; evidence references dropped).
+  `promote --include-community` lets contributed records corroborate across the promotion
+  bar. Contributions arrive by pull request under `community/observations/`, so review is the
+  trust gate, and their fingerprints are recomputed on load rather than trusted.
+- **`PRIVACY.md`** stating what the store holds and what leaves the machine, which is nothing
+  unless you export and choose to share it.
+- A weekly workflow that surfaces promotion candidates in a standing issue. It never adopts.
+- **Golden-fixture evals** (`evals/`) run in CI: one truthful platform that must pass at every
+  profile, one with deliberate defects that must each be caught.
+- `reviewedBy` on capabilities, checked against `owner` at `regulated`, so "reviewed by
+  someone other than the implementer" is verifiable rather than asserted.
+- Enforcement of `platform.researchSources[].appliedTo` and `declaredStatic[].value`.
+- Evidence-token matching extended from capability tests to screen tests at `regulated`.
+
+### Changed
+
+- **Relicensed to Apache-2.0** from MIT, for the explicit patent grant and the explicit
+  refusal to grant trademark rights. Adds `NOTICE` and SPDX headers.
+- `gaps[]` now excuses an unreachable lifecycle state as well as an unobservable one. A state
+  entered only by an external system — a payment webhook — can be explained rather than only
+  suppressed.
+- Exit-code semantics for a refused `add`/`set` documented in the script and `SKILL.md`.
+
+### Fixed
+
+- Removed a dead `if False else None` expression in the lifecycle-transition loop.
+
+
 ## [2.0.0] - 2026-08-07
 
 First public release, under the name Adminwright.
