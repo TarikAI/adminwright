@@ -183,9 +183,29 @@ break admin consoles in each.
 
 ## Install
 
+### Claude Code (recommended — stays up to date)
+
+This repository is also a Claude Code plugin marketplace. Installing it this way makes the
+skill available in every project on the machine, and Claude Code refreshes it in the
+background as new commits land here:
+
+```bash
+claude plugin marketplace add TarikAI/adminwright
+```
+
+```bash
+claude plugin install adminwright@tarikai
+```
+
+Then invoke it with `/adminwright:adminwright`, or just describe the admin work and let the
+model reach for it. To force a refresh instead of waiting for the background one, run
+`claude plugin marketplace update tarikai` followed by `claude plugin update adminwright`.
+
+### Every other harness
+
 | Harness | Where |
 |---|---|
-| Claude Code / claude.ai | `~/.claude/skills/adminwright/` or the project's `.claude/skills/` |
+| Claude Code / claude.ai (manual copy) | `~/.claude/skills/adminwright/` or the project's `.claude/skills/` |
 | OpenAI Codex | `.agents/skills/adminwright/`, referenced from `AGENTS.md` |
 | Cursor | anywhere in the project; point a rule at `SKILL.md` |
 | Gemini CLI | anywhere in the project; reference `SKILL.md` from `GEMINI.md` |

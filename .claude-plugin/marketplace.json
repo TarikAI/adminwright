@@ -1,0 +1,33 @@
+{
+  "name": "tarikai",
+  "owner": {
+    "name": "TarikAI",
+    "url": "https://github.com/TarikAI"
+  },
+  "metadata": {
+    "description": "Agent Skills by TarikAI. Currently ships Adminwright, which makes any coding agent build a real, verified admin console instead of a decorative one."
+  },
+  "plugins": [
+    {
+      "name": "adminwright",
+      "source": "./",
+      "description": "Build a real admin console, not a mock one. Models the platform's control plane in a manifest, then a validator blocks completion until every screen traces to a real server operation, a server-side policy, an authoritative data source, an audit event, a test, and evidence that resolves on disk.",
+      "author": {
+        "name": "TarikAI",
+        "url": "https://github.com/TarikAI"
+      },
+      "homepage": "https://github.com/TarikAI/adminwright",
+      "license": "Apache-2.0",
+      "keywords": [
+        "admin",
+        "admin-console",
+        "admin-dashboard",
+        "back-office",
+        "internal-tools",
+        "crud",
+        "audit",
+        "rbac"
+      ]
+    }
+  ]
+}

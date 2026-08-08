@@ -1,0 +1,22 @@
+{
+  "name": "adminwright",
+  "description": "Design, build, extend, or audit a complete admin console for any platform, in any stack — backed by a machine-checkable manifest that refuses to call the work done until every screen traces to a real server operation, policy, data source, audit event, test, and evidence file.",
+  "author": {
+    "name": "TarikAI",
+    "url": "https://github.com/TarikAI"
+  },
+  "homepage": "https://github.com/TarikAI/adminwright",
+  "repository": "https://github.com/TarikAI/adminwright",
+  "license": "Apache-2.0",
+  "agents": [],
+  "keywords": [
+    "admin",
+    "admin-console",
+    "admin-dashboard",
+    "back-office",
+    "internal-tools",
+    "crud",
+    "audit",
+    "rbac"
+  ]
+}
