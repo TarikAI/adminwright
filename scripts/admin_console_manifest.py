@@ -337,6 +337,10 @@ ARCHETYPE_ALIASES = {
     "data-platform": "infrastructure", "devtools": "infrastructure",
     "ai": "ai-platform", "ml": "ai-platform", "llm": "ai-platform",
     "agentic": "agent-operated", "autonomous-agents": "agent-operated",
+    # Field-tested: a trading platform typed --archetype financial and the
+    # coverage check silently never ran. Common money words must resolve.
+    "financial": "fintech", "finance": "fintech", "trading": "fintech",
+    "crypto": "fintech", "investing": "fintech",
 }
 
 
@@ -2921,6 +2925,16 @@ def cmd_init(args):
     manifest["profile"] = args.profile
     manifest["platform"]["name"] = args.name
     manifest["platform"]["archetypes"] = list(dict.fromkeys(args.archetype or []))
+    # An unrecognised archetype silently disables coverage checking, and the
+    # first field tests proved nobody notices. Warn at the moment of typing,
+    # when the fix costs one word.
+    for raw in manifest["platform"]["archetypes"]:
+        if resolve_archetype(raw) is None:
+            stderr(
+                "WARN: archetype '" + str(raw) + "' is not a recognised key; "
+                "archetype-coverage checking will skip it. Known keys: "
+                + ", ".join(sorted(ARCHETYPE_DOMAINS))
+            )
     stack = manifest["platform"].setdefault("stack", {})
     for key, value in (
         ("frontend", args.stack_frontend),

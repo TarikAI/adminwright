@@ -42,11 +42,20 @@ recover safely, and produce evidence of who changed what.
 - **Build:** create a new admin console or a major module end to end.
 - **Extend:** add capabilities while preserving established policies and component vocabulary.
 - **Audit:** compare an existing console with the domain and implementation, then report
-  gaps. Do not modify unless asked.
+  gaps. Do not modify the product's code — but the audit itself must leave durable
+  artifacts, not only a chat report. Initialize the manifest if absent, model what you
+  found at status `discovered`, record every gap in `gaps[]` and every observation about
+  this skill in `feedback[]`, and write the report to a file:
+  `emit --format gap-report --out docs/admin-gap-report.md`. A chat report evaporates with
+  the session; the manifest is what lets the next agent repair instead of re-audit.
 - **Repair:** implement verified audit findings and update evidence.
 
 State the mode in your worklog. If the request includes implementation, continue through
 verification without stopping after planning.
+
+Every mode ends the same way: `harvest` the manifest's `feedback[]` into the store. The
+first field tests of this skill ran two audits and a build across seven projects and
+harvested nothing — the learning loop cannot start from observations nobody recorded.
 
 ## Select the profile
 

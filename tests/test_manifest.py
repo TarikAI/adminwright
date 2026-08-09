@@ -212,6 +212,36 @@ class TestPlaceholderScanner(unittest.TestCase):
         self.assertTrue(tokens, "short ids must not silently disable evidence-token matching")
 
 
+class TestArchetypeResolution(unittest.TestCase):
+    """Field-tested: a trading platform typed --archetype financial and the
+    coverage check silently never ran."""
+
+    def test_common_money_words_resolve_to_fintech(self):
+        for word in ("financial", "finance", "trading", "crypto", "banking"):
+            self.assertEqual(acm.resolve_archetype(word), "fintech", word)
+
+    def test_unknown_archetype_resolves_to_none(self):
+        self.assertIsNone(acm.resolve_archetype("underwater-basket-weaving"))
+
+
+class TestInitArchetypeWarning(unittest.TestCase):
+    def test_unrecognised_archetype_warns_at_init(self):
+        tmp = Path(tempfile.mkdtemp(prefix="adminwright-arch-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _code, _out, err = run("init", "--project-root", tmp, "--name", "T",
+                               "--archetype", "underwater-basket-weaving")
+        self.assertIn("not a recognised key", err)
+        self.assertIn("fintech", err, "the warning must list the known keys")
+
+    def test_recognised_archetype_does_not_warn(self):
+        tmp = Path(tempfile.mkdtemp(prefix="adminwright-arch-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _code, _out, err = run("init", "--project-root", tmp, "--name", "T",
+                               "--archetype", "financial")
+        self.assertNotIn("not a recognised key", err,
+                         "aliased spellings are recognised, not warned about")
+
+
 class TestSchemaParity(TempProject):
     """Fields the schema requires but the validator used to ignore."""
 

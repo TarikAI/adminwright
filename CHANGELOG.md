@@ -12,6 +12,24 @@ major version or behind a profile.
 
 ### Added
 
+- Packaged as a Claude Code plugin marketplace (`.claude-plugin/`): install once, and every
+  push to `main` propagates automatically because the plugin is versioned by commit SHA
+  rather than a hand-bumped version field.
+- `init` warns when an archetype does not resolve to a known key and lists the known keys.
+  Common money words (`financial`, `finance`, `trading`, `crypto`, `investing`) now alias to
+  `fintech`. From the field: a trading platform typed `--archetype financial` and coverage
+  checking silently never ran (lesson 0003).
+
+### Changed
+
+- Audit mode must leave durable artifacts — initialize the manifest, model findings at
+  `discovered`, record `gaps[]` and `feedback[]`, write the gap report to a file. From the
+  field: two audit sessions produced thorough chat reports and nothing else, so the learning
+  loop never started (lesson 0002).
+
+
+### Added
+
 - **Cross-device store sync**: `store init | sync | status` makes the observation store a git
   repository pointed at a remote you own. Observations merge by id union rather than git's
   line merge, and the file is normalised after each join so repeated syncs converge.

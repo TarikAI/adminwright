@@ -13,3 +13,5 @@ change updates it in the same edit. Field meanings, statuses, and the review pro
 | id | title | category | scope | status | confidence | platforms | date |
 |---|---|---|---|---|---|---|---|
 | [0001](0001-example-lesson.md) | Authorize every target row in a bulk action | incorrect-guidance | references/security-governance.md | adopted | repeated | b2b-saas-multi-tenant; marketplace; next.js+postgres+prisma; laravel+mysql+queues | 2026-03-02 |
+| 0002 | Audit mode must leave durable artifacts | gap | SKILL.md | adopted | high | 2026-08-08 |
+| 0003 | Init must warn on unrecognised archetypes | tooling | scripts/admin_console_manifest.py | adopted | high | 2026-08-08 |
