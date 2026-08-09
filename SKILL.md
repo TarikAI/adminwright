@@ -47,7 +47,10 @@ recover safely, and produce evidence of who changed what.
   found at status `discovered`, record every gap in `gaps[]` and every observation about
   this skill in `feedback[]`, and write the report to a file:
   `emit --format gap-report --out docs/admin-gap-report.md`. A chat report evaporates with
-  the session; the manifest is what lets the next agent repair instead of re-audit.
+  the session; the manifest is what lets the next agent repair instead of re-audit. Build
+  the manifest through `add` and `set`, not by hand-writing JSON — the write guard catches
+  malformed entries at the moment they are cheapest to fix. End the report by naming the
+  next step: repair mode against this manifest, which turns the audit into a build plan.
 - **Repair:** implement verified audit findings and update evidence.
 
 State the mode in your worklog. If the request includes implementation, continue through

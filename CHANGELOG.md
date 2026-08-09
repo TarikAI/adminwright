@@ -12,6 +12,14 @@ major version or behind a profile.
 
 ### Added
 
+- Every `emit` surfaces manifest health: a stderr warning when plan validation finds
+  errors, a health line inside the gap-report document, and a nudge when `feedback[]` is
+  empty. From the field: an audit shipped a gap report while 83 validation errors sat
+  invisible, because `emit` was the only command the session ever ran (lesson 0004).
+- Audit guidance: build the manifest through `add`/`set` rather than hand-written JSON, and
+  end the report by naming repair mode as the next step, so the audit turns into a build
+  plan.
+
 - Packaged as a Claude Code plugin marketplace (`.claude-plugin/`): install once, and every
   push to `main` propagates automatically because the plugin is versioned by commit SHA
   rather than a hand-bumped version field.

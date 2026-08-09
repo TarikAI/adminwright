@@ -3146,7 +3146,32 @@ def cmd_emit(args):
     manifest_path = resolve_manifest_path(args.manifest)
     manifest = load_json(manifest_path)
     profile = active_profile(manifest, None)[0]
+    # Surface manifest health on every emit. Field-tested: an audit session
+    # hand-wrote the manifest, ran only emit, and shipped a gap report while 83
+    # validation errors sat invisible -- emit is where agents actually engage,
+    # so emit is where health has to show. Advisory only; exit code unchanged.
+    health = validate_manifest(manifest, "plan", manifest_path.parent.parent, profile)
+    if health.errors:
+        stderr(
+            "WARN: this manifest has " + str(len(health.errors))
+            + " validation error(s) at plan phase. The report below may rest on "
+            "malformed data. Run `validate --phase plan` for the list."
+        )
+    if not as_list(manifest.get("feedback")):
+        stderr(
+            "note: feedback[] is empty. If this skill misled or slowed you, record it "
+            "(add --kind feedback) and run `harvest` -- that is how the skill learns."
+        )
     text = EMITTERS[args.format](manifest, profile)
+    if args.format == "gap-report" and (health.errors or health.warnings):
+        text = text.replace(
+            "# Gap report\n",
+            "# Gap report\n\nManifest health: " + str(len(health.errors))
+            + " error(s), " + str(len(health.warnings))
+            + " warning(s) at plan validation. A gap report from a manifest that "
+            "does not validate is a sketch, not a record.\n",
+            1,
+        )
     if args.out:
         out_path = Path(args.out).resolve()
         write_text_file(out_path, text)

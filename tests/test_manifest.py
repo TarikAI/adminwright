@@ -212,6 +212,39 @@ class TestPlaceholderScanner(unittest.TestCase):
         self.assertTrue(tokens, "short ids must not silently disable evidence-token matching")
 
 
+class TestEmitHealth(TempProject):
+    """Field-tested: a session hand-wrote the manifest, ran only emit, and
+    shipped a gap report while 83 validation errors sat invisible."""
+
+    def test_emit_warns_when_manifest_has_errors(self):
+        data = self.read()
+        data["gaps"] = [{"id": "g1", "severity": "error", "description": "x",
+                         "status": "open", "rationale": "", "evidence": []}]
+        self.write(data)
+        _code, _out, err = run("emit", "--manifest", self.manifest, "--format", "gap-report")
+        self.assertIn("validation error", err)
+
+    def test_gap_report_carries_a_health_line(self):
+        data = self.read()
+        data["gaps"] = [{"id": "g1", "severity": "error", "description": "x",
+                         "status": "open", "rationale": "", "evidence": []}]
+        self.write(data)
+        _code, out, _err = run("emit", "--manifest", self.manifest, "--format", "gap-report")
+        self.assertIn("Manifest health:", out)
+
+    def test_emit_nudges_when_feedback_is_empty(self):
+        _code, _out, err = run("emit", "--manifest", self.manifest, "--format", "nav-map")
+        self.assertIn("feedback[] is empty", err)
+
+    def test_emit_stays_quiet_on_recorded_feedback(self):
+        data = self.read()
+        data["feedback"] = [{"id": "fb.1", "observation": "o", "category": "gap",
+                             "proposedChange": "c", "evidence": [], "status": "open"}]
+        self.write(data)
+        _code, _out, err = run("emit", "--manifest", self.manifest, "--format", "nav-map")
+        self.assertNotIn("feedback[] is empty", err)
+
+
 class TestArchetypeResolution(unittest.TestCase):
     """Field-tested: a trading platform typed --archetype financial and the
     coverage check silently never ran."""
