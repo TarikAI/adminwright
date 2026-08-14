@@ -317,6 +317,12 @@ ARCHETYPE_DOMAINS = {
                        "token", "quota", "pipeline", "incident", "rollback", "region"),
     "ai-platform": ("model", "prompt", "evaluation", "dataset", "deployment", "inference",
                     "feedback", "safety", "cost", "provider", "version"),
+    # Field-tested: platforms whose product IS managing LLM and third-party APIs
+    # kept receiving consoles with no way to add a key, a base URL, or a user.
+    # The domains here are the controls that were missing every time.
+    "llm-gateway": ("provider", "credential", "api key", "base url", "model", "routing",
+                    "fallback", "rate limit", "quota", "usage", "cost", "rotation",
+                    "invitation", "user"),
     "agent-operated": ("agent", "tool", "scope", "approval", "provenance", "kill switch",
                        "pause", "replay", "spend", "cap"),
 }
@@ -336,6 +342,11 @@ ARCHETYPE_ALIASES = {
     "developer-platform": "infrastructure", "iot": "infrastructure",
     "data-platform": "infrastructure", "devtools": "infrastructure",
     "ai": "ai-platform", "ml": "ai-platform", "llm": "ai-platform",
+    "model-gateway": "llm-gateway", "ai-gateway": "llm-gateway",
+    "inference-gateway": "llm-gateway", "llm-api": "llm-gateway",
+    "llm-apis": "llm-gateway", "api-management": "llm-gateway",
+    "llm-ops": "llm-gateway", "llmops": "llm-gateway",
+    "model-router": "llm-gateway", "llm-proxy": "llm-gateway",
     "agentic": "agent-operated", "autonomous-agents": "agent-operated",
     # Field-tested: a trading platform typed --archetype financial and the
     # coverage check silently never ran. Common money words must resolve.

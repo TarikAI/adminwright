@@ -36,6 +36,7 @@ Run this list against every platform, whatever its domain. Each family that surv
 |---|---|
 | Authentication and session | Privileged roles carry MFA or a stronger factor, sessions expire and can be revoked, recovery is as strong as sign-in, and active sessions are visible |
 | Roles, permissions, scoped access | Every action is authorized server-side against subject, resource, action, scope, and conditions; scope covers tenant, region, environment, and data class |
+| User and member management | Operators can invite, create, edit, deactivate, and delete users through real server operations; assign and revoke roles; reset credentials and MFA; revoke sessions; and see each user's status and history. A read-only user list is not user management |
 | Global search | Operators can find a record by the identifier they actually hold (email, order number, external reference), with policy applied to results |
 | Lists, filters, sorting, pagination | Dense tables over real queries with server-side filtering, sorting, stable pagination or virtualization, and column choices matched to the operator's decision |
 | Detail views | Current state, key facts, related records, history, notes, and the permitted actions on one screen |
@@ -75,6 +76,7 @@ Fast lookup. The archetype sections below carry the risks and exception paths.
 | Fintech | KYC/KYB, accounts, limits, ledger, transactions, reversals, disputes, holds, maker-checker approval, sanctions and AML cases | Financial services and fintech |
 | Infrastructure and developer platform | Projects, environments, resources, deployments, credentials, quotas, metering, pipelines, logs, alerts, rollback | Infrastructure, IoT, developer, and data platforms |
 | AI platform | Models, versions, prompts and configuration, datasets, evaluations, cost and latency, safety events, human review, output traceability | AI-enabled platforms |
+| LLM gateway / AI API management | Provider registry, credential vault, model catalog and aliases, routing and fallback, platform-issued API keys, usage and cost metering, rate limits, external API connections | LLM gateways and API management platforms |
 | Agent-operated platform | Agent registry, granted scopes, per-agent audit identity, approval queues, spend and rate caps, kill switches, replay and rollback | Agent-operated and AI-acting platforms |
 
 Products combine types. A logistics platform sold to enterprises needs the SaaS row and the logistics row. Record every match in `platform.archetypes[]` and derive capabilities from all of them.
@@ -190,6 +192,67 @@ Expected domains:
 - Rollback, provider outage handling, rate/limit controls, and incident investigation
 
 Critical risks: sensitive prompt/output exposure, untraceable decisions, unsafe automation, runaway cost, and silent model/config drift.
+
+### LLM gateways and API management platforms
+
+For platforms whose product is managing model providers and external APIs — an LLM router,
+an AI gateway, an inference proxy, an integration hub, or any product where "connect your
+API" is the core promise. Field-tested: these platforms kept receiving consoles that showed
+provider names with no way to add a key, no base URL field, no edit or delete, and no user
+management. The controls below are the product; a console missing them controls nothing.
+
+Expected domains:
+
+- Provider registry, model-agnostic by construction: add, edit, disable, and delete any
+  provider — the built-in ones and a custom provider defined by base URL, authentication
+  scheme (bearer, header key, basic, OAuth2 client credentials), custom headers, API
+  version, and timeout. "Model-agnostic" means the operator can register a provider the
+  developers never heard of without a code change; a hard-coded provider list is a gap.
+- Credential vault: create, rotate, revoke, and delete API keys and secrets per provider and
+  per environment. Secrets are write-only after save — encrypted at rest, displayed masked
+  with a last-four hint, never returned in full by any read API, absent from logs, exports,
+  and error messages. Every credential shows owner, creation date, last-used, and validity.
+- Connection health: a test-connection action per provider and per credential that performs
+  a real round trip and reports the actual failure (DNS, auth, quota, model-not-found), plus
+  scheduled health checks surfacing broken credentials before operators discover them
+  mid-request.
+- Model catalog: enumerate models per provider (synced from the provider's API where one
+  exists, manually registered where not), enable and disable per model, aliases and
+  canonical names, capability metadata (context window, modalities, tool support), and
+  pricing per unit for cost attribution.
+- Routing policy: default model, per-tenant or per-key overrides, fallback chains on
+  provider error, and retry budgets — each a versioned, audited configuration the runtime
+  actually reads, not a settings page writing to a store nothing consumes.
+- Platform-issued API keys for this platform's own consumers: issue, scope, rotate, revoke,
+  and expire; per-key rate limits and quotas; per-key usage visibility.
+- Usage and cost metering: requests, tokens, latency, error rate, and spend by provider,
+  model, key, user, and time window — with thresholds and alerts, because runaway spend is
+  this archetype's signature incident.
+- External API connections beyond model providers: the same registry, vault, health-check,
+  and audit treatment for every other API the platform consumes (email, billing, storage,
+  webhooks). If the platform calls it with a secret, the console manages it.
+- User and member management per the common family: invite, create, edit, deactivate,
+  delete, role assignment, and session revocation, with per-user visibility into keys owned
+  and spend incurred.
+
+Critical risks: secret exposure through reads, logs, error messages, or client bundles;
+credentials editable without audit; a revoked key that keeps working because the runtime
+caches it; routing changes that silently redirect traffic to a costlier or weaker model;
+spend without caps; and cross-tenant leakage of keys or usage data.
+
+Rules for this archetype:
+
+- An "add provider" or "add key" capability is not implemented until the full loop works
+  against a real backend: form → validated server operation → encrypted storage → masked
+  display → test connection → rotate → revoke → audit trail. A form that renders but stores
+  nothing is the canonical placeholder defect of this archetype.
+- Key material never appears in `dataBinding` samples, seeds, logs, or evidence files. Test
+  with dedicated dummy credentials and record that in the manifest.
+- Revocation is a server-enforced kill, verified by a negative test that replays the revoked
+  credential and observes rejection — not a status flag.
+- Every mutation of a provider, credential, routing policy, or platform key is a named
+  command with audit; every credential read above masked level (if permitted at all) is a
+  privileged read with audit and reason capture.
 
 ### Agent-operated and AI-acting platforms
 

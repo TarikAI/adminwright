@@ -256,6 +256,19 @@ class TestArchetypeResolution(unittest.TestCase):
     def test_unknown_archetype_resolves_to_none(self):
         self.assertIsNone(acm.resolve_archetype("underwater-basket-weaving"))
 
+    def test_llm_gateway_spellings_resolve(self):
+        # Field-tested: API-management platforms kept receiving consoles with no
+        # way to add a key, a base URL, or a user. The archetype must catch every
+        # plausible spelling so its coverage check actually runs.
+        for word in ("llm-gateway", "model-gateway", "ai-gateway", "llm-api",
+                     "api-management", "llmops", "model-router", "llm-proxy"):
+            self.assertEqual(acm.resolve_archetype(word), "llm-gateway", word)
+
+    def test_llm_gateway_domains_include_the_missing_controls(self):
+        domains = acm.ARCHETYPE_DOMAINS["llm-gateway"]
+        for control in ("api key", "base url", "credential", "provider", "user"):
+            self.assertIn(control, domains, control)
+
 
 class TestInitArchetypeWarning(unittest.TestCase):
     def test_unrecognised_archetype_warns_at_init(self):

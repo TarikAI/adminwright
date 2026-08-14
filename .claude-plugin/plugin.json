@@ -1,6 +1,6 @@
 {
   "name": "adminwright",
-  "description": "Design, build, extend, or audit a complete admin console for any platform, in any stack — backed by a machine-checkable manifest that refuses to call the work done until every screen traces to a real server operation, policy, data source, audit event, test, and evidence file.",
+  "description": "Design, build, extend, or audit a complete admin console for any platform, in any stack — backed by a machine-checkable manifest that refuses to call the work done until every screen traces to a real server operation, policy, data source, audit event, test, and evidence file. Ships six role agents (architect, implementer, ux-reviewer, qa, security, harvester) that coordinate through the manifest, install into any harness, and learn from every run.",
   "author": {
     "name": "TarikAI",
     "url": "https://github.com/TarikAI"
@@ -8,7 +8,14 @@
   "homepage": "https://github.com/TarikAI/adminwright",
   "repository": "https://github.com/TarikAI/adminwright",
   "license": "Apache-2.0",
-  "agents": [],
+  "agents": [
+    "./agents/adminwright-architect.md",
+    "./agents/adminwright-implementer.md",
+    "./agents/adminwright-ux-reviewer.md",
+    "./agents/adminwright-qa.md",
+    "./agents/adminwright-security.md",
+    "./agents/adminwright-harvester.md"
+  ],
   "keywords": [
     "admin",
     "admin-console",

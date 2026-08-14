@@ -1,6 +1,6 @@
 ---
 name: adminwright
-description: Design, build, extend, or audit a complete admin console, admin dashboard, admin panel, back office, internal tool, control panel, ops console, superadmin area, or CRUD dashboard for any platform, in any stack. Use when an agent must infer the platform's administrative capabilities from its domain, repository, data model, APIs, roles, lifecycles, integrations, and risks; implement real end-to-end control surfaces backed by live data and authorized server operations rather than decorative dashboards or mock screens; coordinate several agents building one console; or verify that an existing admin system is connected, secure, auditable, accessible, resilient, and operationally complete.
+description: Design, build, extend, or audit a complete admin console, admin dashboard, admin panel, back office, internal tool, control panel, ops console, superadmin area, or CRUD dashboard for any platform, in any stack. Use when an agent must infer the platform's administrative capabilities from its domain, repository, data model, APIs, roles, lifecycles, integrations, and risks; implement real end-to-end control surfaces backed by live data and authorized server operations rather than decorative dashboards or mock screens; coordinate several agents building one console; or verify that an existing admin system is connected, secure, auditable, accessible, resilient, and operationally complete. Ships six dispatchable role agents — architect, implementer, ux-reviewer, qa, security, and a harvester that learns from every run — installable into any harness (Claude Code, Codex, opencode, Antigravity, Gemini CLI, Cursor, Pi) via scripts/install_agents.py.
 ---
 
 # Adminwright
@@ -271,12 +271,24 @@ python <skill-dir>/scripts/admin_console_manifest.py lesson add --title "<rule>"
 
 Adoption is a judgement call about guidance others will follow literally. Run it with a
 capable model and a fresh read of the reference, not as an afterthought at the end of a long
-session.
+session. In a harness with subagent support, dispatch `adminwright-harvester` for this phase
+and pass it a short digest of the session's conversation — corrections the user made,
+guidance that proved wrong, phases that were skipped — so learning that lives only in chat
+history is banked before it evaporates.
 
 ## Working with other agents
 
 Load [multi-agent.md](references/multi-agent.md) when more than one agent will touch this
 console, and when a single agent runs the roles in sequence.
+
+Six agents ship with the skill — one per role plus a learning pass:
+`adminwright-architect`, `adminwright-implementer`, `adminwright-ux-reviewer`,
+`adminwright-qa`, `adminwright-security`, `adminwright-harvester`
+([agents/README.md](agents/README.md) has the dispatch order). Each carries its role
+contract and needs no conversation history. In a harness with subagent support, dispatch
+them; in any other harness, install them with
+`python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <root>` and
+run the passes sequentially with distinct agent ids.
 
 Coordination happens through the manifest and lock files, never through conversation
 history. Claim before you build:

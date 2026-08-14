@@ -101,6 +101,20 @@ Five roles with defined boundaries: `architect`, `implementer`, `ux-reviewer`, `
 reviewed.** A single agent runs the roles in sequence, re-reading the code rather than
 recalling it.
 
+The roles ship as ready-to-dispatch agents in [`agents/`](agents/) — the five above plus
+`adminwright-harvester`, the learning pass that runs last on every mode. Claude Code loads
+them from the plugin automatically; one command installs them into any other harness:
+
+```bash
+python scripts/install_agents.py --harness antigravity --project-root /path/to/project --append-pointer
+```
+
+Supported: `claude-code`, `opencode`, `codex`, `antigravity`, `gemini`, `cursor`, `pi`,
+`generic`. The installer bakes the skill path into each prompt, writes the files where that
+harness discovers agents, and adds harness-specific dispatch guidance — for Antigravity, for
+example, that a user-supplied plan is the plan of record and must not be replaced by a
+freshly generated one. See [agents/README.md](agents/README.md) for the dispatch order.
+
 ## It learns across your projects
 
 Most skills are static. This one accumulates.
@@ -140,6 +154,14 @@ Adoption is a judgement call and should be made by a capable model, not a cheap 
 [references/skill-evolution.md](references/skill-evolution.md) for the promotion bar,
 the never-promote list, and the "was it the skill or was it me?" test.
 
+The `adminwright-harvester` agent automates the whole loop as the final pass of every run:
+it sweeps the manifest, the worklogs, *and the session's conversation* for observations,
+banks them, and — when the bar clears — edits the skill's references **and the agent
+prompts themselves**. The agents are part of the write surface on purpose: a pass that
+keeps skipping a step or a harness that fights the workflow is a defect in the role prompt,
+and fixing it there is how the agents get better with every project instead of repeating
+the same friction.
+
 ## Commands
 
 ```
@@ -163,6 +185,8 @@ permission matrix and the test plan are *generated*, not written by hand.
 
 ```
 SKILL.md                    the spine — phase-gated, routes to everything
+agents/                     six dispatchable role agents (architect, implementer,
+                            ux-reviewer, qa, security, harvester) + cross-harness docs
 references/                 14 files: discovery, archetypes, architecture, security,
                             experience, verification, build order, stack adapters,
                             buy-vs-build, data model, multi-agent, test data, evolution
@@ -170,8 +194,8 @@ assets/admin-core-schema/   audit log, RBAC with scopes, impersonation, approval
                             jobs, exports, DSARs — Postgres + Prisma, Drizzle, Django,
                             Laravel, Rails
 assets/agent-contract.template.md   drop into your repo as AGENTS.md / CLAUDE.md
-scripts/                    the validator (stdlib only)
-tests/                      47 regression tests, every one from a real defect
+scripts/                    the validator + the agent installer (stdlib only)
+tests/                      regression tests, every one from a real defect
 evals/                      golden fixtures pinning validator behaviour in CI
 lessons/                    durable lessons, version-controlled and shared
 ```
@@ -203,13 +227,21 @@ model reach for it. To force a refresh instead of waiting for the background one
 
 ### Every other harness
 
-| Harness | Where |
-|---|---|
-| Claude Code / claude.ai (manual copy) | `~/.claude/skills/adminwright/` or the project's `.claude/skills/` |
-| OpenAI Codex | `.agents/skills/adminwright/`, referenced from `AGENTS.md` |
-| Cursor | anywhere in the project; point a rule at `SKILL.md` |
-| Gemini CLI | anywhere in the project; reference `SKILL.md` from `GEMINI.md` |
-| Anything else | point the agent at `SKILL.md` |
+Copy or clone this repository anywhere, then install the agents into your project:
+
+```bash
+python /path/to/adminwright/scripts/install_agents.py --harness <name> --project-root . --append-pointer
+```
+
+| Harness | Skill entry point | Agents land in |
+|---|---|---|
+| Claude Code / claude.ai (manual copy) | `~/.claude/skills/adminwright/` or the project's `.claude/skills/` | `.claude/agents/` |
+| opencode | point the agent at `SKILL.md` | `.opencode/agent/` (as subagents) |
+| OpenAI Codex | `.agents/skills/adminwright/`, referenced from `AGENTS.md` | `.adminwright/agents/` + `AGENTS.md` block |
+| Google Antigravity | reference `SKILL.md` from `AGENTS.md` | `.adminwright/agents/` + `AGENTS.md` block |
+| Gemini CLI | reference `SKILL.md` from `GEMINI.md` | `.adminwright/agents/` + `GEMINI.md` block |
+| Cursor | point a rule at `SKILL.md` | `.adminwright/agents/` + `.cursorrules` block |
+| Pi, anything else | point the agent at `SKILL.md` | `.adminwright/agents/` (harness `pi` or `generic`) |
 
 Nothing here is vendor-specific. See [agents/README.md](agents/README.md).
 

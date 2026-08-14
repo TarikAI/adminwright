@@ -12,6 +12,46 @@ major version or behind a profile.
 
 ### Added
 
+- Six shipped subagents — one per coordination role (`adminwright-architect`,
+  `adminwright-implementer`, `adminwright-ux-reviewer`, `adminwright-qa`,
+  `adminwright-security`) plus `adminwright-harvester`, a learning pass that runs last on
+  every mode, sweeps the manifest, worklogs, and a session-conversation digest for
+  observations, and drives `harvest`/`promote`/`lesson add` so the skill improves from
+  every run. Registered in the plugin manifest and documented in `agents/README.md`. Each
+  agent file carries its role's entry and exit conditions, manifest protocol, boundaries,
+  and handoff format, so a harness can dispatch a pass with no conversation history and the
+  independence rule stays machine-checkable.
+- `scripts/install_agents.py`: install the agents into any harness — Claude Code
+  (non-plugin), opencode, Codex, Antigravity, Gemini CLI, Cursor, Pi, or generic. Resolves
+  the skill path, replaces `${CLAUDE_PLUGIN_ROOT}` in the prompts, writes to the harness's
+  agent directory, and emits (or idempotently appends) a pointer block for `AGENTS.md`-style
+  instruction files. Stdlib only, with regression tests.
+- `llm-gateway` archetype, in the catalog and the coverage checker, with aliases
+  (`model-gateway`, `ai-gateway`, `llm-api`, `api-management`, `llmops`, `model-router`,
+  `llm-proxy`). From the field: platforms whose product is managing LLM and third-party
+  APIs kept receiving consoles with provider names but no way to add an API key, no base
+  URL, no edit/delete, and no user management. The archetype's expected domains — provider
+  registry, credential vault, model catalog, routing, platform-issued keys, usage and cost,
+  user management — now make those absences a named coverage finding, and the catalog
+  section spells out what "add a provider" must mean end to end.
+- "User and member management" added to the catalog's common feature families: invite,
+  create, edit, deactivate, delete, role assignment, credential reset, and session
+  revocation through real server operations. A read-only user list is not user management.
+- Harness-specific dispatch notes in the installer's pointer block, and a plan-of-record
+  rule in the architect and implementer prompts. From the field: Antigravity drafted a
+  fresh implementation plan even when the user supplied one — a supplied plan is now
+  explicitly the plan of record, mirrored verbatim into any harness-required plan artifact
+  rather than regenerated. Sequential harnesses (Codex, Gemini, Cursor, Pi) get pass-switch
+  announcement rules.
+- Human-first final reports: every agent now leads its final message with one
+  plain-language paragraph (what operators can now do, what was found, whether the console
+  is safe), before the evidence lists; the pointer block closes every run with the skill's
+  completion-report format and its exit codes.
+- The agents are now part of the learning loop's write surface: the harvester scopes
+  lessons to `agents/adminwright-<role>.md` when the defect is in a role prompt, edits the
+  agent file, and flags installed copies as stale until `install_agents.py` is rerun — so
+  the agents themselves improve across projects, not just the references.
+
 - Every `emit` surfaces manifest health: a stderr warning when plan validation finds
   errors, a health line inside the gap-report document, and a nudge when `feedback[]` is
   empty. From the field: an audit shipped a gap report while 83 validation errors sat

@@ -11,7 +11,7 @@
     {
       "name": "adminwright",
       "source": "./",
-      "description": "Build a real admin console, not a mock one. Models the platform's control plane in a manifest, then a validator blocks completion until every screen traces to a real server operation, a server-side policy, an authoritative data source, an audit event, a test, and evidence that resolves on disk.",
+      "description": "Build a real admin console, not a mock one. Models the platform's control plane in a manifest, then a validator blocks completion until every screen traces to a real server operation, a server-side policy, an authoritative data source, an audit event, a test, and evidence that resolves on disk. Includes six dispatchable role agents that install into any harness and learn from every run.",
       "author": {
         "name": "TarikAI",
         "url": "https://github.com/TarikAI"
