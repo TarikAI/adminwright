@@ -81,6 +81,27 @@ If you find a way to make a mock-backed manifest validate cleanly, that is the h
 bug report this project can receive. Open an issue with the exact manifest and command that
 reproduces it. See [SECURITY.md](SECURITY.md) for anything you would rather not post publicly.
 
+## Advisory OCR review
+
+Pull requests get a non-blocking code review from
+[Alibaba Open Code Review](https://github.com/alibaba/open-code-review) via
+[ocr-advisory.yml](.github/workflows/ocr-advisory.yml). It posts findings as PR comments
+and never gates a merge; no step in it is a required check. The job is skipped entirely
+until the repository secrets exist:
+
+- `OCR_LLM_URL` — an OpenAI-compatible endpoint URL (or an Anthropic one, with the repo
+  variable `OCR_USE_ANTHROPIC=true`)
+- `OCR_LLM_TOKEN` — the endpoint's auth token
+- `OCR_LLM_MODEL` (repository variable, optional) — defaults to `agnes-2.0-flash`
+
+The run uses [assets/adminwright-ocr-rules.json](assets/adminwright-ocr-rules.json), the
+same rule file `scripts/code_review.py` applies locally — findings are advisory judgments
+with guaranteed file coverage, never a substitute for the test suite or the release gates.
+
+To review locally the same way: install the CLI
+(`npm install -g @alibaba-group/open-code-review`), configure it
+(`ocr config provider`, `ocr config model`), then run `ocr review` from the repo root.
+
 ## Pull requests
 
 - One concern per pull request.

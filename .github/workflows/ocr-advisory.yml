@@ -1,0 +1,42 @@
+name: OCR advisory review
+
+# Non-blocking advisory code review of pull requests with Alibaba Open Code
+# Review (https://github.com/alibaba/open-code-review). Posts findings as PR
+# comments only; it never gates a merge and no step here is a required check.
+# The review step is skipped until the OCR_LLM_* secrets exist — see
+# CONTRIBUTING.md "Advisory OCR review". The secrets are mapped into job env
+# because a job-level `if` cannot see the secrets context (only github, needs,
+# vars, inputs); a step-level `if` can see env.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ocr-advisory:
+    name: ocr advisory review
+    runs-on: ubuntu-latest
+    env:
+      OCR_LLM_URL: ${{ secrets.OCR_LLM_URL }}
+      OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_TOKEN }}
+    steps:
+      - name: Notice when secrets are absent
+        if: ${{ env.OCR_LLM_URL == '' || env.OCR_LLM_TOKEN == '' }}
+        run: >
+          echo "OCR_LLM_URL/OCR_LLM_TOKEN secrets are not configured;
+          skipping the advisory OCR review."
+
+      - name: Advisory OCR review
+        if: ${{ env.OCR_LLM_URL != '' && env.OCR_LLM_TOKEN != '' }}
+        uses: alibaba/open-code-review@24c2dd0cde63f56b19079ccf128cf88ab523cadf # v1.9.6
+        with:
+          llm_url: ${{ env.OCR_LLM_URL }}
+          llm_auth_token: ${{ env.OCR_LLM_TOKEN }}
+          llm_model: ${{ vars.OCR_LLM_MODEL || 'agnes-2.0-flash' }}
+          llm_use_anthropic: ${{ vars.OCR_USE_ANTHROPIC || 'false' }}
+          rule: assets/adminwright-ocr-rules.json
+          language: English
+          upload_artifacts: 'true'

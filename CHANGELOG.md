@@ -12,6 +12,49 @@ major version or behind a profile.
 
 ### Added
 
+- Optional integrations with two external tools, both soft (absence changes nothing and
+  blocks nothing), documented in `SKILL.md` and the new `INTEGRATIONS.md`:
+  - **DesignArchitect** (UI closure): the architect agent detects it at Phase 4
+    (`DESIGN_ARCHITECT_HOME` or a sibling checkout), feeds the manifest's screens,
+    capabilities, and states to its spec miner, and accepts closure only when
+    `.design-architect/holes.json` is empty and `handoff/coverage.md` reports
+    `holes_remaining: 0`. The downstream contract is affordance coverage — every control
+    resolves to a real destination, every state exists — never the prototype's visual
+    design, which the project's design system overrides. Recorded in
+    `agents/adminwright-architect.md` and `agents/adminwright-implementer.md`.
+  - **Alibaba Open Code Review** (line-anchored review): `scripts/code_review.py` —
+    three subcommands (`diff`, `scan`, `record`), delegate engine by default (no
+    OCR-side API key: OCR selects files and resolves rules, the reviewing agent
+    reviews, and findings persist as `gaps[]` through `add --kind gap` with mandatory
+    file accounting), endpoint engine optional (`ocr review/scan --audience agent
+    --format json`, needs `ocr config provider`). Exit codes follow the skill
+    convention (0 clean, 1 findings, 2 usage/IO; 3 intentionally unused). Ships
+    `assets/adminwright-ocr-rules.json` and 13 regression tests with a faked `ocr` —
+    no network. The security and qa agents carry the pass in "The pass";
+    `references/verification.md` gains "External review pass (optional)". Findings
+    are judgments with guaranteed file coverage — evidence, never a gate replacement.
+- `ocr-advisory.yml`: non-blocking advisory OCR review of pull requests via the official
+  GitHub Action, skipped until `OCR_LLM_URL`/`OCR_LLM_TOKEN` secrets exist, never a
+  required check; documented in `CONTRIBUTING.md` under "Advisory OCR review".
+- Concurrent writes to one manifest are now safe on Windows, which the multi-agent model
+  has always assumed and never tested. Eight concurrent `add` calls lost roughly one in
+  six to two distinct races, both pre-existing:
+  - `write_text_file` staged through a shared `<name>.tmp` and called `os.replace` once.
+    Windows refuses that rename with Access Denied while any other process holds the
+    destination open — an unlocked reader is enough, and the write lock cannot prevent
+    one. The staging file now carries the pid and the rename retries.
+  - `FileLock` retried on `FileExistsError` but treated every other `OSError` as fatal,
+    so a lock attempt landing while the previous holder's unlink was still pending died
+    on `[Errno 13]` instead of waiting. `PermissionError` is now a contention state and
+    retries to the deadline.
+  `code_review.py` also re-reads taken gap ids and retries when a concurrent `record`
+  claims one first, disambiguating retry candidates by pid so contenders cannot converge
+  on the same next id, and says so rather than blaming the payload. Regression tests
+  cover eight-way contention on both scripts; 40 stress trials now pass clean.
+- `code_review.py` keeps the line anchor when a finding's `start_line` arrives as a
+  digit string — the form LLM-authored JSON routinely emits. It was silently dropped,
+  recording `path:?` and discarding the one thing this pass guarantees. Booleans are
+  still not line numbers.
 - Six shipped subagents — one per coordination role (`adminwright-architect`,
   `adminwright-implementer`, `adminwright-ux-reviewer`, `adminwright-qa`,
   `adminwright-security`) plus `adminwright-harvester`, a learning pass that runs last on
@@ -109,6 +152,45 @@ major version or behind a profile.
 ### Fixed
 
 - Removed a dead `if False else None` expression in the lifecycle-transition loop.
+- **OCR bridge: malformed payloads no longer crash with exit 1.** A finding missing its
+  `path`, a findings list holding a bare string, `--findings @missing-file`, and a corrupt
+  `ocr-bundle.json` all raised unhandled exceptions — Python exit 1 with a traceback, which
+  the documented exit-code table defines as "findings recorded", so an automated caller
+  would read the crash as success. All four now surface as `ERROR: …` with exit 2
+  (`scripts/code_review.py`).
+- **`ocr-advisory.yml` failed validation on every pull request.** The job-level `if` read
+  the `secrets` context, which GitHub only allows at step level — every PR got
+  "Unrecognized named-value: 'secrets'" instead of the documented skip. The secrets are now
+  mapped into job `env` and the steps gate on that; the action is pinned to a release SHA
+  (`v1.9.6`) instead of `@main`, matching the SHA-pinning the action applies to its own
+  internals — `OCR_LLM_TOKEN` no longer follows whatever lands on the branch.
+- **`coverage_rate` lied in both directions.** It divided by bundle *entries* while the
+  gate counts unique *paths* — a workspace-mode duplicate (staged deletion + untracked
+  recreation) legitimately satisfied the gate yet printed `coverage_rate=50%`. And nothing
+  checked that a reported path was in the bundle at all — a finding for an invented path
+  was persisted and pushed the rate to `100%`. Coverage now counts unique bundled paths,
+  and findings/skips for paths outside the bundle are refused (exit 2, nothing persisted).
+  The bundle instructions now tell the reviewing agent the same thing.
+- **"Exit 2 leaves the manifest unmodified" is now actually true.** `record` wrote gaps one
+  at a time and raised on the first refusal, so a multi-finding payload could exit 2 with
+  earlier gaps already persisted. Findings are now written as one atomic batch:
+  `admin_console_manifest.py add --json` accepts an array, validated in full before
+  anything is appended (one bad id refuses the whole batch), and `code_review.py` picks
+  collision-free ids up front — which also removes the five-attempt retry budget whose
+  sixth failure ("the manifest refused the gap") explained neither cause nor remedy.
+  A refused `record` can now never duplicate on retry.
+- A `delegate preview` entry without a path is refused loudly instead of silently dropped
+  — a dropped file left the coverage gate satisfied for a file nobody reviewed.
+  `find_findings` prefers lists under known keys (`comments`/`findings`/`results`) so a
+  document echoing rule groups or file lists cannot be mistaken for findings. `--repo` is
+  now placed before the positional file list, where no parser can swallow it as a
+  positional. An unknown severity is still refused (it maps 1:1 onto gap severities); an
+  unknown category degrades to `other` with a visible notice — taxonomy drift in real OCR
+  output should not discard a real finding.
+- A `@unittest.skipUnless` smoke test validates the flags and subcommands the bridge and
+  `INTEGRATIONS.md` rely on (`--audience`, `--format`, `--rule`, `config set`,
+  `rules check`) against a real `ocr` install when one is present; every other test fakes
+  the binary, so nothing else catches a renamed flag.
 
 
 ## [2.0.0] - 2026-08-07

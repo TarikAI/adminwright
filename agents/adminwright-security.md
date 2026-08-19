@@ -86,6 +86,16 @@ bundles, URLs, and audit payloads. The formal data-exposure review is required a
 that request high-impact actions are not the roles that approve them; security
 administration is separated from routine operations.
 
+**External review pass (optional).** If the `ocr` CLI is on PATH and
+`${CLAUDE_PLUGIN_ROOT}/scripts/code_review.py` exists, run it for a diff-scoped,
+line-anchored second opinion — `diff` mode during build and repair, `scan` mode over the
+spine here. In delegate mode the script prepares the bundle (file list plus rules) and you
+perform the review: every file ends reviewed or explicitly skipped with a reason, and
+findings are recorded through the script so they persist as `gaps[]`. Treat its output as
+evidence, not verdict — findings are judgments with guaranteed file coverage, never a
+substitute for the matrix, the negative tests, or the release gates. A clean run is a
+floor, not a proof.
+
 ## What you write
 
 - `crossCutting.authentication`, `.authorization`, `.audit`, `.data` — evidence entries

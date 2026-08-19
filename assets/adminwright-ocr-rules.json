@@ -1,0 +1,61 @@
+{
+  "_comment": "Adminwright review rules for Alibaba Open Code Review. Passed via --rule (code_review.py does this by default). Schema: rules[] with path (glob, first match wins) and rule (reviewer instructions); exclude[] never reviewed. A matching custom rule REPLACES the system language rules for that file, so every rule below starts by asking for the normal language review. Rules instruct the reviewer; deterministic enforcement lives in tests and release gates. Adjust the globs to the project's layout when it differs.",
+  "exclude": [
+    "**/.design-architect/**",
+    "**/.admin-console/**"
+  ],
+  "rules": [
+    {
+      "path": "**/routes/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: every mutation handler enforces server-side authorization with default deny — client-side checks and hidden navigation count for nothing; authorization validates both the action and the object/tenant scope per request; bulk operations authorize per target row and report per-item results; every mutation, and every privileged read where policy requires, emits a tamper-evident audit event with actor, target, time, reason, correlation id, result, and safe before/after values; financial, messaging, provisioning, and integration commands are idempotent; destructive actions require preview, confirmation, reason capture, step-up authentication, or approval proportional to risk; secrets and raw regulated data never appear in logs, errors, URLs, or audit payloads."
+    },
+    {
+      "path": "**/api/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: every mutation handler enforces server-side authorization with default deny — client-side checks and hidden navigation count for nothing; authorization validates both the action and the object/tenant scope per request; bulk operations authorize per target row and report per-item results; every mutation, and every privileged read where policy requires, emits a tamper-evident audit event with actor, target, time, reason, correlation id, result, and safe before/after values; financial, messaging, provisioning, and integration commands are idempotent; destructive actions require preview, confirmation, reason capture, step-up authentication, or approval proportional to risk; secrets and raw regulated data never appear in logs, errors, URLs, or audit payloads."
+    },
+    {
+      "path": "**/handlers/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: every mutation handler enforces server-side authorization with default deny — client-side checks and hidden navigation count for nothing; authorization validates both the action and the object/tenant scope per request; bulk operations authorize per target row and report per-item results; every mutation, and every privileged read where policy requires, emits a tamper-evident audit event with actor, target, time, reason, correlation id, result, and safe before/after values; financial, messaging, provisioning, and integration commands are idempotent; destructive actions require preview, confirmation, reason capture, step-up authentication, or approval proportional to risk; secrets and raw regulated data never appear in logs, errors, URLs, or audit payloads."
+    },
+    {
+      "path": "**/controllers/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: every mutation handler enforces server-side authorization with default deny — client-side checks and hidden navigation count for nothing; authorization validates both the action and the object/tenant scope per request; bulk operations authorize per target row and report per-item results; every mutation, and every privileged read where policy requires, emits a tamper-evident audit event with actor, target, time, reason, correlation id, result, and safe before/after values; financial, messaging, provisioning, and integration commands are idempotent; destructive actions require preview, confirmation, reason capture, step-up authentication, or approval proportional to risk; secrets and raw regulated data never appear in logs, errors, URLs, or audit payloads."
+    },
+    {
+      "path": "**/admin/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: every control resolves to a real, authorized server-side operation — a control with no operation, or an operation with no control surface, is a defect; authorization is enforced on the server with default deny and validates action plus object/tenant scope per request; every mutation emits a tamper-evident audit event with actor, target, time, reason, correlation id, result, and safe before/after values; the surface covers loading, empty, populated, filtered-empty, validation, conflict, error, forbidden, partial/stale, and success states; destructive actions require preview, confirmation, reason capture, step-up authentication, or approval proportional to risk; impersonation is time-boxed, visibly bannered, fully audited, and cannot touch credentials or security settings."
+    },
+    {
+      "path": "**/middleware/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: authorization middleware defaults to deny and validates both the action and the object/tenant scope per request; session and token validation runs on every privileged path; tenant isolation is enforced at the policy layer, not left to query convention; revoked or stale credentials fail within the declared window; audit middleware cannot be bypassed by any route it should cover; security administration is separated from routine operations."
+    },
+    {
+      "path": "**/auth/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: authorization defaults to deny on every path; both action and object/tenant scope are validated per request; role changes and revocations take effect within the declared window — credentials minted before a change must fail; escalation between roles is impossible through any combination of permitted operations; impersonation is time-boxed, visibly bannered, fully audited, and forbidden from credential and security-settings changes."
+    },
+    {
+      "path": "**/authz/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: authorization defaults to deny on every path; both action and object/tenant scope are validated per request; role changes and revocations take effect within the declared window — credentials minted before a change must fail; escalation between roles is impossible through any combination of permitted operations; impersonation is time-boxed, visibly bannered, fully audited, and forbidden from credential and security-settings changes."
+    },
+    {
+      "path": "**/policy/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: authorization defaults to deny on every path; both action and object/tenant scope are validated per request; role changes and revocations take effect within the declared window — credentials minted before a change must fail; escalation between roles is impossible through any combination of permitted operations; impersonation is time-boxed, visibly bannered, fully audited, and forbidden from credential and security-settings changes."
+    },
+    {
+      "path": "**/guards/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: authorization defaults to deny on every path; both action and object/tenant scope are validated per request; role changes and revocations take effect within the declared window — credentials minted before a change must fail; escalation between roles is impossible through any combination of permitted operations; impersonation is time-boxed, visibly bannered, fully audited, and forbidden from credential and security-settings changes."
+    },
+    {
+      "path": "**/*export*.*",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: exports and bulk reads enforce the same per-row tenant and role policy as detail views — widened filters, out-of-scope id lists, and modified scope parameters must not leak rows or fields the detail policy hides; downloads are authorized and audited; PII is redacted in lists, logs, and errors; retention and erasure obligations are honored; secrets never appear in export payloads, URLs, or audit trails."
+    },
+    {
+      "path": "**/*impersonat*.*",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: impersonation is time-boxed and cannot be extended from inside the session; it is visibly bannered to the impersonated context, fully audited with both real actor and effective user, forbidden from credential and security-settings changes, and cannot nest."
+    },
+    {
+      "path": "**/migrations/**",
+      "rule": "Apply your normal thorough review for this file's language and framework first. Then check the admin-console contract: migrations are reversible or explicitly recorded as not; destructive migrations carry a data-loss warning and a backup expectation; no secrets or real customer data in seeds; audit tables stay append-only — no migration edits, truncates, or drops application audit records; tenant-scoping columns survive every schema change that touches tenant data."
+    }
+  ]
+}

@@ -79,7 +79,11 @@ directly, it is the plan of record — record it in `decisions[]` and build from
 6. Add structured logs, metrics, traces, alerts, or reconciliation evidence where
    operationally important.
 7. Build the interface with the **project's existing design system and architecture**. Do not
-   introduce a new component vocabulary or framework without a recorded decision.
+   introduce a new component vocabulary or framework without a recorded decision. When a
+   DesignArchitect run exists for this console, satisfy its affordance-coverage contract:
+   every affordance in `.design-architect/graph.json` for your screens resolves to a real,
+   authorized destination, and every state the graph enumerates exists in the app. Do not
+   imitate the prototype's look — the design system governs.
 8. Cover loading, empty, populated, filtered-empty, validation, conflict, error, forbidden,
    partial/stale, and success states as applicable.
 9. Add unit, integration, authorization (permitted AND forbidden), contract, and browser
@@ -99,6 +103,9 @@ directly, it is the plan of record — record it in `decisions[]` and build from
   fix the paired gap, cycle `status` through `in-progress` back to `implemented`, and return
   `reviewStatus` to `unreviewed` — you may never set `reviewed`, and never clear another
   agent's `contested` yourself.
+- When a DesignArchitect run exists for this console, its affordance-coverage contract binds:
+  no control ships that resolves to no real destination, and no state the graph enumerates
+  is left unbuildable. Its visual design never binds — the project's design system governs.
 - Mutate the manifest only through `add` and `set`. A whole-file rewrite silently destroys
   concurrent work.
 - Do not touch: another agent's claimed capabilities, `crossCutting` evidence sections

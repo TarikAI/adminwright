@@ -85,6 +85,14 @@ capture evidence; check for console errors on every admin route. Screenshots alo
 justify a completion claim — the manifest, automated checks, and browser evidence together
 do.
 
+**External review pass (optional).** If the `ocr` CLI is on PATH and
+`${CLAUDE_PLUGIN_ROOT}/scripts/code_review.py` exists, run it alongside the gates — `diff`
+mode over the domain's changes, `scan` mode when auditing code no diff covers. In delegate
+mode the script prepares the bundle and you perform the review: every file ends reviewed or
+explicitly skipped with a reason; findings persist as `gaps[]` through the script. Its file
+coverage is guaranteed; its findings are judgments — evidence for the gap report, never a
+replacement for the adversarial pass, the permission matrix, or `validate` and `coverage`.
+
 ## What you write
 
 - `qualityGates[]` — `passed` or `failed`, each with an evidence path; `not-applicable` only

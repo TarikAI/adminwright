@@ -16,6 +16,7 @@
 12. What the validator cannot check
 13. Feedback capture
 14. Reporting
+15. External review pass (optional)
 
 ## Evidence-first completion
 
@@ -323,3 +324,47 @@ Report:
 - Feedback recorded and lessons proposed
 
 Avoid a page-by-page screenshot dump. Summarize by operational domain and link to evidence.
+
+## External review pass (optional)
+
+`scripts/code_review.py` bridges Alibaba Open Code Review (OCR) into the manifest when the
+`ocr` CLI is on PATH. It is optional and advisory: absent, blocked, or failing, it changes
+no gate above.
+
+Detection: `ocr` on PATH (or `ADMINWRIGHT_OCR_BIN` pointing at the executable). Two
+engines:
+
+- **delegate** (default) — no OCR-side LLM or API key. The script runs `ocr delegate
+  preview --format json` and `ocr delegate rule --format json <files>` and writes the
+  bundle to `.admin-console/ocr-bundle.json`: mode, refs, every reviewable file keyed by
+  `(path, status)` — workspace mode can list the same path twice — rule groups, and the
+  findings schema. The reviewing agent then reviews each file itself and returns findings
+  through `record`; the script refuses to persist unless every bundled file ends reviewed
+  or explicitly skipped with a reason — and refuses findings for paths outside the bundle.
+  It reports `total_files`, `reviewed_files`, `skipped_files`, `coverage_rate`; a path
+  listed twice in the bundle counts once in coverage, since one review covers both
+  entries.
+- **ocr** (endpoint) — the script runs `ocr review --audience agent --format json`
+  (diff mode) or `ocr scan` (audit mode) itself. Requires prior `ocr config provider` and
+  `ocr config model`; the raw JSON is kept as evidence alongside the gaps it produced.
+
+Modes: `diff` serves Build and Repair (workspace, range, or single commit via
+`--from/--to/--commit`); `scan` serves Audit, reviewing whole files no diff covers.
+
+Each finding uses OCR's comment schema — `path`, `content`, `start_line`, `end_line`,
+`category` (bug, security, performance, maintainability, test, style, documentation,
+other), `severity` (critical, high, medium, low) — and persists as a `gaps[]` entry via
+`add --kind gap`, so it surfaces in `emit --format gap-report` like any other finding.
+Severity must be exact; an unknown category is recorded as `other` with a notice.
+
+Exit codes: 0 clean (or nothing reviewable), 1 findings recorded, 2 usage/IO/validation
+failure — including a refused `add`, which leaves the manifest unmodified (gaps are
+written as one all-or-nothing batch, and malformed payloads exit 2 with an `ERROR:`
+message, never a traceback). Exit 3 is intentionally unused: claim conflicts do not
+apply to this script.
+
+What this pass guarantees and what it does not: file coverage and line anchoring are
+deterministic; the findings themselves are judgments — the delegate engine's from the
+reviewing agent, the endpoint engine's from its configured LLM. They are evidence for the
+gap report, never a replacement for the adversarial pass, the permission matrix, policy
+tests, or `validate` and `coverage`. A clean run is a floor, not a proof.

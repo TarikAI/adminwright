@@ -95,6 +95,20 @@ security administration distinct from routine operations. Every metric must decl
 decision, source, freshness, owner, threshold, and drill-down; remove metrics that support no
 action.
 
+**Close the UI graph (optional).** If DesignArchitect is available — `DESIGN_ARCHITECT_HOME`
+set, or a sibling checkout containing `core/scripts/run_pipeline.py` — use it to prove the
+IA complete before anyone builds. Write the manifest's screens, capabilities, actions, and
+required states to a spec doc its Phase-1 miner reads (it mines BMAD/PRD/OpenAPI/schema/
+README docs from the project; confirm the read locations in that checkout's ARCHITECTURE.md
+— default `docs/design/admin-capabilities.md`), run its pipeline for the admin area, and
+accept closure only when `.design-architect/holes.json` reports nothing unresolved and
+`handoff/coverage.md` reports `holes_remaining: 0`. Record `graph.json`, `holes.json`, and
+`coverage.md` as `evidence[]` on the screens they cover, and the outcome as a decision. The
+contract you hand implementers is affordance coverage — every control resolves to a real
+destination, every enumerated state exists — never the prototype's visual design, which the
+project's design system overrides. If it is not available, design per experience-design.md
+unchanged and record the decision as not-available; absence blocks nothing.
+
 **Record the build order** in `decisions[]`: the walking skeleton first — authentication, the
 role and scope spine, the audit spine, one read-only list on real data, one low-risk command
 end to end — then which entity slices can fan out in parallel and which work must serialize

@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -157,8 +158,102 @@ class TestIncrementalModelling(TempProject):
 
 
 # ---------------------------------------------------------------------------
+# batch add — atomic array appends
+# ---------------------------------------------------------------------------
+
+
+class TestBatchAdd(TempProject):
+    """`add --json` accepts an array; the batch is all-or-nothing.
+
+    code_review.py persists a whole findings payload as one array so that a
+    refused `record` leaves the manifest unmodified — that promise rests here.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.evidence = self.root / "evidence.txt"
+        self.evidence.write_text("x", encoding="utf-8")
+
+    def gap(self, gid):
+        return {
+            "id": gid, "severity": "low", "description": "d", "status": "open",
+            "rationale": "r", "evidence": ["evidence.txt"],
+        }
+
+    def add_raw(self, raw):
+        return run("add", "--manifest", self.manifest, "--kind", "gap", "--json", raw)
+
+    def test_array_add_writes_every_entry(self):
+        code, _out, err = self.add_raw(json.dumps([self.gap("g-one"), self.gap("g-two")]))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            {g["id"] for g in self.read()["gaps"]}, {"g-one", "g-two"}
+        )
+
+    def test_one_duplicate_refuses_the_whole_batch(self):
+        code, _out, err = self.add_raw(json.dumps(self.gap("g-one")))
+        self.assertEqual(code, 0, err)
+        code, _out, err = self.add_raw(json.dumps([self.gap("g-two"), self.gap("g-one")]))
+        self.assertEqual(code, 2)
+        self.assertIn("already exists", err)
+        self.assertEqual(
+            {g["id"] for g in self.read()["gaps"]}, {"g-one"},
+            "a refused batch must not be half-written",
+        )
+
+    def test_duplicate_inside_the_batch_is_refused(self):
+        code, _out, err = self.add_raw(json.dumps([self.gap("g-one"), self.gap("g-one")]))
+        self.assertEqual(code, 2)
+        self.assertIn("twice in this batch", err)
+        self.assertEqual(self.read()["gaps"], [])
+
+    def test_empty_array_is_refused(self):
+        code, _out, err = self.add_raw("[]")
+        self.assertEqual(code, 2)
+        self.assertIn("array", err)
+        self.assertEqual(self.read()["gaps"], [])
+
+
+# ---------------------------------------------------------------------------
 # the no-mock guarantee
 # ---------------------------------------------------------------------------
+
+
+class TestConcurrentWrites(TempProject):
+    """Several agents write one manifest at once — the skill's core promise.
+
+    Two Windows-only failures used to surface here and nowhere else: os.replace
+    refused with Access Denied while an unlocked reader held the manifest, and
+    the lock died on [Errno 13] instead of retrying while the previous holder's
+    unlink was still pending. Eight concurrent adds lost roughly one in six.
+    """
+
+    def add_gap(self, index):
+        gap = {
+            "id": "concurrent-" + str(index), "severity": "low",
+            "description": "d", "status": "open", "rationale": "r", "evidence": [],
+        }
+        return run("add", "--manifest", self.manifest, "--kind", "gap",
+                   "--json", json.dumps(gap))[0]
+
+    def test_eight_concurrent_adds_all_land(self):
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            codes = list(pool.map(self.add_gap, range(8)))
+        self.assertEqual(codes, [0] * 8, "every concurrent add must succeed")
+        ids = {gap["id"] for gap in self.read().get("gaps", [])}
+        self.assertEqual(ids, {"concurrent-" + str(i) for i in range(8)},
+                         "no add may be lost to a write or lock race")
+
+    def test_temp_file_is_process_unique(self):
+        # A shared "<name>.tmp" lets two writers clobber each other's staging.
+        self.add_gap(0)
+        leftovers = list(Path(self.manifest).parent.glob("*.tmp"))
+        self.assertEqual(leftovers, [], "temp files must not survive a write")
+        source = (SKILL_ROOT / "scripts" / "admin_console_manifest.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('str(os.getpid()) + ".tmp"', source,
+                      "the staging file must carry the pid")
 
 
 class TestPlaceholderScanner(unittest.TestCase):

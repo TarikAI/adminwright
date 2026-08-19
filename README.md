@@ -181,10 +181,20 @@ lesson    record and list durable lessons
 `emit` is the quiet workhorse: the manifest already holds role × capability × scope, so the
 permission matrix and the test plan are *generated*, not written by hand.
 
+## Optional integrations
+
+Two external tools plug in without ever becoming prerequisites:
+[DesignArchitect](https://github.com/TarikAI/DesignArchitect) proves the UI complete at
+Phase 4 (closure fixpoint, `holes_remaining: 0` as evidence), and
+[Open Code Review](https://github.com/alibaba/open-code-review) adds a line-anchored
+review pass whose findings persist as `gaps[]` — delegate mode needs no API key. Absent,
+both change nothing. Full setup and usage: [INTEGRATIONS.md](INTEGRATIONS.md).
+
 ## What's in the box
 
 ```
 SKILL.md                    the spine — phase-gated, routes to everything
+INTEGRATIONS.md             optional DesignArchitect + Open Code Review wiring
 agents/                     six dispatchable role agents (architect, implementer,
                             ux-reviewer, qa, security, harvester) + cross-harness docs
 references/                 14 files: discovery, archetypes, architecture, security,
@@ -193,8 +203,10 @@ references/                 14 files: discovery, archetypes, architecture, secur
 assets/admin-core-schema/   audit log, RBAC with scopes, impersonation, approvals,
                             jobs, exports, DSARs — Postgres + Prisma, Drizzle, Django,
                             Laravel, Rails
+assets/adminwright-ocr-rules.json   admin-console review rules for the OCR pass
 assets/agent-contract.template.md   drop into your repo as AGENTS.md / CLAUDE.md
-scripts/                    the validator + the agent installer (stdlib only)
+scripts/                    the validator, the agent installer, and the optional
+                            OCR bridge (stdlib only)
 tests/                      regression tests, every one from a real defect
 evals/                      golden fixtures pinning validator behaviour in CI
 lessons/                    durable lessons, version-controlled and shared

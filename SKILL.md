@@ -231,6 +231,10 @@ conflict. Both `validate` and `coverage` must exit 0 before any release claim. A
 `add` or `set` also exits 2 — the manifest was left unmodified, so the request could not be
 carried out; exit 1 always means "read it, and it has findings".
 
+If the `ocr` CLI is on PATH, an optional external review pass through
+`scripts/code_review.py` (see [Optional integrations](#optional-integrations)) runs
+alongside these gates.
+
 `emit` also produces the working documents the verification pass needs: `authz-matrix`,
 `test-plan`, `seed-plan`, `nav-map`, and `operator-handbook`.
 
@@ -309,6 +313,24 @@ repository, and it is what keeps the next agent from undoing this one's work.
 
 For how this skill installs in each harness, and how to run it in one with no skill support at
 all, see [agents/README.md](agents/README.md).
+
+## Optional integrations
+
+Two tools sharpen the skill when present and change nothing when absent. Neither is a
+prerequisite; record their use or absence in `decisions[]`.
+
+- **DesignArchitect** (UI closure): at Phase 4, if detected — `DESIGN_ARCHITECT_HOME`, or a
+  sibling checkout containing `core/scripts/run_pipeline.py` — derive the UI affordance
+  graph from the manifest and require `.design-architect/holes.json` empty and
+  `handoff/coverage.md` at `holes_remaining: 0` before citing closure as evidence. The
+  contract is affordance coverage, never visual design.
+- **Open Code Review (OCR)** (line-anchored review): at Phase 7 and in audit, if `ocr` is on
+  PATH, `scripts/code_review.py` runs a delegate-mode review — no OCR-side API key; the
+  reviewing agent covers every file in the bundle, findings persist to `gaps[]` and surface
+  in `emit --format gap-report`. Endpoint mode needs `ocr config provider` first. Findings
+  are judgments with guaranteed file coverage — a floor, not a proof.
+- The harvester pass shares its lesson format with DesignArchitect's skill-harvester;
+  cross-referencing between the two stores stays manual for now.
 
 ## Completion report
 

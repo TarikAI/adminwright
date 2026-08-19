@@ -17,6 +17,11 @@ could not be carried out -- the same class of outcome as a bad path or malformed
 JSON. Exit 1 is reserved for "the manifest was read and it has findings", which
 is what a caller polling validate needs to distinguish. Pass --allow-invalid to
 write anyway; it reports everything it waved through.
+
+`add` accepts one JSON object or an array of them. An array is atomic: every
+entry is validated before anything is appended, so one bad id or duplicate
+refuses the whole batch and the manifest is left untouched -- a caller that
+persists several objects in one call can never end up half-written.
 """
 
 from __future__ import annotations
@@ -520,11 +525,34 @@ def load_json(path):
 
 
 def write_text_file(path, text):
+    """Atomic write: a full temp file, then one rename over the target.
+
+    The temp name carries the pid so two writers can never share it, and the
+    rename is retried because Windows refuses os.replace with Access Denied
+    while any other process has the destination open — an unlocked reader
+    (another agent's validate, or an editor) is enough, and the write lock
+    cannot prevent it. Field-tested: eight concurrent records against one
+    manifest lost one to WinError 5.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(str(tmp), "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
-    os.replace(str(tmp), str(path))
+    tmp = path.with_name(path.name + "." + str(os.getpid()) + ".tmp")
+    try:
+        with open(str(tmp), "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        for attempt in range(10):
+            try:
+                os.replace(str(tmp), str(path))
+                return
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def write_json(path, data):
@@ -589,6 +617,19 @@ class FileLock:
                         "Manifest lock is held by another process: " + str(self.path)
                     )
                 time.sleep(0.2)
+                continue
+            except PermissionError as exc:
+                # Windows raises Access Denied, not FileExistsError, while the
+                # previous holder's unlink is still pending — a contention
+                # state, not a permission problem, so retry to the deadline
+                # like any other held lock. Field-tested: eight concurrent
+                # records, one killed outright by [Errno 13] on the lock.
+                if time.time() >= deadline:
+                    raise LockError(
+                        "Cannot create lock " + str(self.path) + " after "
+                        + str(self.timeout) + "s: " + str(exc)
+                    )
+                time.sleep(0.05)
                 continue
             except OSError as exc:
                 raise LockError("Cannot create lock " + str(self.path) + ": " + str(exc))
@@ -2557,7 +2598,7 @@ def merge_defaults(kind, obj):
     return merged
 
 
-def parse_json_argument(raw):
+def parse_json_value(raw):
     text = raw
     if raw.startswith("@"):
         path = Path(raw[1:])
@@ -2568,12 +2609,26 @@ def parse_json_argument(raw):
     elif raw.strip() == "-":
         text = sys.stdin.read()
     try:
-        value = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError as exc:
         raise ManifestError("--json is not valid JSON: " + str(exc))
+
+
+def parse_json_argument(raw):
+    value = parse_json_value(raw)
     if not isinstance(value, dict):
         raise ManifestError("--json must be a JSON object")
     return value
+
+
+def parse_json_entries(raw):
+    """Like parse_json_argument, but one object or an array of objects."""
+    value = parse_json_value(raw)
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+        return value
+    raise ManifestError("--json must be a JSON object or a non-empty array of objects")
 
 
 def new_error_signatures(before, after):
@@ -3194,17 +3249,11 @@ def cmd_emit(args):
 
 def cmd_add(args):
     manifest_path = resolve_manifest_path(args.manifest)
-    payload = parse_json_argument(args.json)
+    entries = [merge_defaults(args.kind, item) for item in parse_json_entries(args.json)]
     kind = args.kind
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
         before = json.loads(json.dumps(manifest))
-        entry = merge_defaults(kind, payload)
-        entry_id = text_of(entry.get("id"))
-        if not entry_id:
-            raise ManifestError("the added " + kind + " needs an id")
-        if not ID_PATTERN.match(entry_id):
-            raise ManifestError("id '" + entry_id + "' must be lowercase alphanumeric with dots or hyphens")
         if kind == "capability":
             if not args.entity:
                 raise ManifestError("--entity is required when adding a capability")
@@ -3216,16 +3265,34 @@ def cmd_add(args):
             if target is None:
                 raise ManifestError("entity '" + args.entity + "' is not in the manifest")
             collection = target.setdefault("capabilities", [])
-            if any(text_of(cap.get("id")) == entry_id for cap in collection if isinstance(cap, dict)):
-                raise ManifestError("capability '" + entry_id + "' already exists on entity '" + args.entity + "'")
+            existing = [
+                text_of(cap.get("id")) for cap in collection if isinstance(cap, dict)
+            ]
+            duplicate_where = " on entity '" + args.entity + "'"
         else:
             key = KIND_TARGETS[kind]
             collection = manifest.setdefault(key, [])
             if not isinstance(collection, list):
                 raise ManifestError("manifest." + key + " is not an array")
-            if any(text_of(item.get("id")) == entry_id for item in collection if isinstance(item, dict)):
-                raise ManifestError(kind + " '" + entry_id + "' already exists")
-        collection.append(entry)
+            existing = [
+                text_of(item.get("id")) for item in collection if isinstance(item, dict)
+            ]
+            duplicate_where = ""
+        # The whole batch is validated before anything is appended, so an array
+        # add is atomic: one bad entry refuses the batch and nothing is written.
+        batch_ids = set()
+        for entry in entries:
+            entry_id = text_of(entry.get("id"))
+            if not entry_id:
+                raise ManifestError("the added " + kind + " needs an id")
+            if not ID_PATTERN.match(entry_id):
+                raise ManifestError("id '" + entry_id + "' must be lowercase alphanumeric with dots or hyphens")
+            if entry_id in existing:
+                raise ManifestError(kind + " '" + entry_id + "' already exists" + duplicate_where)
+            if entry_id in batch_ids:
+                raise ManifestError(kind + " '" + entry_id + "' appears twice in this batch")
+            batch_ids.add(entry_id)
+        collection.extend(entries)
         introduced = new_error_signatures(before, manifest)
         if introduced and not args.allow_invalid:
             stderr("Refusing to write: the new " + kind + " introduces validation errors.")
@@ -3233,7 +3300,8 @@ def cmd_add(args):
                 stderr("  ERROR: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
             return 2
         write_json(manifest_path, manifest)
-    print("Added " + kind + " '" + entry_id + "' to " + str(manifest_path))
+    for entry in entries:
+        print("Added " + kind + " '" + text_of(entry.get("id")) + "' to " + str(manifest_path))
     report_overridden(introduced, args.allow_invalid)
     return 0
 
@@ -3897,7 +3965,7 @@ def build_parser():
     add_parser = subparsers.add_parser("add", help="Append one object to a manifest collection")
     add_parser.add_argument("--manifest", required=True)
     add_parser.add_argument("--kind", required=True, choices=sorted(KIND_TARGETS))
-    add_parser.add_argument("--json", required=True, help="JSON object, @file, or - for stdin")
+    add_parser.add_argument("--json", required=True, help="JSON object, array of objects, @file, or - for stdin")
     add_parser.add_argument("--entity", help="entity id, required when --kind capability")
     add_parser.add_argument("--allow-invalid", action="store_true")
     add_parser.set_defaults(func=cmd_add)
