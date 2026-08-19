@@ -51,6 +51,12 @@ major version or behind a profile.
   claims one first, disambiguating retry candidates by pid so contenders cannot converge
   on the same next id, and says so rather than blaming the payload. Regression tests
   cover eight-way contention on both scripts; 40 stress trials now pass clean.
+- `tests/test_plugin_packaging.py` locks the auto-update contract: the plugin and
+  marketplace files must declare no `version`, because Claude Code resolves a git-sourced
+  plugin's version from the commit SHA only while that field is absent. Adding one pins
+  every install to a hand-bumped string, and a forgotten bump is invisible from this side.
+  The same file checks that every agent the plugin advertises exists and carries
+  frontmatter — a renamed agent installs cleanly and simply goes missing for the user.
 - `code_review.py` keeps the line anchor when a finding's `start_line` arrives as a
   digit string — the form LLM-authored JSON routinely emits. It was silently dropped,
   recording `path:?` and discarding the one thing this pass guarantees. Booleans are
