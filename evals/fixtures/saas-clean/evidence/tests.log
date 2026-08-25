@@ -1,1 +1,3 @@
-command completed, exit 0
+vitest run
+  Test Files  3 passed (3)
+  Tests  6 passed (6)

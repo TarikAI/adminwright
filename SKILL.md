@@ -156,6 +156,14 @@ than arbitrary editing.
 Use the catalog to check domain-obvious modules and apply its completeness test. Document why
 each expected module is included, deferred, or not applicable.
 
+Finish roles and capabilities before adding a single screen. Two field builds modelled
+entities and screens and stopped there, leaving zero roles and zero capabilities: nothing
+traced to a server operation, every screen was decorative by construction, and repair mode
+had no targets to work on. A screen is a view onto capabilities that already exist, so
+`validate --phase plan` is the checkpoint — run it before Phase 4 and treat an entity whose
+lifecycle no command reaches, or a screen with no capability, as an unfinished model rather
+than a design choice.
+
 ## Phase 4: Design the information architecture
 
 Load [experience-design.md](references/experience-design.md).

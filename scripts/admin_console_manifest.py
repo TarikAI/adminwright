@@ -239,6 +239,8 @@ RULES = {
     "gate-evidence-path": QUALITY,
     "evidence-file-empty": QUALITY,
     "evidence-not-resolvable": QUALITY,
+    "test-asserts-nothing": QUALITY,
+    "evidence-uninformative": QUALITY,
     "lifecycle-observable": QUALITY,
     "lifecycle-reachable": QUALITY,
     "role-unused": QUALITY,
@@ -794,6 +796,37 @@ def read_head(candidate):
         return ""
 
 
+# An assertion in any of the languages this skill targets. A test file listed
+# as proof of a capability must actually claim something about it: `test('...',
+# () => {})` compiles, runs, passes, and proves nothing.
+ASSERTION_PATTERN = re.compile(
+    r"assert|expect\s*\(|\.should\b|should\s*\(|\.to(?:be|equal|match|contain|have|throw)"
+    r"|verify\s*\(|xctassert|require\.(?:no)?error|\bok\s*\(|check\s*\(",
+    re.I,
+)
+
+# Evidence that says a thing happened without saying what. A real run leaves
+# counts, names, or routes behind; "command completed, exit 0" is an
+# attestation wearing a log's clothes.
+VAGUE_EVIDENCE_WORDS = re.compile(
+    r"\b(?:completed?|finished|done|passed|pass|ok|success(?:ful)?|recorded|verified"
+    r"|checked|reviewed|tested|no issues|all good|looks good|working)\b",
+    re.I,
+)
+
+
+def has_assertion(body):
+    return bool(ASSERTION_PATTERN.search(body))
+
+
+def is_uninformative(body):
+    """A single short line whose only content is a claim of success."""
+    stripped = body.strip()
+    if not stripped or "\n" in stripped or len(stripped) > 100:
+        return False
+    return bool(VAGUE_EVIDENCE_WORDS.search(stripped))
+
+
 def check_evidence_list(
     values,
     field_path,
@@ -801,8 +834,15 @@ def check_evidence_list(
     project_root,
     required,
     missing_rule="evidence-path-missing",
+    expect_assertions=False,
 ):
-    """Validate one evidence/test list. Returns the resolvable local paths."""
+    """Validate one evidence/test list. Returns the resolvable local paths.
+
+    `expect_assertions` marks a list of test files rather than run output: the
+    file must contain an assertion, because an empty test body satisfies every
+    path-and-content check while proving nothing about the capability it is
+    listed under.
+    """
     resolved = []
     entries = [value for value in as_list(values) if isinstance(value, str)]
     for index, raw in enumerate(entries):
@@ -852,6 +892,24 @@ def check_evidence_list(
                 "placeholder-scan",
                 entry_path,
                 "evidence file contains placeholder text: " + raw.strip(),
+            )
+            continue
+        body = read_head(candidate)
+        if expect_assertions:
+            if not has_assertion(body):
+                findings.add(
+                    "test-asserts-nothing",
+                    entry_path,
+                    "test file contains no assertion: " + raw.strip()
+                    + " — an empty or assertion-free test passes without proving anything",
+                )
+                continue
+        elif is_uninformative(body):
+            findings.add(
+                "evidence-uninformative",
+                entry_path,
+                "evidence states success without stating what ran: " + raw.strip()
+                + " — record the command's real output, with counts, names, or routes",
             )
             continue
         resolved.append(candidate)
@@ -1772,7 +1830,8 @@ def validate_cross_cutting(manifest, findings, release, project_root):
             "record the authorization test files that prove default-deny and scope checks",
         )
     else:
-        check_evidence_list(authorization.get("policyTests"), policy_path, findings, project_root, True)
+        check_evidence_list(authorization.get("policyTests"), policy_path, findings, project_root, True,
+                            expect_assertions=True)
 
     audit = as_dict(cross.get("audit"))
     regulated = bool(as_list(platform.get("regulatedData")))
@@ -1930,7 +1989,8 @@ def validate_evidence(manifest, findings, project_root):
         if capability.get("status") != "implemented":
             continue
         test_paths = check_evidence_list(
-            capability.get("tests"), path + ".tests", findings, project_root, True
+            capability.get("tests"), path + ".tests", findings, project_root, True,
+            expect_assertions=True,
         )
         check_evidence_list(
             capability.get("evidence"), path + ".evidence", findings, project_root, True
@@ -1957,7 +2017,8 @@ def validate_evidence(manifest, findings, project_root):
         if screen.get("status") != "implemented":
             continue
         screen_tests = check_evidence_list(
-            screen.get("tests"), path + ".tests", findings, project_root, True
+            screen.get("tests"), path + ".tests", findings, project_root, True,
+            expect_assertions=True,
         )
         # Same asymmetry the capability check closes: a screen could cite a real
         # but unrelated test file forever.
@@ -1984,7 +2045,8 @@ def validate_evidence(manifest, findings, project_root):
     for key in ("workQueues", "integrations"):
         for path, item in iter_named(manifest, key):
             if item.get("status") == "implemented":
-                check_evidence_list(item.get("tests"), path + ".tests", findings, project_root, True)
+                check_evidence_list(item.get("tests"), path + ".tests", findings, project_root, True,
+                                    expect_assertions=True)
     for path, gap in iter_named(manifest, "gaps"):
         if gap.get("status") == "fixed":
             check_evidence_list(gap.get("evidence"), path + ".evidence", findings, project_root, True)
@@ -2849,8 +2911,90 @@ def merge_observation_files(*paths):
     return list(merged.values())
 
 
+STOPWORDS = frozenset("""
+a an and are as at be been but by for from had has have in into is it its of on or so than
+that the then there these they this to was were will with without would should must can not
+no nor own too very s t just don now
+""".split())
+
+# Two agents describing one problem rarely choose the same words, so exact
+# matching can only ever group a record with itself. Clustering compares the
+# content words of the observation and the proposed change instead.
+SIMILARITY_THRESHOLD = 0.45
+
+
+def content_words(*texts):
+    """Lowercased content words, minus stopwords, digits, and short noise."""
+    words = set()
+    for text in texts:
+        for word in re.findall(r"[a-z][a-z-]{2,}", text_of(text).lower()):
+            word = word.strip("-")
+            if word and word not in STOPWORDS:
+                words.add(word)
+    return words
+
+
+def observation_similarity(left, right):
+    """Overlap coefficient of two observations' content words, 0.0 to 1.0.
+
+    Overlap rather than Jaccard: one agent writes a sentence and another writes
+    a paragraph about the same defect, and Jaccard punishes that difference in
+    length even when the shorter text is wholly contained in the longer.
+    """
+    a = content_words(left.get("observation"), left.get("proposedChange"))
+    b = content_words(right.get("observation"), right.get("proposedChange"))
+    if not a or not b:
+        return 0.0
+    return len(a & b) / float(min(len(a), len(b)))
+
+
+def cluster_observations(records, threshold=SIMILARITY_THRESHOLD):
+    """Group observations that say the same thing in different words.
+
+    Scope and category must match exactly — they are the coordinates of what
+    the rule would change, and a friction note about SKILL.md is not the same
+    finding as a tooling bug in the validator however similar the wording.
+    Within a bucket, greedy single-link clustering on content-word overlap.
+
+    Field-tested: two projects reported "modelled entities and screens but no
+    roles or capabilities" in different words. Exact fingerprint matching filed
+    them as two unrelated ideas, so the two-project promotion bar could never
+    be met and the most-repeated finding in the store stayed invisible.
+    """
+    buckets = {}
+    for record in records:
+        key = (
+            text_of(record.get("scope")).lower().strip(),
+            text_of(record.get("category")).lower().strip(),
+        )
+        buckets.setdefault(key, []).append(record)
+
+    clusters = []
+    for _key, members in sorted(buckets.items()):
+        # Deterministic order so the same store always clusters the same way.
+        members = sorted(
+            members,
+            key=lambda r: (text_of(r.get("date")), text_of(r.get("project")),
+                           text_of(r.get("fingerprint"))),
+        )
+        local = []
+        for record in members:
+            for cluster in local:
+                if any(observation_similarity(record, other) >= threshold for other in cluster):
+                    cluster.append(record)
+                    break
+            else:
+                local.append([record])
+        clusters.extend(local)
+    return clusters
+
+
 def observation_fingerprint(record):
-    """Group observations that say the same thing in different words."""
+    """Stable identity for one observation, used to de-duplicate re-harvests.
+
+    This is exact-match by construction and cannot group differently worded
+    reports of one problem; `cluster_observations` does that.
+    """
     basis = (
         text_of(record.get("scope")).lower().strip()
         + "|"
@@ -3698,9 +3842,15 @@ def cmd_promote(args):
     if not records:
         print("No observations in " + str(store) + ". Run `harvest` after a build.")
         return 0
+    threshold = getattr(args, "similarity", None)
+    if threshold is None:
+        threshold = SIMILARITY_THRESHOLD
     groups = {}
-    for record in records:
-        groups.setdefault(record.get("fingerprint"), []).append(record)
+    for cluster in cluster_observations(records, threshold):
+        # The lowest member fingerprint is a stable cluster id: it does not
+        # change when a third report joins an existing pair.
+        key = min(text_of(item.get("fingerprint")) for item in cluster)
+        groups[key] = cluster
 
     candidates = []
     for fingerprint, items in groups.items():
@@ -4026,6 +4176,13 @@ def build_parser():
     )
     promote.add_argument("--store", help="defaults to $ADMINWRIGHT_HOME or ~/.adminwright")
     promote.add_argument("--min-projects", type=int, default=2)
+    promote.add_argument(
+        "--similarity",
+        type=float,
+        default=SIMILARITY_THRESHOLD,
+        help="content-word overlap needed to treat two observations as one "
+             "finding (0.0-1.0; lower groups more aggressively)",
+    )
     promote.add_argument("--json", action="store_true")
     promote.add_argument(
         "--include-community",

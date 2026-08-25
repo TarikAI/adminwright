@@ -16,3 +16,4 @@ change updates it in the same edit. Field meanings, statuses, and the review pro
 | 0002 | Audit mode must leave durable artifacts | gap | SKILL.md | adopted | high | supabase-mobile; nextjs-ai-saas | 2026-08-08 |
 | 0003 | Init must warn on unrecognised archetypes | tooling | scripts/admin_console_manifest.py | adopted | high | nextjs-fintech | 2026-08-08 |
 | 0004 | Emit must surface manifest health | tooling | scripts/admin_console_manifest.py | adopted | high | nextjs-ai-saas | 2026-08-09 |
+| 0005 | Model roles and capabilities before screens | gap | SKILL.md | adopted | high | nextjs-ai-saas; nextjs-fintech | 2026-08-20 |

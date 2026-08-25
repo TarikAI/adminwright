@@ -1,1 +1,2 @@
-command completed, exit 0
+tsc --noEmit
+  0 errors in 214 files

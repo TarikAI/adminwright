@@ -40,6 +40,65 @@ def scaffold(name, archetype, profile):
     return root
 
 
+# Evidence bodies that name what ran. These fixtures define what "clean" means,
+# so a one-line "command completed, exit 0" here would teach every build that an
+# attestation counts as proof — which is what evidence-uninformative now blocks.
+EVIDENCE_NOTES = {
+    "authentication": (
+        "Session policy review 2026-08-19\n"
+        "- MFA enforced for ops and billing roles (auth/policy.ts:44)\n"
+        "- Idle timeout 15m, absolute 8h; revocation verified on 3 live sessions\n"
+    ),
+    "authorization": (
+        "Role x action x scope matrix exercised for 4 roles, 18 operations.\n"
+        "36 permitted paths allowed; 36 forbidden paths rejected server-side.\n"
+    ),
+    "audit": (
+        "Audit sweep: 18/18 mutations emit actor, target, reason, correlationId\n"
+        "and before/after values. Privileged reads: 4/4 recorded.\n"
+    ),
+    "safety": (
+        "Destructive actions reviewed: each requires reason capture, shows an\n"
+        "impact preview, and has a documented recovery path.\n"
+    ),
+    "data": (
+        "PII review: 6 fields redacted in lists, logs and exports.\n"
+        "No secrets in audit payloads (grep over 2,411 rows).\n"
+    ),
+    "experience": (
+        "Screen states walked in browser: 2 screens x 7 states.\n"
+        "Keyboard path complete; focus returns to trigger after each dialog.\n"
+    ),
+    "observability": (
+        "Structured logs and metrics verified for 2 commands;\n"
+        "alert fires within 60s of a failed job.\n"
+    ),
+}
+
+EVIDENCE_LOGS = {
+    "build": "next build\n  Compiled successfully in 41.2s\n  Route /admin  8.4 kB\n",
+    "typecheck": "tsc --noEmit\n  0 errors in 214 files\n",
+    "lint": "eslint .\n  0 problems (0 errors, 0 warnings) across 214 files\n",
+    "tests": "vitest run\n  Test Files  3 passed (3)\n  Tests  6 passed (6)\n",
+    "browser": (
+        "playwright test\n  6 passed (12.4s)\n"
+        "  loading, populated, filtered-empty, forbidden verified\n"
+    ),
+    "security": (
+        "npm audit --omit=dev\n  found 0 vulnerabilities\n"
+        "semgrep p/owasp-top-ten: 0 findings across 214 files\n"
+    ),
+    "accessibility": (
+        "axe-core scan\n  0 violations (serious: 0, critical: 0),\n"
+        "  47 checks passed across 2 routes\n"
+    ),
+    "performance": (
+        "k6 run admin-list.js\n"
+        "  http_req_duration p95=412ms (budget 800ms), 0 failed requests\n"
+    ),
+}
+
+
 def write(root, rel, body):
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,19 +149,30 @@ def build_saas():
     """A truthful slice. Its whole job is to prove honest work is not blocked."""
     root = scaffold("saas-clean", "b2b-saas", "regulated")
 
-    for name in ("authentication", "authorization", "audit", "safety", "data",
-                 "experience", "observability"):
-        write(root, "evidence/" + name + ".md", "Recorded run output with assertions.\n")
-    for name in ("build", "typecheck", "lint", "tests", "browser", "security",
-                 "accessibility", "performance"):
-        write(root, "evidence/" + name + ".log", "command completed, exit 0\n")
+    for name, body in EVIDENCE_NOTES.items():
+        write(root, "evidence/" + name + ".md", body)
+    for name, body in EVIDENCE_LOGS.items():
+        write(root, "evidence/" + name + ".log", body)
     write(root, "tests/authz.spec.ts",
-          "test('role x action x scope matrix', () => {});\n")
+          "test('role x action x scope matrix', () => {\n"
+          "  expect(can('support', 'tenant.suspend', {tenantId: 't-1'})).toBe(false);\n"
+          "  expect(can('ops', 'tenant.suspend', {tenantId: 't-1'})).toBe(true);\n"
+          "});\n")
     write(root, "tests/tenant.spec.ts",
-          "test('tenant.list and tenant.suspend via /admin/tenants', () => {});\n"
-          "test('/admin/tenants forbids out-of-scope operators', () => {});\n")
+          "test('tenant.list and tenant.suspend via /admin/tenants', async () => {\n"
+          "  const res = await suspendTenant('t-1', {reason: 'abuse'});\n"
+          "  expect(res.status).toBe('suspended');\n"
+          "  expect(auditFor('tenant.suspend', 't-1')).toHaveLength(1);\n"
+          "});\n"
+          "test('/admin/tenants forbids out-of-scope operators', async () => {\n"
+          "  await expect(suspendTenant('t-9', {as: 'support'})).rejects.toThrow('forbidden');\n"
+          "});\n")
     write(root, "tests/subscription.spec.ts",
-          "test('subscription.list and subscription.cancel via /admin/subscriptions', () => {});\n")
+          "test('subscription.list and subscription.cancel via /admin/subscriptions', async () => {\n"
+          "  const res = await cancelSubscription('s-1', {idempotencyKey: 'k-1'});\n"
+          "  expect(res.state).toBe('cancelled');\n"
+          "  await expect(cancelSubscription('s-1', {idempotencyKey: 'k-1'})).resolves.toEqual(res);\n"
+          "});\n")
 
     m = load(root)
     m["platform"].update({
@@ -257,14 +327,18 @@ def build_logistics():
     """
     root = scaffold("logistics-gaps", "logistics-mobility", "standard")
 
-    for name in ("authentication", "authorization", "audit", "safety", "data",
-                 "experience", "observability"):
-        write(root, "evidence/" + name + ".md", "Recorded run output.\n")
-    for name in ("build", "typecheck", "lint", "tests", "browser", "security",
-                 "accessibility", "performance"):
-        write(root, "evidence/" + name + ".log", "command completed, exit 0\n")
-    write(root, "tests/authz.spec.ts", "test('role matrix', () => {});\n")
-    write(root, "tests/job.spec.ts", "test('job.list via /admin/jobs', () => {});\n")
+    for name, body in EVIDENCE_NOTES.items():
+        write(root, "evidence/" + name + ".md", body)
+    for name, body in EVIDENCE_LOGS.items():
+        write(root, "evidence/" + name + ".log", body)
+    write(root, "tests/authz.spec.ts",
+          "test('role matrix', () => {\n"
+          "  expect(can('dispatcher', 'job.reassign', {region: 'north'})).toBe(true);\n"
+          "});\n")
+    write(root, "tests/job.spec.ts",
+          "test('job.list via /admin/jobs', async () => {\n"
+          "  expect((await listJobs({region: 'north'})).length).toBeGreaterThan(0);\n"
+          "});\n")
     # Deliberately empty: proves the non-empty evidence rule still fires.
     write(root, "evidence/empty.log", "")
 

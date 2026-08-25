@@ -270,7 +270,9 @@ It cannot verify:
 
 | The validator sees | It cannot tell you |
 |---|---|
-| A test file exists, is non-empty, and names the capability | Whether the test asserts anything, asserts the right thing, or would fail if the guard were removed |
+| A test file exists, is non-empty, contains an assertion, and names the capability | Whether it asserts the *right* thing, or would fail if the guard were removed |
+| Evidence names counts, routes, or files rather than only claiming success | Whether the run it records actually happened, or happened against this build |
+| A screen traces to a capability, an operation, a policy, and a test | Whether the screen renders correctly, whether its controls do anything when pressed, or whether the console hangs together as one coherent product |
 | An authorization policy is referenced | Whether the policy defaults to deny, scopes to tenant, or covers the export and API paths |
 | `dataBinding` names a repository method | Whether that method returns authoritative data or a constant |
 | An audit event is declared | Whether the running command emits it, or whether it is emitted on failure |
@@ -280,7 +282,7 @@ It cannot verify:
 
 Residual responsibilities stay with the agent:
 
-1. Read the body of each cited test. Confirm it asserts the outcome, not the absence of an exception.
+1. Read the body of each cited test. Confirm it asserts the outcome, not the absence of an exception. The validator now refuses a test file with no assertion at all, and evidence whose whole content is a claim of success — but both are floors, and clearing a floor is not the same as being right.
 2. Break the guard locally and confirm the test fails, for at least every `high` and `critical` capability.
 3. Follow `dataBinding` to the query and confirm it reaches the declared source of truth.
 4. Execute the command and read the audit record it produced, rather than trusting the declaration.

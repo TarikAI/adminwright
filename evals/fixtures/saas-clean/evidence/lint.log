@@ -1,1 +1,2 @@
-command completed, exit 0
+eslint .
+  0 problems (0 errors, 0 warnings) across 214 files

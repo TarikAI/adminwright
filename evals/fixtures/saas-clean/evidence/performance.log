@@ -1,1 +1,2 @@
-command completed, exit 0
+k6 run admin-list.js
+  http_req_duration p95=412ms (budget 800ms), 0 failed requests

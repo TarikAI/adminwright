@@ -1,1 +1,3 @@
-command completed, exit 0
+playwright test
+  6 passed (12.4s)
+  loading, populated, filtered-empty, forbidden verified

@@ -256,6 +256,109 @@ class TestConcurrentWrites(TempProject):
                       "the staging file must carry the pid")
 
 
+class TestEvidenceRigor(unittest.TestCase):
+    """Path-and-non-emptiness checks certified a console whose tests were empty.
+
+    Field-tested: the project's own `saas-clean` fixture passed release at the
+    regulated profile with two `() => {}` test bodies and evidence logs reading
+    "command completed, exit 0". Everything traced; nothing was proven.
+    """
+
+    def test_empty_test_body_has_no_assertion(self):
+        self.assertFalse(acm.has_assertion("test('tenant.suspend', () => {});\n"))
+
+    def test_real_assertions_are_recognised_across_languages(self):
+        for body in (
+            "expect(res.status).toBe('suspended');",
+            "self.assertEqual(res.status, 'suspended')",
+            "assert res.status == 'suspended'",
+            "res.Status.Should().Be(\"suspended\");",
+            "require.NoError(t, err)",
+            "XCTAssertEqual(res.status, .suspended)",
+            "await expect(fn()).rejects.toThrow('forbidden');",
+        ):
+            self.assertTrue(acm.has_assertion(body), body)
+
+    def test_success_claims_are_not_evidence(self):
+        for body in ("command completed, exit 0\n", "All tests passed\n",
+                     "Recorded run output with assertions.\n", "ok\n", "done.\n"):
+            self.assertTrue(acm.is_uninformative(body), body)
+
+    def test_real_output_is_evidence(self):
+        for body in ("tsc --noEmit\n  0 errors in 214 files\n",
+                     "axe-core scan\n  0 violations, 47 checks passed\n",
+                     "http_req_duration p95=412ms (budget 800ms)\n"):
+            self.assertFalse(acm.is_uninformative(body), body)
+
+    def test_a_long_narrative_is_not_flagged_as_a_success_claim(self):
+        # Multi-line detail is the thing being asked for; never flag it.
+        body = ("Session policy review\n- MFA enforced for ops\n"
+                "- Idle timeout verified on 3 sessions\n")
+        self.assertFalse(acm.is_uninformative(body))
+
+
+class TestObservationClustering(unittest.TestCase):
+    """Two projects reported one defect in different words and never grouped.
+
+    `promote`'s bar is "seen on two or more distinct projects", and grouping by
+    an exact hash of the wording made that unreachable: the store held the same
+    finding twice and reported "3 distinct ideas, nothing clears the bar".
+    """
+
+    def observation(self, project, observation, proposed, category="friction",
+                    scope="SKILL.md"):
+        return {"project": project, "observation": observation, "date": "2026-08-09",
+                "proposedChange": proposed, "category": category, "scope": scope,
+                "fingerprint": acm.observation_fingerprint(
+                    {"scope": scope, "category": category, "proposedChange": proposed})}
+
+    def test_same_finding_in_different_words_groups(self):
+        records = [
+            self.observation(
+                "AIVORA",
+                "Audit modeled 7 entities and 5 gaps but zero roles, screens, capabilities;"
+                " harvest never ran",
+                "Audit guidance should require capabilities at discovered status so repair"
+                " mode has targets"),
+            self.observation(
+                "ZenithAPP",
+                "Build session modeled entities and screens but zero roles and zero"
+                " capabilities across two rounds; harvest never ran",
+                "Phase ordering nudge: roles and capabilities before screens; end-of-mode"
+                " harvest reminder"),
+        ]
+        clusters = acm.cluster_observations(records)
+        self.assertEqual(len(clusters), 1, "one finding, two projects")
+        self.assertEqual(
+            {r["project"] for r in clusters[0]}, {"AIVORA", "ZenithAPP"})
+
+    def test_unrelated_findings_stay_apart(self):
+        records = [
+            self.observation("A", "Audit hand-wrote manifest JSON and 83 errors hid",
+                             "emit must surface manifest health", category="tooling"),
+            self.observation("B", "Screens modelled with no roles or capabilities",
+                             "roles and capabilities before screens"),
+        ]
+        self.assertEqual(len(acm.cluster_observations(records)), 2)
+
+    def test_category_and_scope_gate_the_grouping(self):
+        # Identical wording, different target file: not the same change.
+        same = "roles and capabilities must exist before screens"
+        records = [
+            self.observation("A", same, same, scope="SKILL.md"),
+            self.observation("B", same, same, scope="references/discovery.md"),
+        ]
+        self.assertEqual(len(acm.cluster_observations(records)), 2)
+
+    def test_similarity_is_symmetric_and_bounded(self):
+        a = {"observation": "roles and capabilities missing", "proposedChange": "order them first"}
+        b = {"observation": "capabilities and roles absent", "proposedChange": "order first"}
+        self.assertAlmostEqual(acm.observation_similarity(a, b),
+                               acm.observation_similarity(b, a))
+        self.assertLessEqual(acm.observation_similarity(a, b), 1.0)
+        self.assertEqual(acm.observation_similarity(a, {"observation": "", "proposedChange": ""}), 0.0)
+
+
 class TestPlaceholderScanner(unittest.TestCase):
     """Unit-level checks on the scanner itself.
 
@@ -497,12 +600,20 @@ class TestScreenEvidenceTokens(TempProject):
         return self.validate()
 
     def test_unrelated_test_file_is_flagged(self):
-        _code, out, _err = self.screen_with_test("test('something entirely unrelated', () => {});")
+        _code, out, _err = self.screen_with_test(
+            "test('something entirely unrelated', () => { expect(1).toBe(1); });")
         self.assertIn("evidence-token-match", out)
 
     def test_test_mentioning_the_route_is_accepted(self):
-        _code, out, _err = self.screen_with_test("test('/admin/users renders', () => {});")
+        _code, out, _err = self.screen_with_test(
+            "test('/admin/users renders', () => { expect(render()).toBeTruthy(); });")
         self.assertNotIn("evidence-token-match", out)
+
+    def test_assertion_free_test_is_caught_before_the_token_rule(self):
+        # An empty body is a defect regardless of which capability it names, so
+        # it is reported as such rather than as an unrelated-file problem.
+        _code, out, _err = self.screen_with_test("test('/admin/users renders', () => {});")
+        self.assertIn("test-asserts-nothing", out)
 
 
 class TestEvidenceIntegrity(TempProject):
@@ -758,15 +869,19 @@ class TestHonestTiering(TempProject):
         (self.root / "tests").mkdir(exist_ok=True)
         (self.root / "evidence").mkdir(exist_ok=True)
         (self.root / "tests" / "user.spec.ts").write_text(
-            "test('user.list via /admin/users', () => { /* real assertions */ });", encoding="utf-8")
+            "test('user.list via /admin/users', async () => {\n"
+            "  expect((await listUsers({tenantId: 't-1'})).length).toBe(3);\n"
+            "});\n", encoding="utf-8")
         for name in ("authentication", "authorization", "audit", "safety", "data",
                      "experience", "observability"):
             (self.root / "evidence" / (name + ".md")).write_text(
-                "Recorded run output with assertions.", encoding="utf-8")
+                name + " review 2026-08-20\n"
+                "- 12 operations exercised, 12 enforced server-side\n"
+                "- 0 findings outstanding\n", encoding="utf-8")
         for name in ("build", "typecheck", "lint", "tests", "browser", "security",
                      "accessibility", "performance"):
             (self.root / "evidence" / (name + ".log")).write_text(
-                "command completed, exit 0", encoding="utf-8")
+                name + " run\n  0 errors across 118 files\n", encoding="utf-8")
 
         data = self.read()
         data["platform"].update({

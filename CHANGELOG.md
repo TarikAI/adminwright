@@ -12,6 +12,39 @@ major version or behind a profile.
 
 ### Added
 
+- Two evidence-rigor rules, both `warn` at `internal` and `error` at `standard` and
+  `regulated`. Tightening, so it is breaking by this project's definition — a manifest that
+  passed on empty tests or hollow evidence now fails:
+  - `test-asserts-nothing` — a test file listed under a capability, screen, work queue, or
+    `policyTests` must contain an assertion. Field-tested against this repository's own
+    `saas-clean` fixture, which passed release at the **regulated** profile with two
+    `test('...', () => {})` bodies. An empty test compiles, runs, passes, and proves nothing.
+  - `evidence-uninformative` — evidence whose entire content is a single short claim of
+    success ("command completed, exit 0") is refused. A real run leaves counts, names, or
+    routes behind. The same fixture's accessibility and browser logs were eleven words each.
+- Both eval fixtures now carry evidence a reader can check and tests that actually assert,
+  because a fixture named `saas-clean` defines what clean means and taught the opposite.
+  Their expected findings are unchanged: the new rules add signal without altering what
+  either fixture proves.
+
+### Fixed
+
+- `promote` grouped observations by an exact hash of their wording while its docstring
+  promised it "groups observations that say the same thing in different words". It could
+  only ever group a record with itself, so the "seen on two or more distinct projects"
+  route — the main promotion route — was unreachable. Grouping is now content-word overlap
+  within a matching scope and category, tunable with `--similarity`. Field-tested: the real
+  store held one finding reported by two distinct projects in different words and reported
+  "3 distinct ideas, nothing clears the bar"; it now reports one candidate, seen on two
+  projects. That finding is adopted as lesson 0005 — roles and capabilities are modelled
+  before any screen — and `SKILL.md` Phase 3 carries the rule.
+- The `ux-reviewer` agent now reviews what the validator provably cannot: that every control
+  actually does something when pressed, that the screen renders without visual defects, and
+  that the console is structurally coherent across a domain. It mentioned design, layout,
+  or structure twice before, which is why broken components and incoherent organisation kept
+  reaching users through a green gate. `references/verification.md` states the boundary in
+  the same terms.
+
 - Optional integrations with two external tools, both soft (absence changes nothing and
   blocks nothing), documented in `SKILL.md` and the new `INTEGRATIONS.md`:
   - **DesignArchitect** (UI closure): the architect agent detects it at Phase 4

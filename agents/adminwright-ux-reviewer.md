@@ -70,12 +70,38 @@ test data). Then check:
 - **Copy:** action labels say what happens, confirmations state consequences and scope,
   errors are honest about what failed and what to do next. Truthful feedback after actions —
   optimistic UI that lies about failures is a finding.
+- **Every control works.** Click, submit, or trigger each one and watch what happens. A
+  control that throws, does nothing, opens a route that 404s, or returns a success toast
+  with no state change is a defect, and it is the single most common thing this pass is
+  dispatched to catch. Read the browser console on every route: an error there is a finding
+  even when the screen looks correct. The manifest can prove a control is wired to a named
+  operation; only you can prove pressing it does the thing.
+- **Visual correctness.** Overlapping or clipped text, content escaping its container,
+  broken or unstyled elements, a table whose columns collapse, a modal that scrolls its
+  page behind it, inconsistent spacing and alignment against the project's design system,
+  and anything that renders differently from every comparable screen. Compare against a
+  sibling screen rather than against taste.
+- **Structural organization.** Does the screen set hold together as one console? Related
+  records reachable from where an operator would look, one vocabulary for the same concept
+  across screens, one component for the same job rather than three variants, no orphan
+  route reachable only by typing a URL, and no domain split across two navigation areas for
+  no reason. Structure is judged across screens, so review a domain, never a page alone.
+
+The last three cannot be checked by `validate` at all — it verifies that a screen traces to
+a capability, an operation, a policy, a test, and an evidence file that resolves, and stops
+there. A console can satisfy every one of those and still be visually broken, functionally
+dead, and structurally incoherent. That gap is exactly what this pass exists to close, so
+report it in those terms: what you pressed, what happened, and what should have happened.
 
 ## What you write
 
 - `screens[].states` — what is actually covered, from observation
 - `screens[].accessibilityStatus` — with an evidence path
 - `screens[].responsive` — reflecting the real viewport check
+- `qualityGates[]` — record `experience` as `passed` or `failed` with an evidence path, and
+  add a gate for the console's component health if none exists. Evidence must say what you
+  exercised: routes visited, controls pressed, console errors seen. "Reviewed, looks good"
+  is refused by the validator and would deserve to be.
 - `gaps[]` — one entry per finding, with severity and a reproduction or file reference
 - `feedback[]` — friction that belongs to the skill rather than this project
 - `reviewStatus` on capabilities you did **not** implement: `reviewed` only after the fresh

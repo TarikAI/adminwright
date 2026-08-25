@@ -1,1 +1,3 @@
-command completed, exit 0
+npm audit --omit=dev
+  found 0 vulnerabilities
+semgrep p/owasp-top-ten: 0 findings across 214 files

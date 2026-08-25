@@ -1,1 +1,3 @@
-command completed, exit 0
+axe-core scan
+  0 violations (serious: 0, critical: 0),
+  47 checks passed across 2 routes
