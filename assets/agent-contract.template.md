@@ -1,7 +1,7 @@
 # Agent contract template
 
 Copy the fenced block below into the project as its agent instruction file — `AGENTS.md`,
-`CLAUDE.md`, `GEMINI.md`, `.cursorrules`, or whatever the harness reads — and replace every
+`CLAUDE.md`, `GEMINI.md`, `.cursor/rules/*.mdc`, or whatever the harness reads — and replace every
 `<PLACEHOLDER>`. Delete rows that genuinely do not apply, and record why in the manifest's
 `decisions[]` rather than deleting silently.
 

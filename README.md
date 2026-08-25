@@ -248,11 +248,11 @@ python /path/to/adminwright/scripts/install_agents.py --harness <name> --project
 | Harness | Skill entry point | Agents land in |
 |---|---|---|
 | Claude Code / claude.ai (manual copy) | `~/.claude/skills/adminwright/` or the project's `.claude/skills/` | `.claude/agents/` |
-| opencode | point the agent at `SKILL.md` | `.opencode/agent/` (as subagents) |
+| opencode | point the agent at `SKILL.md` | `.opencode/agents/` (as subagents) |
 | OpenAI Codex | `.agents/skills/adminwright/`, referenced from `AGENTS.md` | `.adminwright/agents/` + `AGENTS.md` block |
 | Google Antigravity | reference `SKILL.md` from `AGENTS.md` | `.adminwright/agents/` + `AGENTS.md` block |
 | Gemini CLI | reference `SKILL.md` from `GEMINI.md` | `.adminwright/agents/` + `GEMINI.md` block |
-| Cursor | point a rule at `SKILL.md` | `.adminwright/agents/` + `.cursorrules` block |
+| Cursor | point a rule at `SKILL.md` | `.adminwright/agents/` + `.cursor/rules/adminwright.mdc` |
 | Pi, anything else | point the agent at `SKILL.md` | `.adminwright/agents/` (harness `pi` or `generic`) |
 
 Nothing here is vendor-specific. See [agents/README.md](agents/README.md).

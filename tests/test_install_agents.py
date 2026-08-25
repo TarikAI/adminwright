@@ -63,9 +63,48 @@ class TestInstall(InstallBase):
     def test_opencode_gets_subagent_mode(self):
         code, _out, _err = run("--harness", "opencode", "--project-root", self.project)
         self.assertEqual(code, 0)
-        for path in (self.project / ".opencode" / "agent").glob("*.md"):
+        # opencode reads .opencode/agents (plural). The singular directory is
+        # not a fallback — files there are simply never loaded — and globbing a
+        # directory that does not exist made this assertion vacuous.
+        target = self.project / ".opencode" / "agents"
+        installed = sorted(target.glob("*.md"))
+        self.assertEqual(len(installed), len(ia.AGENT_ORDER),
+                         "agents must land in .opencode/agents, plural")
+        for path in installed:
             frontmatter = path.read_text(encoding="utf-8").split("\n---", 1)[0]
             self.assertIn("mode: subagent", frontmatter, path.name)
+
+    def test_cursor_writes_a_project_rule_not_dot_cursorrules(self):
+        # .cursorrules is deprecated and silently ignored in Cursor's agent
+        # mode: the agents install fine and nothing ever points at them.
+        code, _out, _err = run("--harness", "cursor", "--project-root", self.project)
+        self.assertEqual(code, 0)
+        rule = self.project / ".cursor" / "rules" / "adminwright.mdc"
+        self.assertTrue(rule.is_file(), "Cursor needs a .cursor/rules/*.mdc project rule")
+        text = rule.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---"), "an .mdc rule needs frontmatter")
+        self.assertIn("alwaysApply: true", text)
+        self.assertIn(ia.MARKER_START, text)
+        self.assertFalse((self.project / ".cursorrules").exists(),
+                         "the deprecated .cursorrules must not be written")
+
+    def test_cursor_rule_is_rewritten_not_duplicated(self):
+        run("--harness", "cursor", "--project-root", self.project)
+        run("--harness", "cursor", "--project-root", self.project)
+        text = (self.project / ".cursor" / "rules" / "adminwright.mdc").read_text(encoding="utf-8")
+        self.assertEqual(text.count(ia.MARKER_START), 1)
+        self.assertEqual(text.count("---\ndescription:"), 1)
+
+    def test_every_harness_target_is_a_known_convention(self):
+        # A wrong directory fails silently in every harness: the install
+        # succeeds and the agents are simply never discovered.
+        expected = {
+            "claude-code": ".claude/agents",
+            "opencode": ".opencode/agents",
+            "cursor": ".adminwright/agents",
+        }
+        for harness, target in expected.items():
+            self.assertEqual(ia.HARNESSES[harness][0], target, harness)
 
     def test_append_pointer_is_idempotent(self):
         run("--harness", "codex", "--project-root", self.project, "--append-pointer")

@@ -51,11 +51,11 @@ python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <pr
 | `--harness` | Writes to | Notes |
 |---|---|---|
 | `claude-code` | `.claude/agents/` | For non-plugin installs; the plugin needs no installer |
-| `opencode` | `.opencode/agent/` | Adds `mode: subagent` to each file's frontmatter |
+| `opencode` | `.opencode/agents/` | Adds `mode: subagent` to each file's frontmatter |
 | `codex` | `.adminwright/agents/` | Prints a pointer block for `AGENTS.md`; add `--append-pointer` to write it |
 | `antigravity` | `.adminwright/agents/` | Pointer block for `AGENTS.md`, same flag |
 | `gemini` | `.adminwright/agents/` | Pointer block for `GEMINI.md`, same flag |
-| `cursor` | `.adminwright/agents/` | Pointer block for `.cursorrules`, same flag |
+| `cursor` | `.adminwright/agents/` | Writes `.cursor/rules/adminwright.mdc` (a project rule, always applied) |
 | `pi` | `.adminwright/agents/` | Pointer block for `AGENTS.md`, same flag |
 | `generic` | `.adminwright/agents/` | Any other harness: point it at the files, in the printed order |
 

@@ -2940,11 +2940,15 @@ def yaml_list(values):
     return "[" + ", ".join('"' + str(value).replace('"', "'") + '"' for value in values) + "]"
 
 
+# `platforms` carries the promotion bar: "seen on two or more distinct
+# projects" is unreadable from an index that does not name the projects. It is
+# written from --platform, the same source as the lesson's frontmatter, so the
+# index and the file cannot disagree.
 LESSON_INDEX_HEADER = (
     "# Lessons index\n"
     "\n"
-    "| id | title | category | scope | status | confidence | date |\n"
-    "|---|---|---|---|---|---|---|\n"
+    "| id | title | category | scope | status | confidence | platforms | date |\n"
+    "|---|---|---|---|---|---|---|---|\n"
 )
 
 
@@ -3861,6 +3865,7 @@ def cmd_lesson_add(args):
                 cell(args.scope),
                 args.status,
                 args.confidence,
+                cell("; ".join(args.platform or [])) or "-",
                 date,
             ]
         )

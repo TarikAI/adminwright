@@ -44,14 +44,32 @@ MARKER_END = "<!-- adminwright-agents:end -->"
 # harness -> (relative target directory, instruction file for the pointer block)
 HARNESSES = {
     "claude-code": (".claude/agents", None),
-    "opencode": (".opencode/agent", None),
+    # opencode reads .opencode/agents (plural). The singular directory is not
+    # a fallback: files land there and opencode never sees them.
+    "opencode": (".opencode/agents", None),
     "codex": (".adminwright/agents", "AGENTS.md"),
+    # Antigravity reads AGENTS.md as its cross-tool foundation.
     "antigravity": (".adminwright/agents", "AGENTS.md"),
     "gemini": (".adminwright/agents", "GEMINI.md"),
-    "cursor": (".adminwright/agents", ".cursorrules"),
+    # .cursorrules is deprecated and silently ignored in Cursor's agent mode.
+    # Project rules are .mdc files under .cursor/rules/, which is a dedicated
+    # file per rule rather than a section appended to a shared one.
+    "cursor": (".adminwright/agents", ".cursor/rules/adminwright.mdc"),
     "pi": (".adminwright/agents", "AGENTS.md"),
     "generic": (".adminwright/agents", None),
 }
+
+# Instruction files that are a whole rule document rather than a shared file to
+# append a section to. These are written wholesale and rewritten on reinstall.
+DEDICATED_RULE_FILES = {".cursor/rules/adminwright.mdc"}
+
+# Frontmatter for harnesses whose rule files require it.
+MDC_FRONTMATTER = (
+    "---\n"
+    "description: Adminwright admin-console delivery rules and role agents\n"
+    "alwaysApply: true\n"
+    "---\n\n"
+)
 
 # Dispatch order matters and the pointer block states it.
 AGENT_ORDER = (
@@ -152,7 +170,17 @@ def pointer_block(agent_dir, skill_dir, harness=None):
     return "\n".join(lines) + "\n"
 
 
-def append_pointer(instruction_path, block):
+def append_pointer(instruction_path, block, dedicated=False):
+    """Add the pointer block to a harness instruction file.
+
+    A dedicated rule file (Cursor's .mdc) is the whole document, so it is
+    written wholesale and refreshed on every install. A shared file (AGENTS.md,
+    GEMINI.md) is appended to once and left alone afterwards.
+    """
+    instruction_path.parent.mkdir(parents=True, exist_ok=True)
+    if dedicated:
+        instruction_path.write_text(MDC_FRONTMATTER + block, encoding="utf-8")
+        return True
     existing = ""
     if instruction_path.exists():
         existing = instruction_path.read_text(encoding="utf-8")
@@ -208,9 +236,12 @@ def main(argv=None):
     if instruction_name:
         block = pointer_block(portable(target_dir), skill_path, args.harness)
         instruction_path = project_root / instruction_name
-        if args.append_pointer:
-            if append_pointer(instruction_path, block):
-                print("Appended pointer block to " + str(instruction_path))
+        dedicated = instruction_name in DEDICATED_RULE_FILES
+        if args.append_pointer or dedicated:
+            # A dedicated rule file is ours alone, so writing it is not the
+            # intrusion that appending to someone's AGENTS.md would be.
+            if append_pointer(instruction_path, block, dedicated):
+                print("Wrote pointer block to " + str(instruction_path))
             else:
                 print("Pointer block already present in " + str(instruction_path) + "; unchanged")
         else:
