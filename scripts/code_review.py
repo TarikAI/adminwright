@@ -40,7 +40,17 @@ unmodified — gaps are written as one atomic batch). Exit 3 is intentionally
 unused: capability claim conflicts do not apply to this script.
 
 ADMINWRIGHT_OCR_BIN overrides the ocr executable path (tests and exotic
-installs); otherwise the script uses `ocr` from PATH.
+installs); otherwise the script uses `ocr` from PATH. A value that names no
+file is a configuration error (exit 2), not "ocr absent".
+
+Windows: the npm install puts an `ocr.cmd` shim on PATH. A .cmd/.bat file runs
+under cmd.exe, which would interpret `&`, `%`, `^` and `!` in a repository
+file name as commands, so the shim is never handed our arguments. It is read,
+and `node <ocr.js>` is run directly instead (node from ADMINWRIGHT_NODE_BIN,
+the shim's own directory, or PATH); a shim that cannot be resolved that way is
+refused with exit 2 and a pointer to ADMINWRIGHT_OCR_BIN. Every ocr call also
+sets OCR_NO_UPDATE=1: the launcher otherwise contacts npm and can run
+`npm i -g` in the background on each invocation.
 """
 
 from __future__ import annotations
@@ -52,6 +62,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -87,12 +98,117 @@ def stderr(message):
     print(message, file=sys.stderr)
 
 
+ENV_OCR_BIN = "ADMINWRIGHT_OCR_BIN"
+ENV_NODE_BIN = "ADMINWRIGHT_NODE_BIN"
+
+# Files Windows hands to cmd.exe when CreateProcess is asked to run them.
+CMD_SHIM_SUFFIXES = (".cmd", ".bat")
+
+# The entry-point path inside an npm cmd-shim, in both the current
+# (`"%dp0%\node_modules\...\ocr.js"`) and the npm 6 (`"%~dp0\node_modules\...`)
+# spellings. Percent signs inside the captured path are not expanded: a path
+# that needs environment expansion is not one we can resolve safely.
+SHIM_SCRIPT = re.compile(r'"%~?dp0%?[\\/]+([^"\r\n%]+?\.[cm]?js)"', re.IGNORECASE)
+
+
 def ocr_executable():
-    """The ocr command to run, or None when it is not installed."""
-    override = os.environ.get("ADMINWRIGHT_OCR_BIN")
+    """The ocr command to run, or None when it is not installed.
+
+    An ADMINWRIGHT_OCR_BIN that names no file is a misconfiguration and raises;
+    it must not degrade to the "ocr is not on PATH" notice (exit 0), which
+    would hide the typo behind a pass that reviewed nothing.
+    """
+    override = os.environ.get(ENV_OCR_BIN, "").strip()
     if override:
-        return override if Path(override).exists() else None
+        if Path(override).is_file():
+            return override
+        found = shutil.which(override)  # a bare command name that is on PATH
+        if found:
+            return found
+        raise ReviewError(
+            ENV_OCR_BIN + " is set to '" + override + "' but no such executable exists"
+            " — fix the path, or unset it to use `ocr` from PATH"
+        )
     return shutil.which("ocr")
+
+
+def refuse_cmd_shim(shim, reason):
+    return ReviewError(
+        "refusing to run '" + str(shim) + "': Windows would hand a .cmd/.bat file to"
+        " cmd.exe, which executes '&', '%', '^' and '!' in a repository file name as"
+        " commands. " + reason + " Set " + ENV_OCR_BIN + " to a native executable"
+        " (ocr.exe), or to the ocr.cmd of a standard npm install with `node` on PATH."
+    )
+
+
+def find_node(shim_dir):
+    """node for a resolved npm shim: override, the shim's own node.exe, then PATH.
+
+    That is the order the npm shim itself uses (plus the override). Returns
+    None when node cannot be found; a wrong ADMINWRIGHT_NODE_BIN raises.
+    """
+    override = os.environ.get(ENV_NODE_BIN, "").strip()
+    if override:
+        found = override if Path(override).is_file() else shutil.which(override)
+        if not found:
+            raise ReviewError(
+                ENV_NODE_BIN + " is set to '" + override + "' but no such executable exists"
+            )
+        return str(found)
+    beside = Path(shim_dir) / "node.exe"
+    if beside.is_file():
+        return str(beside)
+    found = shutil.which("node")
+    if found and Path(found).suffix.lower() not in CMD_SHIM_SUFFIXES:
+        return found
+    return None
+
+
+def resolve_cmd_shim(shim):
+    """[node, ocr.js] for an npm-generated ocr.cmd; ReviewError when it is not one.
+
+    The shim only exists to launch `node ocr.js %*`. Doing that ourselves keeps
+    cmd.exe out of the path of every argument that comes from the repository.
+    """
+    shim = Path(shim)
+    try:
+        text = shim.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise refuse_cmd_shim(shim, "It could not be read (" + str(exc) + ").")
+    script = None
+    for match in SHIM_SCRIPT.finditer(text):
+        relative = match.group(1).replace("\\", "/")
+        if "open-code-review" in relative.lower():
+            script = Path(os.path.abspath(str(shim.parent / relative)))
+            break
+    if script is None:
+        raise refuse_cmd_shim(
+            shim, "It is not an npm shim for @alibaba-group/open-code-review"
+            " (no node_modules/.../ocr.js entry point in it)."
+        )
+    if not script.is_file():
+        raise refuse_cmd_shim(shim, "Its entry point '" + str(script) + "' does not exist.")
+    node = find_node(shim.parent)
+    if not node:
+        raise refuse_cmd_shim(shim, "`node` was not found next to it or on PATH.")
+    return [node, str(script)]
+
+
+def command_prefix(executable):
+    """The argv prefix that runs ocr with no shell between us and its arguments."""
+    if os.name != "nt":
+        return [executable]
+    suffix = Path(executable).suffix.lower()
+    if suffix in CMD_SHIM_SUFFIXES:
+        return resolve_cmd_shim(executable)
+    if not suffix:
+        # npm also drops an extensionless POSIX-shell shim beside ocr.cmd;
+        # Windows cannot execute that one, so prefer its runnable sibling.
+        for extension in (".cmd", ".exe"):
+            sibling = Path(executable + extension)
+            if sibling.is_file():
+                return command_prefix(str(sibling))
+    return [executable]
 
 
 def run_ocr(arguments, repo=None, trailing=None):
@@ -104,11 +220,13 @@ def run_ocr(arguments, repo=None, trailing=None):
     executable = ocr_executable()
     if not executable:
         raise ReviewError("the ocr CLI is not on PATH")
-    command = [executable] + [str(a) for a in arguments]
+    command = command_prefix(executable) + [str(a) for a in arguments]
     if repo:
         command += ["--repo", str(repo)]
     if trailing:
         command += [str(a) for a in trailing]
+    env = dict(os.environ)
+    env["OCR_NO_UPDATE"] = "1"
     try:
         return subprocess.run(
             command,
@@ -116,12 +234,13 @@ def run_ocr(arguments, repo=None, trailing=None):
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
     except OSError as exc:
         raise ReviewError(
             "could not execute '" + executable + "' ("
-            "on Windows point ADMINWRIGHT_OCR_BIN at ocr.cmd or ocr.exe, not the"
-            " extensionless npm shell shim): " + str(exc)
+            "on Windows point " + ENV_OCR_BIN + " at the npm install's ocr.cmd or a"
+            " native ocr.exe, not the extensionless npm shell shim): " + str(exc)
         )
 
 
@@ -296,6 +415,58 @@ def unique_gap_id(base_id, taken):
     return base_id + "-r" + str(suffix)
 
 
+def add_gaps(manifest, gaps):
+    """Run one all-or-nothing manifest `add --kind gap` for the whole batch.
+
+    The batch goes through a temp file (`--json @file`), never argv: Windows
+    caps a command line near 32k characters, which about 60 findings exceed,
+    and the crash used to leave nothing persisted. The file sits beside the
+    manifest, is removed on every path, and its name ends in .tmp.
+    """
+    try:
+        handle, name = tempfile.mkstemp(
+            prefix=".ocr-gaps-", suffix=".json.tmp", dir=str(manifest.parent)
+        )
+    except OSError as exc:
+        raise ReviewError("could not create a temp file beside the manifest: " + str(exc))
+    try:
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as out:
+                json.dump(gaps, out)
+        except OSError as exc:
+            raise ReviewError("could not write the gap batch to '" + name + "': " + str(exc))
+        # The manifest script's output is read back as UTF-8 below; a cp1252
+        # console default must not be able to break it on a non-ASCII path.
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        try:
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(MANIFEST_SCRIPT),
+                    "add",
+                    "--manifest",
+                    str(manifest),
+                    "--kind",
+                    "gap",
+                    "--json",
+                    "@" + name,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+            )
+        except OSError as exc:
+            raise ReviewError("could not run the manifest script: " + str(exc))
+    finally:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+
+
 def persist_findings(manifest, findings, engine, mode, evidence_path):
     """Write findings as gaps[] in one all-or-nothing batch; returns the count.
 
@@ -348,23 +519,7 @@ def persist_findings(manifest, findings, engine, mode, evidence_path):
     last_error = ""
     for attempt in range(4):
         gaps = build(existing_gap_ids(manifest), attempt)
-        proc = subprocess.run(
-            [
-                sys.executable,
-                str(MANIFEST_SCRIPT),
-                "add",
-                "--manifest",
-                str(manifest),
-                "--kind",
-                "gap",
-                "--json",
-                json.dumps(gaps),
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        proc = add_gaps(manifest, gaps)
         if proc.returncode == 0:
             return len(gaps)
         last_error = proc.stderr.strip() or proc.stdout.strip() or "the manifest refused the gap batch"
