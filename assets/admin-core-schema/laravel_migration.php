@@ -3,20 +3,27 @@
 /**
  * Adminwright admin control-plane core schema — Laravel migration.
  *
- * Faithful translation of postgres.sql. Read ./README.md before adapting.
+ * Translation of postgres.sql, kept in step with it by tests/test_core_schema.py.
+ * Read ./README.md before adapting.
  *
  * WHAT THE SCHEMA BUILDER CANNOT EXPRESS — done here via DB::statement():
  *
  *   1. CHECK constraints. Laravel's schema builder has no CHECK support.
- *   2. Partial unique indexes. `$table->unique()` cannot carry a WHERE clause.
- *   3. Triggers. Append-only enforcement on audit_event and approval_decision,
- *      and the separation-of-duties trigger. Model events and observers are
- *      bypassed by query-builder writes, bulk operations, and other services.
+ *   2. Partial and expression unique indexes. `$table->unique()` cannot carry a
+ *      WHERE clause or COALESCE().
+ *   3. Triggers and functions. Append-only enforcement on audit_event and
+ *      approval_decision, the audit hash chain (chain_seq / prev_hash / row_hash
+ *      are assigned by a BEFORE INSERT trigger; leave them out of your inserts),
+ *      verify_audit_chain(), scrub_audit_payload(), and the separation-of-duties
+ *      trigger. Model events and observers are bypassed by query-builder writes,
+ *      bulk operations, and other services.
  *
  * All three are included below. Do not drop them: they are the controls, not
- * decoration.
+ * decoration. Then run grants.sql (least-privilege grants for the application
+ * role; the regulated profile requires it) with psql.
  *
- * PostgreSQL only. Adapt table names to project convention, but keep
+ * PostgreSQL only; tables land in the default (public) schema and admin_actor.email
+ * is text rather than citext. Adapt table names to project convention, but keep
  * admin_permission.key equal to the manifest capability id.
  */
 
@@ -54,9 +61,9 @@ return new class extends Migration
             $table->timestampTz('created_at')->useCurrent();
         });
 
-        DB::statement("ALTER TABLE admin_actor ADD CONSTRAINT admin_actor_kind
+        DB::statement("ALTER TABLE admin_actor ADD CONSTRAINT admin_actor_kind_check
             CHECK (kind IN ('human','service','agent'))");
-        DB::statement("ALTER TABLE admin_actor ADD CONSTRAINT admin_actor_auth_strength
+        DB::statement("ALTER TABLE admin_actor ADD CONSTRAINT admin_actor_auth_strength_check
             CHECK (auth_strength IN ('password','mfa','phishing-resistant','sso'))");
 
         Schema::create('admin_role', function (Blueprint $table) {
@@ -86,7 +93,7 @@ return new class extends Migration
             $table->text('description')->default('');
         });
 
-        DB::statement("ALTER TABLE admin_permission ADD CONSTRAINT admin_permission_risk
+        DB::statement("ALTER TABLE admin_permission ADD CONSTRAINT admin_permission_risk_check
             CHECK (risk IN ('low','moderate','high','critical'))");
 
         Schema::create('admin_role_permission', function (Blueprint $table) {
@@ -160,6 +167,9 @@ return new class extends Migration
             $table->text('target_tenant_id')->nullable();
             $table->text('reason');
             $table->text('ticket_ref')->nullable();
+            // Opting into write impersonation is a deliberate, separately
+            // permissioned act.
+            $table->boolean('read_only')->default(true);
             $table->jsonb('scope_restrictions')->default(DB::raw("'{}'::jsonb"));
             $table->timestampTz('started_at')->useCurrent();
             $table->timestampTz('expires_at');
@@ -173,6 +183,19 @@ return new class extends Migration
 
         DB::statement('ALTER TABLE impersonation_session ADD CONSTRAINT impersonation_bounded
             CHECK (expires_at > started_at)');
+        // Bounded maximum duration; 8 hours here, tighten to the project's policy.
+        DB::statement("ALTER TABLE impersonation_session ADD CONSTRAINT impersonation_max_duration
+            CHECK (expires_at - started_at <= interval '8 hours')");
+        // A session that stops without a recorded reason is indistinguishable from
+        // one that was never closed, so ending it requires one of the four reasons.
+        DB::statement("ALTER TABLE impersonation_session ADD CONSTRAINT impersonation_end_state
+            CHECK ((ended_at IS NULL AND ended_reason IS NULL)
+                OR (ended_at IS NOT NULL AND ended_reason IS NOT NULL
+                    AND ended_reason IN ('operator_exit', 'expired', 'revoked', 'session_lost')))");
+        // At most one live session per real actor. A sweeper must end expired
+        // sessions (ended_reason = 'expired'), or the actor cannot start another.
+        DB::statement('CREATE UNIQUE INDEX impersonation_session_one_live
+            ON impersonation_session (real_actor_id) WHERE ended_at IS NULL');
         DB::statement('CREATE INDEX impersonation_session_active
             ON impersonation_session (real_actor_id, expires_at) WHERE ended_at IS NULL');
 
@@ -184,7 +207,7 @@ return new class extends Migration
             $table->bigIncrements('id');
             $table->uuid('event_uuid')->unique()->default(DB::raw('gen_random_uuid()'));
             $table->text('chain_id')->default('default');
-            $table->bigInteger('chain_seq');
+            $table->bigInteger('chain_seq');   // assigned by trigger
 
             $table->timestampTz('occurred_at');
             $table->timestampTz('recorded_at')->useCurrent();
@@ -193,8 +216,10 @@ return new class extends Migration
             $table->string('actor_kind', 16)->default('human');
             // Null unless impersonating. Never overwrite actor_id with the
             // impersonated identity: that is the most common way impersonation
-            // audit is destroyed.
-            $table->unsignedBigInteger('effective_actor_id')->nullable();
+            // audit is destroyed. The acted-as subject is usually a customer, not
+            // an admin_actor, so this is text in the same identity space as
+            // impersonation_session.target_subject_id, deliberately with no FK.
+            $table->text('effective_actor_id')->nullable();
             $table->unsignedBigInteger('impersonation_session_id')->nullable();
 
             $table->text('tenant_id')->nullable();
@@ -228,22 +253,21 @@ return new class extends Migration
 
             $table->text('policy_version')->nullable();
 
-            $table->text('prev_hash')->nullable();
-            $table->text('row_hash');
+            $table->text('prev_hash')->nullable();   // assigned by trigger
+            $table->text('row_hash');                // assigned by trigger
             $table->text('hash_algorithm')->default('sha256');
 
             $table->foreign('actor_id')->references('id')->on('admin_actor');
-            $table->foreign('effective_actor_id')->references('id')->on('admin_actor');
             $table->foreign('impersonation_session_id')->references('id')->on('impersonation_session');
 
             $table->unique(['chain_id', 'chain_seq'], 'audit_event_chain');
         });
 
-        DB::statement("ALTER TABLE audit_event ADD CONSTRAINT audit_event_actor_kind
+        DB::statement("ALTER TABLE audit_event ADD CONSTRAINT audit_event_actor_kind_check
             CHECK (actor_kind IN ('human','service','agent','system'))");
         // 'denied' lets you detect probing; 'unknown' stops a provider timeout
         // being misreported as a failure when the provider may still have acted.
-        DB::statement("ALTER TABLE audit_event ADD CONSTRAINT audit_event_result
+        DB::statement("ALTER TABLE audit_event ADD CONSTRAINT audit_event_result_check
             CHECK (result IN ('succeeded','failed','denied','partial','unknown'))");
         DB::statement('ALTER TABLE audit_event ADD CONSTRAINT audit_event_effective_actor_requires_session
             CHECK (effective_actor_id IS NULL OR impersonation_session_id IS NOT NULL)');
@@ -290,8 +314,8 @@ return new class extends Migration
 
         DB::statement('ALTER TABLE approval_request ADD CONSTRAINT approval_request_min_approvals
             CHECK (required_approvals >= 1)');
-        DB::statement("ALTER TABLE approval_request ADD CONSTRAINT approval_request_state
-            CHECK (state IN ('pending','approved','rejected','expired','executed','cancelled'))");
+        DB::statement("ALTER TABLE approval_request ADD CONSTRAINT approval_request_state_check
+            CHECK (state IN ('pending','approved','rejected','expired','executed','execution_failed','cancelled'))");
         DB::statement("CREATE INDEX approval_request_queue
             ON approval_request (state, expires_at) WHERE state = 'pending'");
 
@@ -303,14 +327,16 @@ return new class extends Migration
             $table->text('reason');
             $table->timestampTz('decided_at')->useCurrent();
 
-            $table->foreign('request_id')->references('id')->on('approval_request')->cascadeOnDelete();
+            // RESTRICT, not CASCADE: cascading would let a rejection be deleted with its
+            // request and re-entered as an approval.
+            $table->foreign('request_id')->references('id')->on('approval_request')->restrictOnDelete();
             $table->foreign('approver_id')->references('id')->on('admin_actor');
             // One approver decides once. Without this a single approver satisfies
             // a two-approval requirement by voting twice.
             $table->unique(['request_id', 'approver_id'], 'approval_decision_one_per_approver');
         });
 
-        DB::statement("ALTER TABLE approval_decision ADD CONSTRAINT approval_decision_kind
+        DB::statement("ALTER TABLE approval_decision ADD CONSTRAINT approval_decision_kind_check
             CHECK (decision IN ('approved','rejected'))");
 
         // Separation of duties: the requester may not approve their own request.
@@ -363,7 +389,7 @@ return new class extends Migration
             $table->foreign('initiated_by')->references('id')->on('admin_actor');
         });
 
-        DB::statement("ALTER TABLE admin_job ADD CONSTRAINT admin_job_state
+        DB::statement("ALTER TABLE admin_job ADD CONSTRAINT admin_job_state_check
             CHECK (state IN ('queued','running','succeeded','partial','failed','cancelled','expired'))");
         DB::statement('ALTER TABLE admin_job ADD CONSTRAINT admin_job_counts
             CHECK (processed_count >= 0 AND failed_count >= 0)');
@@ -412,38 +438,54 @@ return new class extends Migration
             $table->unique(['owner_id', 'route', 'name'], 'saved_view_name_unique');
         });
 
-        DB::statement("ALTER TABLE saved_view ADD CONSTRAINT saved_view_visibility
+        DB::statement("ALTER TABLE saved_view ADD CONSTRAINT saved_view_visibility_check
             CHECK (visibility IN ('private','shared'))");
 
+        // The same key legitimately differs per environment (production vs staging)
+        // and per tenant, so uniqueness is (key, environment, tenant); COALESCE makes
+        // the global row (NULL tenant) unique too.
         Schema::create('config_setting', function (Blueprint $table) {
             $table->bigIncrements('id');
-            $table->text('key')->unique();
+            $table->text('key');
             $table->jsonb('value');
             $table->text('value_type');
-            // Secret values are never displayed after write. Support rotation and
-            // revocation instead.
             $table->boolean('is_secret')->default(false);
             $table->text('tenant_id')->nullable();
             $table->text('environment');
             $table->timestampTz('updated_at')->useCurrent();
         });
 
+        // A secret is only ever held as a reference to a secret manager entry, so
+        // the flag and the value_type must agree. There is no column for a secret
+        // value; secrets are never displayed, support rotation and revocation.
+        DB::statement("ALTER TABLE config_setting ADD CONSTRAINT config_setting_secret_ref
+            CHECK (is_secret = (value_type = 'secret_ref'))");
+        DB::statement("CREATE UNIQUE INDEX config_setting_key_scope_unique
+            ON config_setting (key, environment, COALESCE(tenant_id, '*'))");
+
         Schema::create('feature_flag', function (Blueprint $table) {
             $table->bigIncrements('id');
-            $table->text('key')->unique();
+            $table->text('key');
             $table->text('description')->default('');
             $table->boolean('is_enabled')->default(false);
             $table->jsonb('rollout')->default(DB::raw("'{}'::jsonb"));
+            $table->text('tenant_id')->nullable();
             $table->text('environment');
             $table->timestampTz('updated_at')->useCurrent();
         });
 
+        DB::statement("CREATE UNIQUE INDEX feature_flag_key_scope_unique
+            ON feature_flag (key, environment, COALESCE(tenant_id, '*'))");
+
         // Every configuration change is a privileged mutation and gets its own
-        // history row in addition to its audit event.
+        // history row in addition to its audit event. Keys repeat across
+        // environments and tenants, so the row carries the same scope.
         Schema::create('config_change', function (Blueprint $table) {
             $table->bigIncrements('id');
             $table->string('target_table', 32);
             $table->text('target_key');
+            $table->text('environment');
+            $table->text('tenant_id')->nullable();
             $table->jsonb('before_value')->nullable();
             $table->jsonb('after_value')->nullable();
             $table->unsignedBigInteger('changed_by');
@@ -455,10 +497,10 @@ return new class extends Migration
             $table->foreign('audit_event_id')->references('id')->on('audit_event');
         });
 
-        DB::statement("ALTER TABLE config_change ADD CONSTRAINT config_change_target
+        DB::statement("ALTER TABLE config_change ADD CONSTRAINT config_change_target_check
             CHECK (target_table IN ('config_setting','feature_flag'))");
-        DB::statement('CREATE INDEX config_change_target_idx
-            ON config_change (target_table, target_key, changed_at DESC)');
+        DB::statement('CREATE INDEX config_change_target
+            ON config_change (target_table, target_key, environment, changed_at DESC)');
 
         // -------------------------------------------------------------------
         // Exports and data-subject requests
@@ -513,50 +555,226 @@ return new class extends Migration
             $table->index(['state', 'due_at'], 'data_subject_request_queue');
         });
 
-        DB::statement("ALTER TABLE data_subject_request ADD CONSTRAINT data_subject_request_kind
+        DB::statement("ALTER TABLE data_subject_request ADD CONSTRAINT data_subject_request_kind_check
             CHECK (kind IN ('access','erasure','rectification','portability','restriction','objection'))");
-        DB::statement("ALTER TABLE data_subject_request ADD CONSTRAINT data_subject_request_state
+        DB::statement("ALTER TABLE data_subject_request ADD CONSTRAINT data_subject_request_state_check
             CHECK (state IN ('open','in-progress','fulfilled','refused','withdrawn'))");
 
         // -------------------------------------------------------------------
-        // Immutability
+        // Integrity: hash chain, payload scrub, append-only enforcement
         // -------------------------------------------------------------------
         //
         // A trigger stops ordinary application paths. It does not stop a superuser
         // or anyone who can DROP it. Real tamper evidence needs the hash chain
         // anchored outside this database. See references/admin-data-model.md.
+        //
+        // The database owns chain_seq, prev_hash, row_hash and the payload hashes
+        // (audit_event_chain_link). verify_audit_chain() re-computes the chain;
+        // scrub_audit_payload() is the single permitted UPDATE of an audit_event.
+        // Copied verbatim from postgres.sql (a test keeps them in step).
         DB::unprepared(<<<'SQL'
+            CREATE OR REPLACE FUNCTION audit_event_hash_input(e audit_event)
+            RETURNS text
+            LANGUAGE sql STABLE AS $$
+                SELECT jsonb_build_array(
+                    e.event_uuid, e.chain_id, e.chain_seq,
+                    to_char(e.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                    to_char(e.recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                    e.actor_id, e.actor_kind, e.effective_actor_id, e.impersonation_session_id,
+                    e.tenant_id, e.environment, host(e.source_ip), e.user_agent,
+                    e.action, e.target_type, e.target_id,
+                    e.reason, e.ticket_ref, e.approval_request_id,
+                    e.request_id, e.correlation_id, e.idempotency_key,
+                    e.result, e.error_code, e.before_hash, e.after_hash,
+                    e.policy_version, e.prev_hash, e.hash_algorithm
+                )::text
+            $$;
+
+            CREATE OR REPLACE FUNCTION audit_event_chain_link()
+            RETURNS trigger AS $$
+            DECLARE
+                last_seq  bigint;
+                last_hash text;
+            BEGIN
+                IF NEW.hash_algorithm IS DISTINCT FROM 'sha256' THEN
+                    RAISE EXCEPTION 'audit_event: only sha256 is implemented, got %', NEW.hash_algorithm;
+                END IF;
+                PERFORM pg_advisory_xact_lock(hashtextextended('admin_core.audit_event:' || NEW.chain_id, 0));
+                SELECT a.chain_seq, a.row_hash INTO last_seq, last_hash
+                  FROM audit_event a
+                 WHERE a.chain_id = NEW.chain_id
+                 ORDER BY a.chain_seq DESC
+                 LIMIT 1;
+                NEW.chain_seq := COALESCE(last_seq, 0) + 1;
+                NEW.prev_hash := last_hash;
+                IF NEW.before_state IS NOT NULL THEN
+                    NEW.before_hash := encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex');
+                END IF;
+                IF NEW.after_state IS NOT NULL THEN
+                    NEW.after_hash := encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex');
+                END IF;
+                NEW.row_hash := encode(
+                    sha256(convert_to(audit_event_hash_input(NEW), 'UTF8')), 'hex');
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+
+            CREATE TRIGGER audit_event_chain_link
+                BEFORE INSERT ON audit_event
+                FOR EACH ROW EXECUTE FUNCTION audit_event_chain_link();
+
+            CREATE OR REPLACE FUNCTION verify_audit_chain(p_chain_id text DEFAULT NULL)
+            RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
+            LANGUAGE plpgsql STABLE AS $$
+            DECLARE
+                r         audit_event%ROWTYPE;
+                cur_chain text;
+                prev_seq  bigint;
+                prev_hash text;
+            BEGIN
+                FOR r IN
+                    SELECT * FROM audit_event a
+                     WHERE p_chain_id IS NULL OR a.chain_id = p_chain_id
+                     ORDER BY a.chain_id, a.chain_seq
+                LOOP
+                    IF cur_chain IS DISTINCT FROM r.chain_id THEN
+                        cur_chain := r.chain_id;
+                        prev_seq := NULL;
+                        prev_hash := NULL;
+                    END IF;
+                    chain_id := r.chain_id;
+                    chain_seq := r.chain_seq;
+                    IF prev_seq IS NOT NULL AND r.chain_seq <> prev_seq + 1 THEN
+                        problem := 'gap: previous chain_seq is ' || prev_seq;
+                        RETURN NEXT;
+                    END IF;
+                    IF (prev_seq IS NOT NULL OR r.chain_seq = 1)
+                       AND r.prev_hash IS DISTINCT FROM prev_hash THEN
+                        problem := 'prev_hash does not match the previous row_hash';
+                        RETURN NEXT;
+                    END IF;
+                    IF r.row_hash IS DISTINCT FROM encode(
+                           sha256(convert_to(audit_event_hash_input(r), 'UTF8')), 'hex') THEN
+                        problem := 'row_hash does not match the row content';
+                        RETURN NEXT;
+                    END IF;
+                    IF r.before_state IS NOT NULL AND r.before_hash IS DISTINCT FROM
+                           encode(sha256(convert_to(r.before_state::text, 'UTF8')), 'hex') THEN
+                        problem := 'before_hash does not match before_state';
+                        RETURN NEXT;
+                    END IF;
+                    IF r.after_state IS NOT NULL AND r.after_hash IS DISTINCT FROM
+                           encode(sha256(convert_to(r.after_state::text, 'UTF8')), 'hex') THEN
+                        problem := 'after_hash does not match after_state';
+                        RETURN NEXT;
+                    END IF;
+                    prev_seq := r.chain_seq;
+                    prev_hash := r.row_hash;
+                END LOOP;
+            END;
+            $$;
+
+            CREATE OR REPLACE FUNCTION scrub_audit_payload(
+                p_event_id bigint, p_policy text, p_reason text, p_actor_id bigint DEFAULT NULL)
+            RETURNS void
+            LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+            DECLARE
+                ev audit_event%ROWTYPE;
+            BEGIN
+                IF p_policy IS NULL OR p_policy IN ('', 'none') THEN
+                    RAISE EXCEPTION 'scrub_audit_payload needs a named redaction policy';
+                END IF;
+                IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+                    RAISE EXCEPTION 'scrub_audit_payload needs a reason';
+                END IF;
+                PERFORM set_config('admin_core.scrub', 'on', true);
+                UPDATE audit_event
+                   SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
+                 WHERE id = p_event_id
+                RETURNING * INTO ev;
+                IF NOT FOUND THEN
+                    RAISE EXCEPTION 'audit_event % does not exist', p_event_id;
+                END IF;
+                PERFORM set_config('admin_core.scrub', 'off', true);
+
+                INSERT INTO audit_event
+                    (occurred_at, actor_id, actor_kind, tenant_id, environment,
+                     action, target_type, target_id, reason, result)
+                VALUES
+                    (now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
+                     'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded');
+            END;
+            $$;
+
+            REVOKE ALL ON FUNCTION scrub_audit_payload(bigint, text, text, bigint) FROM PUBLIC;
+
             CREATE OR REPLACE FUNCTION deny_audit_mutation()
             RETURNS trigger AS $$
             BEGIN
-                RAISE EXCEPTION 'audit_event is append-only; % is not permitted', TG_OP;
+                RAISE EXCEPTION '% is append-only; % is not permitted', TG_TABLE_NAME, TG_OP;
+            END;
+            $$ LANGUAGE plpgsql;
+
+            CREATE OR REPLACE FUNCTION audit_event_guard_update()
+            RETURNS trigger AS $$
+            BEGIN
+                IF current_setting('admin_core.scrub', true) IS DISTINCT FROM 'on' THEN
+                    RAISE EXCEPTION 'audit_event is append-only; UPDATE is not permitted (scrub payloads with scrub_audit_payload)';
+                END IF;
+                IF NEW.before_state IS NOT NULL OR NEW.after_state IS NOT NULL
+                   OR (to_jsonb(NEW) - 'before_state' - 'after_state' - 'redaction_policy')
+                      IS DISTINCT FROM (to_jsonb(OLD) - 'before_state' - 'after_state' - 'redaction_policy') THEN
+                    RAISE EXCEPTION 'audit_event scrub may only drop before_state / after_state and set redaction_policy';
+                END IF;
+                RETURN NEW;
             END;
             $$ LANGUAGE plpgsql;
 
             CREATE TRIGGER audit_event_no_update
                 BEFORE UPDATE ON audit_event
-                FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
+                FOR EACH ROW EXECUTE FUNCTION audit_event_guard_update();
 
             CREATE TRIGGER audit_event_no_delete
                 BEFORE DELETE ON audit_event
                 FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
 
+            CREATE TRIGGER audit_event_no_truncate
+                BEFORE TRUNCATE ON audit_event
+                FOR EACH STATEMENT EXECUTE FUNCTION deny_audit_mutation();
+
             CREATE TRIGGER approval_decision_no_update
                 BEFORE UPDATE ON approval_decision
                 FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
+
+            CREATE TRIGGER approval_decision_no_delete
+                BEFORE DELETE ON approval_decision
+                FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
+
+            CREATE TRIGGER approval_decision_no_truncate
+                BEFORE TRUNCATE ON approval_decision
+                FOR EACH STATEMENT EXECUTE FUNCTION deny_audit_mutation();
         SQL);
 
-        // Grant shape for the application role. Adapt the role name.
-        //   REVOKE UPDATE, DELETE ON audit_event FROM app_role;
-        //   GRANT  INSERT, SELECT ON audit_event TO app_role;
+        // Least-privilege grants for the application role (required at regulated):
+        // run grants.sql once after this migration, with psql, e.g.
+        //   psql "$DATABASE_URL" -v app_role=admin_app -v schema=public -f grants.sql
     }
 
     public function down(): void
     {
+        DB::unprepared('DROP TRIGGER IF EXISTS audit_event_chain_link ON audit_event');
         DB::unprepared('DROP TRIGGER IF EXISTS audit_event_no_update ON audit_event');
         DB::unprepared('DROP TRIGGER IF EXISTS audit_event_no_delete ON audit_event');
+        DB::unprepared('DROP TRIGGER IF EXISTS audit_event_no_truncate ON audit_event');
         DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_no_update ON approval_decision');
+        DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_no_delete ON approval_decision');
+        DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_no_truncate ON approval_decision');
         DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_sod ON approval_decision');
+        DB::unprepared('DROP FUNCTION IF EXISTS scrub_audit_payload(bigint, text, text, bigint)');
+        DB::unprepared('DROP FUNCTION IF EXISTS verify_audit_chain(text)');
+        DB::unprepared('DROP FUNCTION IF EXISTS audit_event_guard_update()');
+        DB::unprepared('DROP FUNCTION IF EXISTS audit_event_chain_link()');
+        DB::unprepared('DROP FUNCTION IF EXISTS audit_event_hash_input(audit_event)');
         DB::unprepared('DROP FUNCTION IF EXISTS deny_audit_mutation()');
         DB::unprepared('DROP FUNCTION IF EXISTS enforce_separation_of_duties()');
 

@@ -36,8 +36,8 @@ Order of preference:
 The runnable definition is `postgres.sql`, with per-stack translation rules, adaptation
 guidance, and profile requirements in
 [../assets/admin-core-schema/README.md](../assets/admin-core-schema/README.md). Read the
-README before copying: three constraints here cannot be expressed by most ORMs and must stay
-in the database.
+README before copying: four kinds of control here cannot be expressed by most ORMs and must
+stay in the database.
 
 Drop what you do not need. A three-operator internal tool does not need `approval_request`,
 `data_subject_request`, or a hash chain. Keeping unused tables costs review attention and
@@ -89,7 +89,8 @@ call-site convention, so a new call site cannot silently skip them.
 
 Two invariants worth enforcing in the database: an actor cannot grant a role to itself
 (`granted_by <> actor_id`), and an actor cannot hold two live grants of the same role in the same
-tenant scope (partial unique index filtered on `revoked_at IS NULL`).
+tenant scope (partial unique index filtered on `revoked_at IS NULL`, over
+`COALESCE(scope_tenant_id, '*')` so a global grant is unique too — NULLs are otherwise distinct).
 
 ## Scope encoding
 
@@ -141,15 +142,15 @@ The decision is a function of six inputs. All six are storable.
 subject    admin_actor + its live admin_actor_role rows
 resource   admin_permission.resource, plus the target row's tenant/owner attributes
 action     admin_permission.action
-scope      admin_actor_role.scope, narrowed by admin_role_permission.constraint_expr
+scope      admin_actor_role.scope, capped by admin_role.max_scope
 condition  scope.conditions[] evaluated against the request context
-obligation admin_permission.requires_* plus any obligations in constraint_expr
+obligation admin_permission.requires_reason / requires_step_up / requires_approval
 ```
 
 Evaluation order:
 
 ```text
-1  authenticate       subject := admin_actor where status = 'active'
+1  authenticate       subject := admin_actor where is_active
 2  resolve grants     live admin_actor_role: revoked_at IS NULL
                       AND now() BETWEEN starts_at AND COALESCE(expires_at, 'infinity')
 3  resolve permission admin_role_permission -> admin_permission WHERE key = requested action
@@ -199,18 +200,30 @@ Non-obvious requirements:
   year and break the manifest's `capability.auditEvents` traceability.
 - `effective_actor_id` is `NULL` unless impersonating. Never overwrite `actor_id` with the
   impersonated identity — that is the single most common way impersonation audit is destroyed.
-- `before_hash` / `after_hash` are hashes of the payloads, and the row hash covers the hashes
-  rather than the payload text. This is what makes later payload redaction possible without
-  invalidating the chain.
+  It is text in the identity space of `impersonation_session.target_subject_id`, not a foreign
+  key to `admin_actor`: the acted-as subject is usually a customer.
+- `before_hash` / `after_hash` are hashes of the payloads (the insert trigger computes them),
+  and the row hash covers the hashes rather than the payload text. This is what makes later
+  payload redaction possible without invalidating the chain.
 - Redaction is not optional. Audit payloads become the least-governed copy of sensitive data in
   the system. Apply a named redaction policy at write time and record its name.
 
 ## Hash chaining: what it proves and what it does not
 
-Each row stores `prev_hash` (the previous row's `row_hash` in the same `chain_id`) and
-`row_hash = H(canonical(fields) || prev_hash)`. Define the field list and the canonical encoding
-explicitly; an unspecified serialization makes verification irreproducible, which is the same as
-having no chain.
+Each row stores `prev_hash` (the previous row's `row_hash` in the same `chain_id`) and a
+`row_hash` over its own fields. An unspecified serialization makes verification irreproducible,
+so the reference schema pins it in the database (`audit_event_hash_input()` and the
+`audit_event_chain_link` trigger):
+
+- **Fields**: every column except `id`, `row_hash` and `before_state` / `after_state` /
+  `redaction_policy` (the hashes stand in for the payloads); `chain_seq`, `prev_hash` are inside.
+- **Encoding**: jsonb text of the array of those values in fixed column order, timestamps as UTC
+  ISO-8601 with microseconds, `NULL` as JSON `null`; `row_hash` is hex SHA-256 of its UTF-8 bytes.
+  An external verifier calls `audit_event_hash_input()` or replicates it.
+- **`chain_seq`**: last + 1 under a per-`chain_id` advisory lock: gap-free, and inserts in one
+  chain serialize. Writers omit `chain_seq`, `prev_hash` and `row_hash`.
+- **Verifier**: `verify_audit_chain([chain_id])` recomputes every row and lists gaps, broken links,
+  edited rows and payload-hash mismatches; empty means internally consistent.
 
 It proves, given an independently held anchor:
 
@@ -238,9 +251,15 @@ write throughput matters, and verify per chain.
 
 ## Audit retention and partitioning
 
-Partition `audit_event` by range on `occurred_at`, typically monthly. Consequences to plan for:
+Partition `audit_event` by range on `occurred_at`, typically monthly. Every unique index and the
+primary key of a partitioned table must include the partition key, so the reference keys change:
 
-- The primary key must include the partition key. Use `(occurred_at, id)`.
+- Primary key `(occurred_at, id)`; `event_uuid` unique becomes `(occurred_at, event_uuid)` and
+  `(chain_id, chain_seq)` becomes `(chain_id, chain_seq, occurred_at)`. Uniqueness is then per
+  partition: the chain trigger's per-chain lock and `verify_audit_chain()` keep `chain_seq`
+  globally unique, and nothing may rely on `event_uuid` being unique across partitions.
+- Inbound foreign keys (`config_change.audit_event_id`) can no longer reference `id` alone:
+  store and reference `(audit_event_id, audit_occurred_at)`, or drop them and check in a job.
 - Create partitions ahead of time. A missing partition is an insert failure on the write path of
   every privileged action.
 - Retire by detaching and archiving the partition, not by `DELETE`. Bulk deletes on the hottest
@@ -251,7 +270,7 @@ Retention has three separate clocks, and conflating them is the usual mistake:
 | Data | Typical driver | Note |
 |---|---|---|
 | Event metadata | Regulation or contract | Often the longest; frequently not an engineering decision |
-| Change payloads | Data minimization | Scrub earlier than metadata; `before_hash` keeps the chain intact |
+| Change payloads | Data minimization | Scrub earlier than metadata (`scrub_audit_payload()`); the hashes keep the chain intact |
 | Correlated application logs | Cost | Much shorter; do not treat as audit |
 
 Archiving splits the chain into segments. Preserve each archived segment's head and tail hash
@@ -267,10 +286,12 @@ opting into write impersonation should be a deliberate, separately permissioned 
 `scope_restrictions` holds the permission keys that stay denied while impersonating, so
 impersonation can never widen the real actor's authority.
 
-Enforce in the database: expiry strictly after start, a bounded maximum duration, and at most one
-live session per real actor (partial unique index on `ended_at IS NULL`). Ending is a state
-change with an `end_reason` of `operator_exit`, `expired`, `revoked`, or `session_lost` — sessions
-that simply stop appearing are indistinguishable from sessions that were never closed.
+The reference schema enforces in the database: expiry strictly after start
+(`impersonation_bounded`), a bounded maximum duration (`impersonation_max_duration`, 8 hours — set
+your own), and at most one live session per real actor (`impersonation_session_one_live`, so a
+sweeper must end expired sessions). Ending is a state change with an `ended_reason` of
+`operator_exit`, `expired`, `revoked`, or `session_lost` (`impersonation_end_state` requires one) —
+sessions that simply stop appearing are indistinguishable from sessions never closed.
 
 Every audit event produced during the session carries both `actor_id` and `effective_actor_id`,
 plus `impersonation_session_id`. That triple is what makes "show me everything support did as
@@ -286,9 +307,9 @@ later edited is an authorization bypass with a clean audit trail.
 State machine:
 
 ```text
-pending ──approve(n of required)──> approved ──execute──> executed
-   │                                   │                     └──> execution_failed
-   ├──reject──> rejected               └──expire──> expired
+pending ──approve(n of required)──> approved ──execute──> executed | execution_failed
+   │                                   └──expire──> expired
+   ├──reject──> rejected
    ├──expire──> expired
    └──cancel(requester)──> cancelled
 ```
@@ -296,12 +317,14 @@ pending ──approve(n of required)──> approved ──execute──> execut
 `approved` is not `executed`. Re-evaluate authorization at execution time — the approver's or the
 requester's grants may have been revoked in between.
 
-Separation of duties can be enforced declaratively rather than in application code. Denormalize
-`requested_by` onto `approval_decision`, add a composite foreign key back to
-`approval_request (id, requested_by)`, and add `CHECK (approver_id <> requested_by)`. The database
-then refuses self-approval regardless of which service writes the row. `required_approvals`
-covers n-of-m; a unique constraint on `(request_id, approver_id)` stops one approver from
-counting twice.
+Separation of duties belongs in the database. The reference schema uses a trigger on
+`approval_decision`; the declarative alternative is to denormalize `requested_by` onto it, add a
+composite foreign key back to `approval_request (id, requested_by)`, and add
+`CHECK (approver_id <> requested_by)`. Either way the database refuses self-approval whichever
+service writes the row. `required_approvals` covers n-of-m; a unique constraint on
+`(request_id, approver_id)` stops one approver counting twice. Decisions are append-only (update,
+delete and truncate denied, request FK `RESTRICT`), or a rejection could be deleted with its
+request and re-entered as an approval.
 
 ## Jobs, saved views, configuration
 
@@ -324,11 +347,13 @@ Visibility is `private` or `shared`. If the project needs finer sharing — per 
 or global — extend the enum and add the column the new value depends on; do not overload
 `shared` to mean different things in different screens.
 
-`feature_flag` and `config_setting` are keyed by `(key, environment)` because the same key in
-production and staging are different facts. `config_setting` never holds a secret value — it holds
-a reference (`value_type = 'secret_ref'`). Both write to a single `config_change` history with
-before/after, actor, reason, and the audit event id. Configuration changes are privileged commands
-and belong in the audit trail like any other.
+`feature_flag` and `config_setting` are unique per `(key, environment, tenant)` because the same
+key in production and staging, or for one tenant, are different facts (the global row has a `NULL`
+tenant). `config_setting` never holds a secret value — it holds a reference: `is_secret` and
+`value_type = 'secret_ref'` must agree (a CHECK), and there is no column for the secret itself.
+Both write to a single `config_change` history with before/after, the same environment and tenant,
+actor, reason, and the audit event id. Configuration changes are privileged commands and belong in
+the audit trail like any other.
 
 ## Exports and data-subject requests
 
@@ -371,7 +396,7 @@ operator search belongs on the domain tables, not on `audit_event`.
 
 | Table | Immutable after write | Permitted later change |
 |---|---|---|
-| `audit_event` | Every column | Payload scrub, itself audited, hashes retained |
+| `audit_event` | Every column | Payload drop via `scrub_audit_payload()` only, itself audited, hashes retained |
 | `admin_job` | `input_summary`, `input_hash`, `initiated_by` | State, progress, result |
 | `approval_request` | `payload`, `payload_hash`, `requested_by`, `command_key` | State, decision and execution timestamps |
 | `approval_decision` | Whole row | None; a reversal is a new request |
@@ -381,7 +406,8 @@ operator search belongs on the domain tables, not on `audit_event`.
 | `config_change`, `admin_job_failure` | Whole row | None |
 
 Deleting from any of these is a defect, not a cleanup. Retention removes whole partitions or
-whole archived segments under a stated policy.
+whole archived segments under a stated policy. The reference schema enforces only the `audit_event`
+and `approval_decision` rows (triggers plus `grants.sql`); the rest are application rules.
 
 ## Manifest mapping
 

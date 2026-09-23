@@ -1,18 +1,29 @@
 // Adminwright admin control-plane core schema — Drizzle ORM (PostgreSQL)
 //
-// Faithful translation of postgres.sql. Read ./README.md before adapting.
+// Translation of postgres.sql, kept in step with it by tests/test_core_schema.py.
+// Read ./README.md before adapting.
 //
 // WHAT DRIZZLE CANNOT ENFORCE — add these in a hand-written migration:
 //
-//   1. Triggers. Append-only enforcement on auditEvent and approvalDecision, and
-//      the separation-of-duties trigger on approvalDecision. Application-level
-//      guards are bypassed by raw queries and other services.
-//   2. Nothing else. Drizzle expresses CHECK constraints (`check()`) and partial
-//      unique indexes (`.where()`) natively, and both are used below.
+//   1. Triggers and functions. Append-only enforcement on auditEvent and
+//      approvalDecision, the audit hash chain (chain_seq / prev_hash / row_hash are
+//      assigned by a BEFORE INSERT trigger; leave them out of your inserts),
+//      verify_audit_chain(), scrub_audit_payload(), and the separation-of-duties
+//      trigger. Application-level guards are bypassed by raw queries and other
+//      services.
+//   2. Nothing else. Drizzle expresses CHECK constraints (`check()`), partial
+//      unique indexes (`.where()`) and expression indexes (a sql template inside
+//      `.on()`) natively, and all three are used below.
 //
-// Generate the migration, then append the trigger statements from postgres.sql:
+// Generate the migration, then append the function and trigger statements from the
+// Integrity section of postgres.sql (tables here live in the admin_core schema, so
+// the statements apply unchanged):
 //   npx drizzle-kit generate
-//   # edit the emitted .sql and add the three triggers
+//   # edit the emitted .sql and append the functions and triggers
+// Then run grants.sql (least-privilege grants for the application role; the
+// regulated profile requires it) with psql.
+//
+// admin_actor.email is text here rather than citext.
 
 import {
   pgSchema,
@@ -61,9 +72,9 @@ export const adminActor = adminCore.table("admin_actor", {
   deactivatedAt: timestamp("deactivated_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
-  check("admin_actor_kind", sql`${t.kind} IN ('human','service','agent')`),
+  check("admin_actor_kind_check", sql`${t.kind} IN ('human','service','agent')`),
   check(
-    "admin_actor_auth_strength",
+    "admin_actor_auth_strength_check",
     sql`${t.authStrength} IN ('password','mfa','phishing-resistant','sso')`,
   ),
 ]);
@@ -96,7 +107,7 @@ export const adminPermission = adminCore.table("admin_permission", {
   requiresApproval: boolean("requires_approval").notNull().default(false),
   description: text("description").notNull().default(""),
 }, (t) => [
-  check("admin_permission_risk", sql`${t.risk} IN ('low','moderate','high','critical')`),
+  check("admin_permission_risk_check", sql`${t.risk} IN ('low','moderate','high','critical')`),
 ]);
 
 export const adminRolePermission = adminCore.table("admin_role_permission", {
@@ -174,6 +185,8 @@ export const impersonationSession = adminCore.table("impersonation_session", {
   targetTenantId: text("target_tenant_id"),
   reason: text("reason").notNull(),
   ticketRef: text("ticket_ref"),
+  // Opting into write impersonation is a deliberate, separately permissioned act.
+  readOnly: boolean("read_only").notNull().default(true),
   scopeRestrictions: jsonb("scope_restrictions").notNull().default(sql`'{}'::jsonb`),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
@@ -182,6 +195,21 @@ export const impersonationSession = adminCore.table("impersonation_session", {
   revokedBy: bigint("revoked_by", { mode: "bigint" }).references(() => adminActor.id),
 }, (t) => [
   check("impersonation_bounded", sql`${t.expiresAt} > ${t.startedAt}`),
+  // Bounded maximum duration; 8 hours here, tighten to the project's policy.
+  check("impersonation_max_duration", sql`${t.expiresAt} - ${t.startedAt} <= interval '8 hours'`),
+  // A session that stops without a recorded reason is indistinguishable from one
+  // that was never closed, so ending it requires one of the four reasons.
+  check(
+    "impersonation_end_state",
+    sql`(${t.endedAt} IS NULL AND ${t.endedReason} IS NULL)
+      OR (${t.endedAt} IS NOT NULL AND ${t.endedReason} IS NOT NULL
+          AND ${t.endedReason} IN ('operator_exit', 'expired', 'revoked', 'session_lost'))`,
+  ),
+  // At most one live session per real actor. A sweeper must end expired sessions
+  // (ended_reason = 'expired'), or the actor cannot start another.
+  uniqueIndex("impersonation_session_one_live")
+    .on(t.realActorId)
+    .where(sql`${t.endedAt} IS NULL`),
   index("impersonation_session_active")
     .on(t.realActorId, t.expiresAt)
     .where(sql`${t.endedAt} IS NULL`),
@@ -192,7 +220,8 @@ export const impersonationSession = adminCore.table("impersonation_session", {
 // ---------------------------------------------------------------------------
 
 /**
- * Append-only. TRIGGER REQUIRED: BEFORE UPDATE and BEFORE DELETE must raise.
+ * Append-only. TRIGGERS REQUIRED: BEFORE UPDATE / DELETE / TRUNCATE must raise
+ * (UPDATE only via scrub_audit_payload), plus the BEFORE INSERT hash-chain trigger.
  * The column set exists to answer investigation questions without joining against
  * mutable state that may since have changed.
  */
@@ -200,7 +229,7 @@ export const auditEvent = adminCore.table("audit_event", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
   eventUuid: uuid("event_uuid").notNull().defaultRandom().unique(),
   chainId: text("chain_id").notNull().default("default"),
-  chainSeq: bigint("chain_seq", { mode: "bigint" }).notNull(),
+  chainSeq: bigint("chain_seq", { mode: "bigint" }).notNull(), // assigned by trigger
 
   occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
@@ -208,10 +237,11 @@ export const auditEvent = adminCore.table("audit_event", {
   actorId: bigint("actor_id", { mode: "bigint" }).references(() => adminActor.id),
   actorKind: text("actor_kind").notNull().default("human"),
   // Null unless impersonating. Never overwrite actorId with the impersonated
-  // identity: that is the most common way impersonation audit is destroyed.
-  effectiveActorId: bigint("effective_actor_id", { mode: "bigint" }).references(
-    () => adminActor.id,
-  ),
+  // identity: that is the most common way impersonation audit is destroyed. The
+  // acted-as subject is usually a customer, not an admin_actor, so this is text in
+  // the same identity space as impersonation_session.target_subject_id,
+  // deliberately with no foreign key.
+  effectiveActorId: text("effective_actor_id"),
   impersonationSessionId: bigint("impersonation_session_id", { mode: "bigint" }).references(
     () => impersonationSession.id,
   ),
@@ -247,15 +277,15 @@ export const auditEvent = adminCore.table("audit_event", {
 
   policyVersion: text("policy_version"),
 
-  prevHash: text("prev_hash"),
-  rowHash: text("row_hash").notNull(),
+  prevHash: text("prev_hash"), // assigned by trigger
+  rowHash: text("row_hash").notNull(), // assigned by trigger
   hashAlgorithm: text("hash_algorithm").notNull().default("sha256"),
 }, (t) => [
-  check("audit_event_actor_kind", sql`${t.actorKind} IN ('human','service','agent','system')`),
+  check("audit_event_actor_kind_check", sql`${t.actorKind} IN ('human','service','agent','system')`),
   // 'denied' lets you detect probing; 'unknown' stops a provider timeout being
   // misreported as a failure when the provider may still have acted.
   check(
-    "audit_event_result",
+    "audit_event_result_check",
     sql`${t.result} IN ('succeeded','failed','denied','partial','unknown')`,
   ),
   check(
@@ -308,8 +338,8 @@ export const approvalRequest = adminCore.table("approval_request", {
 }, (t) => [
   check("approval_request_min_approvals", sql`${t.requiredApprovals} >= 1`),
   check(
-    "approval_request_state",
-    sql`${t.state} IN ('pending','approved','rejected','expired','executed','cancelled')`,
+    "approval_request_state_check",
+    sql`${t.state} IN ('pending','approved','rejected','expired','executed','execution_failed','cancelled')`,
   ),
   index("approval_request_queue")
     .on(t.state, t.expiresAt)
@@ -318,15 +348,18 @@ export const approvalRequest = adminCore.table("approval_request", {
 
 /**
  * Immutable once written. A reversal is a new request, never an edit.
- * TRIGGER REQUIRED: the separation-of-duties check. The requester must not be able
+ * TRIGGERS REQUIRED: BEFORE UPDATE / DELETE / TRUNCATE must raise, and the
+ * separation-of-duties check. The requester must not be able
  * to approve their own request, and enforcing that only in application code means
  * the control is absent for anything writing this table directly.
  */
 export const approvalDecision = adminCore.table("approval_decision", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
+  // RESTRICT, not CASCADE: cascading would let a rejection be deleted with its
+  // request and re-entered as an approval.
   requestId: bigint("request_id", { mode: "bigint" })
     .notNull()
-    .references(() => approvalRequest.id, { onDelete: "cascade" }),
+    .references(() => approvalRequest.id, { onDelete: "restrict" }),
   approverId: bigint("approver_id", { mode: "bigint" })
     .notNull()
     .references(() => adminActor.id),
@@ -334,7 +367,7 @@ export const approvalDecision = adminCore.table("approval_decision", {
   reason: text("reason").notNull(),
   decidedAt: timestamp("decided_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
-  check("approval_decision_kind", sql`${t.decision} IN ('approved','rejected')`),
+  check("approval_decision_kind_check", sql`${t.decision} IN ('approved','rejected')`),
   // One approver decides once. Without this a single approver satisfies a
   // two-approval requirement by voting twice.
   uniqueIndex("approval_decision_one_per_approver").on(t.requestId, t.approverId),
@@ -368,7 +401,7 @@ export const adminJob = adminCore.table("admin_job", {
   cancelRequested: boolean("cancel_requested").notNull().default(false),
 }, (t) => [
   check(
-    "admin_job_state",
+    "admin_job_state_check",
     sql`${t.state} IN ('queued','running','succeeded','partial','failed','cancelled','expired')`,
   ),
   check("admin_job_counts", sql`${t.processedCount} >= 0 AND ${t.failedCount} >= 0`),
@@ -421,41 +454,62 @@ export const savedView = adminCore.table("saved_view", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
-  check("saved_view_visibility", sql`${t.visibility} IN ('private','shared')`),
+  check("saved_view_visibility_check", sql`${t.visibility} IN ('private','shared')`),
   uniqueIndex("saved_view_name_unique").on(t.ownerId, t.route, t.name),
 ]);
 
+// The same key legitimately differs per environment (production vs staging) and per
+// tenant, so uniqueness is (key, environment, tenant); COALESCE makes the global row
+// (NULL tenant) unique too.
 export const configSetting = adminCore.table("config_setting", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
-  key: text("key").notNull().unique(),
+  key: text("key").notNull(),
   value: jsonb("value").notNull(),
   valueType: text("value_type").notNull(),
-  // Secret values are never displayed after write. Support rotation and
-  // revocation instead.
   isSecret: boolean("is_secret").notNull().default(false),
   tenantId: text("tenant_id"),
   environment: text("environment").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  // A secret is only ever held as a reference to a secret manager entry, so the flag
+  // and the value_type must agree. There is no column for a secret value; secrets
+  // are never displayed, support rotation and revocation instead.
+  check("config_setting_secret_ref", sql`${t.isSecret} = (${t.valueType} = 'secret_ref')`),
+  uniqueIndex("config_setting_key_scope_unique").on(
+    t.key,
+    t.environment,
+    sql`COALESCE(${t.tenantId}, '*')`,
+  ),
+]);
 
 export const featureFlag = adminCore.table("feature_flag", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
-  key: text("key").notNull().unique(),
+  key: text("key").notNull(),
   description: text("description").notNull().default(""),
   isEnabled: boolean("is_enabled").notNull().default(false),
   rollout: jsonb("rollout").notNull().default(sql`'{}'::jsonb`),
+  tenantId: text("tenant_id"),
   environment: text("environment").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  uniqueIndex("feature_flag_key_scope_unique").on(
+    t.key,
+    t.environment,
+    sql`COALESCE(${t.tenantId}, '*')`,
+  ),
+]);
 
 /**
  * Every configuration change is a privileged mutation and gets its own history row
- * in addition to its audit event.
+ * in addition to its audit event. Keys repeat across environments and tenants, so
+ * the row carries the same scope.
  */
 export const configChange = adminCore.table("config_change", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
   targetTable: text("target_table").notNull(),
   targetKey: text("target_key").notNull(),
+  environment: text("environment").notNull(),
+  tenantId: text("tenant_id"),
   beforeValue: jsonb("before_value"),
   afterValue: jsonb("after_value"),
   changedBy: bigint("changed_by", { mode: "bigint" })
@@ -465,8 +519,13 @@ export const configChange = adminCore.table("config_change", {
   changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
   auditEventId: bigint("audit_event_id", { mode: "bigint" }).references(() => auditEvent.id),
 }, (t) => [
-  check("config_change_target", sql`${t.targetTable} IN ('config_setting','feature_flag')`),
-  index("config_change_target_idx").on(t.targetTable, t.targetKey, sql`${t.changedAt} DESC`),
+  check("config_change_target_check", sql`${t.targetTable} IN ('config_setting','feature_flag')`),
+  index("config_change_target").on(
+    t.targetTable,
+    t.targetKey,
+    t.environment,
+    sql`${t.changedAt} DESC`,
+  ),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -498,10 +557,10 @@ export const exportRequest = adminCore.table("export_request", {
   lastDownloadedAt: timestamp("last_downloaded_at", { withTimezone: true }),
 }, (t) => [
   check(
-    "export_request_state",
+    "export_request_state_check",
     sql`${t.state} IN ('queued','running','ready','failed','expired','revoked')`,
   ),
-  index("export_request_state_idx").on(t.state, t.expiresAt),
+  index("export_request_state").on(t.state, t.expiresAt),
 ]);
 
 /**
@@ -523,11 +582,11 @@ export const dataSubjectRequest = adminCore.table("data_subject_request", {
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
 }, (t) => [
   check(
-    "data_subject_request_kind",
+    "data_subject_request_kind_check",
     sql`${t.kind} IN ('access','erasure','rectification','portability','restriction','objection')`,
   ),
   check(
-    "data_subject_request_state",
+    "data_subject_request_state_check",
     sql`${t.state} IN ('open','in-progress','fulfilled','refused','withdrawn')`,
   ),
   index("data_subject_request_queue").on(t.state, t.dueAt),

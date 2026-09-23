@@ -2,22 +2,31 @@
 
 # Adminwright admin control-plane core schema — Rails migration.
 #
-# Faithful translation of postgres.sql. Read ./README.md before adapting.
+# Translation of postgres.sql, kept in step with it by tests/test_core_schema.py.
+# Read ./README.md before adapting.
 #
 # WHAT RAILS EXPRESSES NATIVELY:
 #   * CHECK constraints via `t.check_constraint` / `add_check_constraint`
 #   * Partial unique indexes via `add_index ..., where:`
 #
 # WHAT NEEDS RAW SQL — included below via `execute`:
-#   * Triggers: append-only enforcement on audit_event and approval_decision, and
-#     the separation-of-duties trigger. ActiveRecord callbacks are bypassed by
-#     `update_all`, `delete_all`, raw SQL, and other services.
+#   * Expression unique indexes (COALESCE on the nullable tenant column).
+#   * Triggers and functions: append-only enforcement on audit_event and
+#     approval_decision, the audit hash chain (chain_seq / prev_hash / row_hash are
+#     assigned by a BEFORE INSERT trigger; leave them out of your inserts),
+#     verify_audit_chain(), scrub_audit_payload(), and the separation-of-duties
+#     trigger. ActiveRecord callbacks are bypassed by `update_all`, `delete_all`,
+#     raw SQL, and other services.
+#
+# Then run grants.sql (least-privilege grants for the application role; the
+# regulated profile requires it) with psql.
 #
 # REQUIRED: set `config.active_record.schema_format = :sql` in application.rb.
 # With the default :ruby format, `db/schema.rb` cannot represent triggers or
 # functions, and they will be silently lost the next time the schema is loaded.
 #
-# PostgreSQL only. Adapt table names to project convention, but keep
+# PostgreSQL only; tables land in the default (public) schema and admin_actor.email
+# is text rather than citext. Adapt table names to project convention, but keep
 # admin_permission.key equal to the manifest capability id.
 
 class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
@@ -49,9 +58,9 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
 
       t.index :actor_uuid, unique: true
       t.index :auth_subject, unique: true
-      t.check_constraint "kind IN ('human','service','agent')", name: 'admin_actor_kind'
+      t.check_constraint "kind IN ('human','service','agent')", name: 'admin_actor_kind_check'
       t.check_constraint "auth_strength IN ('password','mfa','phishing-resistant','sso')",
-                         name: 'admin_actor_auth_strength'
+                         name: 'admin_actor_auth_strength_check'
     end
 
     create_table :admin_role do |t|
@@ -82,7 +91,7 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
 
       t.index :key, unique: true
       t.check_constraint "risk IN ('low','moderate','high','critical')",
-                         name: 'admin_permission_risk'
+                         name: 'admin_permission_risk_check'
     end
 
     create_table :admin_role_permission, primary_key: %i[role_id permission_id] do |t|
@@ -157,6 +166,8 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.text   :target_tenant_id
       t.text   :reason, null: false
       t.text   :ticket_ref
+      # Opting into write impersonation is a deliberate, separately permissioned act.
+      t.boolean :read_only, null: false, default: true
       t.jsonb  :scope_restrictions, null: false, default: {}
       t.timestamptz :started_at, null: false, default: -> { 'now()' }
       t.timestamptz :expires_at, null: false
@@ -168,8 +179,19 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.foreign_key :admin_actor, column: :revoked_by
       t.index :session_uuid, unique: true
       t.check_constraint 'expires_at > started_at', name: 'impersonation_bounded'
+      # Bounded maximum duration; 8 hours here, tighten to the project's policy.
+      t.check_constraint "expires_at - started_at <= interval '8 hours'",
+                         name: 'impersonation_max_duration'
+      # A session that stops without a recorded reason is indistinguishable from one
+      # that was never closed, so ending it requires one of the four reasons.
+      t.check_constraint "(ended_at IS NULL AND ended_reason IS NULL) OR (ended_at IS NOT NULL AND ended_reason IS NOT NULL AND ended_reason IN ('operator_exit', 'expired', 'revoked', 'session_lost'))",
+                         name: 'impersonation_end_state'
     end
 
+    # At most one live session per real actor. A sweeper must end expired sessions
+    # (ended_reason = 'expired'), or the actor cannot start another.
+    add_index :impersonation_session, :real_actor_id, unique: true,
+              where: 'ended_at IS NULL', name: 'impersonation_session_one_live'
     add_index :impersonation_session, %i[real_actor_id expires_at],
               where: 'ended_at IS NULL', name: 'impersonation_session_active'
 
@@ -180,7 +202,7 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
     create_table :audit_event do |t|
       t.uuid   :event_uuid, null: false, default: -> { 'gen_random_uuid()' }
       t.text   :chain_id, null: false, default: 'default'
-      t.bigint :chain_seq, null: false
+      t.bigint :chain_seq, null: false   # assigned by trigger
 
       t.timestamptz :occurred_at, null: false
       t.timestamptz :recorded_at, null: false, default: -> { 'now()' }
@@ -188,8 +210,11 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.bigint :actor_id
       t.string :actor_kind, limit: 16, null: false, default: 'human'
       # Null unless impersonating. Never overwrite actor_id with the impersonated
-      # identity: that is the most common way impersonation audit is destroyed.
-      t.bigint :effective_actor_id
+      # identity: that is the most common way impersonation audit is destroyed. The
+      # acted-as subject is usually a customer, not an admin_actor, so this is text
+      # in the same identity space as impersonation_session.target_subject_id,
+      # deliberately with no foreign key.
+      t.text   :effective_actor_id
       t.bigint :impersonation_session_id
 
       t.text   :tenant_id
@@ -223,23 +248,22 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
 
       t.text   :policy_version
 
-      t.text   :prev_hash
-      t.text   :row_hash, null: false
+      t.text   :prev_hash                 # assigned by trigger
+      t.text   :row_hash, null: false     # assigned by trigger
       t.text   :hash_algorithm, null: false, default: 'sha256'
 
       t.foreign_key :admin_actor, column: :actor_id
-      t.foreign_key :admin_actor, column: :effective_actor_id
       t.foreign_key :impersonation_session, column: :impersonation_session_id
 
       t.index :event_uuid, unique: true
       t.index %i[chain_id chain_seq], unique: true, name: 'audit_event_chain'
 
       t.check_constraint "actor_kind IN ('human','service','agent','system')",
-                         name: 'audit_event_actor_kind'
+                         name: 'audit_event_actor_kind_check'
       # 'denied' lets you detect probing; 'unknown' stops a provider timeout being
       # misreported as a failure when the provider may still have acted.
       t.check_constraint "result IN ('succeeded','failed','denied','partial','unknown')",
-                         name: 'audit_event_result'
+                         name: 'audit_event_result_check'
       t.check_constraint 'effective_actor_id IS NULL OR impersonation_session_id IS NOT NULL',
                          name: 'audit_event_effective_actor_requires_session'
     end
@@ -287,8 +311,8 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.index :request_uuid, unique: true
 
       t.check_constraint 'required_approvals >= 1', name: 'approval_request_min_approvals'
-      t.check_constraint "state IN ('pending','approved','rejected','expired','executed','cancelled')",
-                         name: 'approval_request_state'
+      t.check_constraint "state IN ('pending','approved','rejected','expired','executed','execution_failed','cancelled')",
+                         name: 'approval_request_state_check'
     end
 
     add_index :approval_request, %i[state expires_at], where: "state = 'pending'",
@@ -302,18 +326,20 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.text   :reason, null: false
       t.timestamptz :decided_at, null: false, default: -> { 'now()' }
 
-      t.foreign_key :approval_request, column: :request_id, on_delete: :cascade
+      # RESTRICT, not CASCADE: cascading would let a rejection be deleted with its
+      # request and re-entered as an approval.
+      t.foreign_key :approval_request, column: :request_id, on_delete: :restrict
       t.foreign_key :admin_actor, column: :approver_id
       # One approver decides once. Without this a single approver satisfies a
       # two-approval requirement by voting twice.
       t.index %i[request_id approver_id], unique: true,
               name: 'approval_decision_one_per_approver'
-      t.check_constraint "decision IN ('approved','rejected')", name: 'approval_decision_kind'
+      t.check_constraint "decision IN ('approved','rejected')", name: 'approval_decision_kind_check'
     end
 
     # Separation of duties: the requester may not approve their own request.
     # Enforced in the database because that is the whole point of the control.
-    execute <<~SQL
+    execute <<~'SQL'
       CREATE OR REPLACE FUNCTION enforce_separation_of_duties()
       RETURNS trigger AS $$
       BEGIN
@@ -360,7 +386,7 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.foreign_key :admin_actor, column: :initiated_by
       t.index :job_uuid, unique: true
       t.check_constraint "state IN ('queued','running','succeeded','partial','failed','cancelled','expired')",
-                         name: 'admin_job_state'
+                         name: 'admin_job_state_check'
       t.check_constraint 'processed_count >= 0 AND failed_count >= 0', name: 'admin_job_counts'
     end
 
@@ -407,39 +433,55 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
 
       t.foreign_key :admin_actor, column: :owner_id, on_delete: :cascade
       t.index %i[owner_id route name], unique: true, name: 'saved_view_name_unique'
-      t.check_constraint "visibility IN ('private','shared')", name: 'saved_view_visibility'
+      t.check_constraint "visibility IN ('private','shared')", name: 'saved_view_visibility_check'
     end
 
+    # The same key legitimately differs per environment (production vs staging) and
+    # per tenant, so uniqueness is (key, environment, tenant); COALESCE makes the
+    # global row (NULL tenant) unique too.
     create_table :config_setting do |t|
       t.text    :key, null: false
       t.jsonb   :value, null: false
       t.text    :value_type, null: false
-      # Secret values are never displayed after write. Support rotation and
-      # revocation instead.
       t.boolean :is_secret, null: false, default: false
       t.text    :tenant_id
       t.text    :environment, null: false
       t.timestamptz :updated_at, null: false, default: -> { 'now()' }
 
-      t.index :key, unique: true
+      # A secret is only ever held as a reference to a secret manager entry, so the
+      # flag and the value_type must agree. There is no column for a secret value;
+      # secrets are never displayed, support rotation and revocation instead.
+      t.check_constraint "is_secret = (value_type = 'secret_ref')", name: 'config_setting_secret_ref'
     end
+
+    execute <<~SQL
+      CREATE UNIQUE INDEX config_setting_key_scope_unique
+        ON config_setting (key, environment, COALESCE(tenant_id, '*'));
+    SQL
 
     create_table :feature_flag do |t|
       t.text    :key, null: false
       t.text    :description, null: false, default: ''
       t.boolean :is_enabled, null: false, default: false
       t.jsonb   :rollout, null: false, default: {}
+      t.text    :tenant_id
       t.text    :environment, null: false
       t.timestamptz :updated_at, null: false, default: -> { 'now()' }
-
-      t.index :key, unique: true
     end
 
+    execute <<~SQL
+      CREATE UNIQUE INDEX feature_flag_key_scope_unique
+        ON feature_flag (key, environment, COALESCE(tenant_id, '*'));
+    SQL
+
     # Every configuration change is a privileged mutation and gets its own
-    # history row in addition to its audit event.
+    # history row in addition to its audit event. Keys repeat across environments
+    # and tenants, so the row carries the same scope.
     create_table :config_change do |t|
       t.string :target_table, limit: 32, null: false
       t.text   :target_key, null: false
+      t.text   :environment, null: false
+      t.text   :tenant_id
       t.jsonb  :before_value
       t.jsonb  :after_value
       t.bigint :changed_by, null: false
@@ -450,12 +492,12 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.foreign_key :admin_actor, column: :changed_by
       t.foreign_key :audit_event, column: :audit_event_id
       t.check_constraint "target_table IN ('config_setting','feature_flag')",
-                         name: 'config_change_target'
+                         name: 'config_change_target_check'
     end
 
     execute <<~SQL
-      CREATE INDEX config_change_target_idx
-        ON config_change (target_table, target_key, changed_at DESC);
+      CREATE INDEX config_change_target
+        ON config_change (target_table, target_key, environment, changed_at DESC);
     SQL
 
     # -----------------------------------------------------------------------
@@ -509,49 +551,225 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.index :request_uuid, unique: true
       t.index %i[state due_at], name: 'data_subject_request_queue'
       t.check_constraint "kind IN ('access','erasure','rectification','portability','restriction','objection')",
-                         name: 'data_subject_request_kind'
+                         name: 'data_subject_request_kind_check'
       t.check_constraint "state IN ('open','in-progress','fulfilled','refused','withdrawn')",
-                         name: 'data_subject_request_state'
+                         name: 'data_subject_request_state_check'
     end
 
     # -----------------------------------------------------------------------
-    # Immutability
+    # Integrity: hash chain, payload scrub, append-only enforcement
     # -----------------------------------------------------------------------
     #
     # A trigger stops ordinary application paths. It does not stop a superuser or
     # anyone who can DROP it. Real tamper evidence needs the hash chain anchored
     # outside this database. See references/admin-data-model.md.
-    execute <<~SQL
+    #
+    # The database owns chain_seq, prev_hash, row_hash and the payload hashes
+    # (audit_event_chain_link). verify_audit_chain() re-computes the chain;
+    # scrub_audit_payload() is the single permitted UPDATE of an audit_event.
+    # Copied verbatim from postgres.sql (a test keeps them in step).
+    execute <<~'SQL'
+      CREATE OR REPLACE FUNCTION audit_event_hash_input(e audit_event)
+      RETURNS text
+      LANGUAGE sql STABLE AS $$
+          SELECT jsonb_build_array(
+              e.event_uuid, e.chain_id, e.chain_seq,
+              to_char(e.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+              to_char(e.recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+              e.actor_id, e.actor_kind, e.effective_actor_id, e.impersonation_session_id,
+              e.tenant_id, e.environment, host(e.source_ip), e.user_agent,
+              e.action, e.target_type, e.target_id,
+              e.reason, e.ticket_ref, e.approval_request_id,
+              e.request_id, e.correlation_id, e.idempotency_key,
+              e.result, e.error_code, e.before_hash, e.after_hash,
+              e.policy_version, e.prev_hash, e.hash_algorithm
+          )::text
+      $$;
+
+      CREATE OR REPLACE FUNCTION audit_event_chain_link()
+      RETURNS trigger AS $$
+      DECLARE
+          last_seq  bigint;
+          last_hash text;
+      BEGIN
+          IF NEW.hash_algorithm IS DISTINCT FROM 'sha256' THEN
+              RAISE EXCEPTION 'audit_event: only sha256 is implemented, got %', NEW.hash_algorithm;
+          END IF;
+          PERFORM pg_advisory_xact_lock(hashtextextended('admin_core.audit_event:' || NEW.chain_id, 0));
+          SELECT a.chain_seq, a.row_hash INTO last_seq, last_hash
+            FROM audit_event a
+           WHERE a.chain_id = NEW.chain_id
+           ORDER BY a.chain_seq DESC
+           LIMIT 1;
+          NEW.chain_seq := COALESCE(last_seq, 0) + 1;
+          NEW.prev_hash := last_hash;
+          IF NEW.before_state IS NOT NULL THEN
+              NEW.before_hash := encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex');
+          END IF;
+          IF NEW.after_state IS NOT NULL THEN
+              NEW.after_hash := encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex');
+          END IF;
+          NEW.row_hash := encode(
+              sha256(convert_to(audit_event_hash_input(NEW), 'UTF8')), 'hex');
+          RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      CREATE TRIGGER audit_event_chain_link
+          BEFORE INSERT ON audit_event
+          FOR EACH ROW EXECUTE FUNCTION audit_event_chain_link();
+
+      CREATE OR REPLACE FUNCTION verify_audit_chain(p_chain_id text DEFAULT NULL)
+      RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
+      LANGUAGE plpgsql STABLE AS $$
+      DECLARE
+          r         audit_event%ROWTYPE;
+          cur_chain text;
+          prev_seq  bigint;
+          prev_hash text;
+      BEGIN
+          FOR r IN
+              SELECT * FROM audit_event a
+               WHERE p_chain_id IS NULL OR a.chain_id = p_chain_id
+               ORDER BY a.chain_id, a.chain_seq
+          LOOP
+              IF cur_chain IS DISTINCT FROM r.chain_id THEN
+                  cur_chain := r.chain_id;
+                  prev_seq := NULL;
+                  prev_hash := NULL;
+              END IF;
+              chain_id := r.chain_id;
+              chain_seq := r.chain_seq;
+              IF prev_seq IS NOT NULL AND r.chain_seq <> prev_seq + 1 THEN
+                  problem := 'gap: previous chain_seq is ' || prev_seq;
+                  RETURN NEXT;
+              END IF;
+              IF (prev_seq IS NOT NULL OR r.chain_seq = 1)
+                 AND r.prev_hash IS DISTINCT FROM prev_hash THEN
+                  problem := 'prev_hash does not match the previous row_hash';
+                  RETURN NEXT;
+              END IF;
+              IF r.row_hash IS DISTINCT FROM encode(
+                     sha256(convert_to(audit_event_hash_input(r), 'UTF8')), 'hex') THEN
+                  problem := 'row_hash does not match the row content';
+                  RETURN NEXT;
+              END IF;
+              IF r.before_state IS NOT NULL AND r.before_hash IS DISTINCT FROM
+                     encode(sha256(convert_to(r.before_state::text, 'UTF8')), 'hex') THEN
+                  problem := 'before_hash does not match before_state';
+                  RETURN NEXT;
+              END IF;
+              IF r.after_state IS NOT NULL AND r.after_hash IS DISTINCT FROM
+                     encode(sha256(convert_to(r.after_state::text, 'UTF8')), 'hex') THEN
+                  problem := 'after_hash does not match after_state';
+                  RETURN NEXT;
+              END IF;
+              prev_seq := r.chain_seq;
+              prev_hash := r.row_hash;
+          END LOOP;
+      END;
+      $$;
+
+      CREATE OR REPLACE FUNCTION scrub_audit_payload(
+          p_event_id bigint, p_policy text, p_reason text, p_actor_id bigint DEFAULT NULL)
+      RETURNS void
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+      DECLARE
+          ev audit_event%ROWTYPE;
+      BEGIN
+          IF p_policy IS NULL OR p_policy IN ('', 'none') THEN
+              RAISE EXCEPTION 'scrub_audit_payload needs a named redaction policy';
+          END IF;
+          IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+              RAISE EXCEPTION 'scrub_audit_payload needs a reason';
+          END IF;
+          PERFORM set_config('admin_core.scrub', 'on', true);
+          UPDATE audit_event
+             SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
+           WHERE id = p_event_id
+          RETURNING * INTO ev;
+          IF NOT FOUND THEN
+              RAISE EXCEPTION 'audit_event % does not exist', p_event_id;
+          END IF;
+          PERFORM set_config('admin_core.scrub', 'off', true);
+
+          INSERT INTO audit_event
+              (occurred_at, actor_id, actor_kind, tenant_id, environment,
+               action, target_type, target_id, reason, result)
+          VALUES
+              (now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
+               'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded');
+      END;
+      $$;
+
+      REVOKE ALL ON FUNCTION scrub_audit_payload(bigint, text, text, bigint) FROM PUBLIC;
+
       CREATE OR REPLACE FUNCTION deny_audit_mutation()
       RETURNS trigger AS $$
       BEGIN
-          RAISE EXCEPTION 'audit_event is append-only; % is not permitted', TG_OP;
+          RAISE EXCEPTION '% is append-only; % is not permitted', TG_TABLE_NAME, TG_OP;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      CREATE OR REPLACE FUNCTION audit_event_guard_update()
+      RETURNS trigger AS $$
+      BEGIN
+          IF current_setting('admin_core.scrub', true) IS DISTINCT FROM 'on' THEN
+              RAISE EXCEPTION 'audit_event is append-only; UPDATE is not permitted (scrub payloads with scrub_audit_payload)';
+          END IF;
+          IF NEW.before_state IS NOT NULL OR NEW.after_state IS NOT NULL
+             OR (to_jsonb(NEW) - 'before_state' - 'after_state' - 'redaction_policy')
+                IS DISTINCT FROM (to_jsonb(OLD) - 'before_state' - 'after_state' - 'redaction_policy') THEN
+              RAISE EXCEPTION 'audit_event scrub may only drop before_state / after_state and set redaction_policy';
+          END IF;
+          RETURN NEW;
       END;
       $$ LANGUAGE plpgsql;
 
       CREATE TRIGGER audit_event_no_update
           BEFORE UPDATE ON audit_event
-          FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
+          FOR EACH ROW EXECUTE FUNCTION audit_event_guard_update();
 
       CREATE TRIGGER audit_event_no_delete
           BEFORE DELETE ON audit_event
           FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
 
+      CREATE TRIGGER audit_event_no_truncate
+          BEFORE TRUNCATE ON audit_event
+          FOR EACH STATEMENT EXECUTE FUNCTION deny_audit_mutation();
+
       CREATE TRIGGER approval_decision_no_update
           BEFORE UPDATE ON approval_decision
           FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
+
+      CREATE TRIGGER approval_decision_no_delete
+          BEFORE DELETE ON approval_decision
+          FOR EACH ROW EXECUTE FUNCTION deny_audit_mutation();
+
+      CREATE TRIGGER approval_decision_no_truncate
+          BEFORE TRUNCATE ON approval_decision
+          FOR EACH STATEMENT EXECUTE FUNCTION deny_audit_mutation();
     SQL
 
-    # Grant shape for the application role. Adapt the role name.
-    #   REVOKE UPDATE, DELETE ON audit_event FROM app_role;
-    #   GRANT  INSERT, SELECT ON audit_event TO app_role;
+    # Least-privilege grants for the application role (required at regulated): run
+    # grants.sql once after this migration, with psql, e.g.
+    #   psql "$DATABASE_URL" -v app_role=admin_app -v schema=public -f grants.sql
   end
 
   def down
+    execute 'DROP TRIGGER IF EXISTS audit_event_chain_link ON audit_event'
     execute 'DROP TRIGGER IF EXISTS audit_event_no_update ON audit_event'
     execute 'DROP TRIGGER IF EXISTS audit_event_no_delete ON audit_event'
+    execute 'DROP TRIGGER IF EXISTS audit_event_no_truncate ON audit_event'
     execute 'DROP TRIGGER IF EXISTS approval_decision_no_update ON approval_decision'
+    execute 'DROP TRIGGER IF EXISTS approval_decision_no_delete ON approval_decision'
+    execute 'DROP TRIGGER IF EXISTS approval_decision_no_truncate ON approval_decision'
     execute 'DROP TRIGGER IF EXISTS approval_decision_sod ON approval_decision'
+    execute 'DROP FUNCTION IF EXISTS scrub_audit_payload(bigint, text, text, bigint)'
+    execute 'DROP FUNCTION IF EXISTS verify_audit_chain(text)'
+    execute 'DROP FUNCTION IF EXISTS audit_event_guard_update()'
+    execute 'DROP FUNCTION IF EXISTS audit_event_chain_link()'
+    execute 'DROP FUNCTION IF EXISTS audit_event_hash_input(audit_event)'
     execute 'DROP FUNCTION IF EXISTS deny_audit_mutation()'
     execute 'DROP FUNCTION IF EXISTS enforce_separation_of_duties()'
 
