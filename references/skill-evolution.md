@@ -39,6 +39,8 @@ project — `$ADMINWRIGHT_HOME`, or `~/.adminwright` by default — where observ
 platform you have built accumulate. `promote` then groups observations that say the same
 thing in different words and reports only those that clear the bar.
 
+A project is counted by its stable `platform.id` (written by `init`, so renaming the platform does not make it a new project), never by its display name; `promote --export` replaces it with a fingerprint salted per store.
+
 The store is an accumulation buffer, not the record. Adopted lessons live in the skill's own
 `lessons/` directory under version control, which is how they reach anyone else.
 
@@ -261,7 +263,7 @@ stops validating. Details in [../evals/README.md](../evals/README.md).
 
 ## Consolidation pass
 
-Run before any release claim, and at least every fifth build.
+Run before any release declaration, and at least every fifth build.
 
 1. `lesson list` and read every `proposed` entry.
 2. Merge duplicates. Same rule proposed twice becomes one lesson at the higher confidence;
@@ -308,8 +310,8 @@ Roles are defined in [multi-agent.md](multi-agent.md).
 | When | Who | What |
 |---|---|---|
 | End of each capability slice | `implementer` | capture observations into `feedback[]`; do not open lessons |
-| End of every build or audit | `qa` | triage `feedback[]`, apply the test in section 6, open the lessons that pass |
-| Before any release claim | `qa` | run the consolidation pass; no `feedback[]` entry left `open` and untriaged |
+| End of every build or audit | the `harvester` pass (`qa` when none is dispatched) | triage `feedback[]`, apply the test in section 6, run `harvest` and `promote`, open the lessons that pass |
+| Before any release declaration | `qa` | run the consolidation pass; no `feedback[]` entry left `open` and untriaged |
 | When the human confirms a rule in conversation | whoever heard it | `lesson add` immediately, confidence `confirmed`, quoting the confirmation |
 | Lessons scoped to [security-governance.md](security-governance.md) at `regulated` profile | `security` | review before adoption |
 | Single-agent operation | the agent | an explicitly declared final pass that re-reads the references and the `feedback[]` entries, rather than recalling them |

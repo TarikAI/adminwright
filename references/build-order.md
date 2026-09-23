@@ -144,11 +144,13 @@ A slice is **done** when the ten steps of Phase 5 in [../SKILL.md](../SKILL.md) 
 
 - `status: implemented`, with `evidence[]` paths that exist and are non-empty
 - `reviewStatus: reviewed`, set by an agent or a declared separate pass that did not implement it
-- validation passes at the project's profile:
+- release validation shows no finding for this slice at the project's profile. `--phase plan` never opens a capability's tests or evidence, so it cannot certify a slice; the release phase does:
 
 ```text
-python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --project-root <project-root> --phase plan
+python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --project-root <project-root> --phase release
 ```
+
+Findings for capabilities whose slices are not built yet are expected until they land (`release-status-unresolved`); every finding whose path names this capability, its screens or its evidence must be gone. The whole command exits 0 only at the final milestone.
 
 Use `py -3` or `python3` if `python` is not on PATH.
 
@@ -184,7 +186,7 @@ Safe concurrently:
 - screens whose components already exist
 - integrations with distinct providers
 - test and evidence authoring for capabilities already implemented
-- the `qa` and `security` passes over completed capabilities
+- the `security` and `qa` passes over completed capabilities
 - emitted artifacts such as the authorization matrix, test plan, and navigation map
 
 Three rules keep concurrency honest. Only one agent authors migrations at a time. If two slices need the same new component, extract it as a serialized item before either proceeds. If a slice discovers it needs a spine change, it releases its claim and the spine change is scheduled as its own serialized item; it never forks the spine locally.

@@ -38,9 +38,11 @@ operator need
 
 Mark a capability `implemented` only when every required link exists.
 
-Evidence is a repository path that exists, is non-empty, and contains the assertion it claims. A boolean set to `true` is not evidence. A status string is not evidence. A `manual:` entry records a human observation rather than a checkable artifact: `manual-evidence` warns at `internal` and `standard` and is an error at `regulated`, and because a `manual:` entry never resolves to a file, a list made only of them also fails `evidence-not-resolvable` (an error at `standard` and `regulated`).
+Evidence is a repository path that exists, is non-empty, and contains the assertion it claims. A boolean set to `true` is not evidence. A status string is not evidence. An entry may instead be an `http://` or `https://` address, `command:<a command line to re-run>` or `manual:<a human observation>`. Only paths are opened, so none of those three can satisfy a required list on its own: a list made only of them fails `evidence-not-resolvable` (a warning at `internal`, an error at `standard` and `regulated`). A `manual:` entry also raises `manual-evidence` (a warning at `internal` and `standard`, an error at `regulated`).
 
-What is content-scanned, and with which words: test files (`tests[]`, `policyTests`) are checked for shape and assertions but never scanned for placeholder words; evidence files are scanned by whole word for `mock`, `fake`, `stub`, `dummy`, `placeholder`, `lorem`, `todo`, `tbd`, `fixme`, `wip`, `xxx` and "not implemented", with framework idioms skipped; manifest implementation fields are scanned harder, including inside identifiers, and additionally for `sample` and `random`. Details in [test-data.md](test-data.md).
+What is content-scanned: test files (`tests[]`, `policyTests`, and the `tests` of screens, queues and integrations) are checked for shape and assertions but never scanned for placeholder words. Run output listed as `evidence` (capability, gate, `crossCutting` and fixed-gap evidence) is scanned by whole word. Manifest implementation fields are scanned hardest, including inside identifiers. The word lists, the skipped framework idioms and the `declaredStatic` escape for a captured log are in [test-data.md](test-data.md).
+
+Evidence paths are repository-relative and resolve against the manifest's `projectRoot` (written by `init`, relative to the folder holding the manifest; absent means that folder's parent), so `validate`, `add`, `set` and `claim` judge a path the same way from any working directory. A path that resolves outside the project is refused. `add` and `set` rewrite backslashes as `/` in `tests`, `evidence` and `policyTests` and say so.
 
 ### Capability fields the validator requires
 
@@ -54,10 +56,10 @@ What is content-scanned, and with which words: test files (`tests[]`, `policyTes
 | `auditEvents` | `kind` is `command`, `job` or `export` | at least one event |
 | `safeguards`, `recovery` | `risk` is `high` or `critical` | non-empty |
 | `implementedBy` | `status: implemented` | who built it; stamped by `claim --role implementer`, never cleared by `release-claim` |
-| `reviewStatus`, `reviewedBy` | release | `reviewed` needs a `reviewedBy` that is not the implementer (an error at `regulated`, a warning at `standard`) |
+| `reviewStatus`, `reviewedBy` | release | `reviewed` needs a `reviewedBy` that is not the implementer (an error at `regulated`, a warning at `standard`); set `reviewedBy` before `reviewStatus` |
 | `rationale` | `status` is `blocked`, `deferred` or `not-applicable` | a `not-applicable` capability needs nothing else; a command, job or export also needs a confirmed decision that names it |
 
-Evidence entries are repository paths, or one of `url:` (an `http(s)` address), `command:` (a command line to re-run) or `manual:` (a human observation, see above). Only paths are opened and checked.
+`implementedBy` is compared with `reviewedBy` together with `owner` and every implementer that ever held the capability (`agents[].previouslyOwned`), so releasing a claim never launders self-review.
 
 ## The completeness test
 
@@ -79,29 +81,21 @@ Record the failing step in `gaps[]` with the workflow name. A workflow that fail
 
 ## Profiles and the gate matrix
 
-`profile` is set at `init` and stored at the top of the manifest. It scales which rules warn and which fail. This is the published matrix; the validator implements exactly these severities.
+`profile` is set at `init` and stored at the top of the manifest. It scales which rules warn and which fail. The exact severity of every rule at every profile is generated from the validator into [rule-matrix.md](rule-matrix.md) (`emit --format rule-matrix`), and a test fails when that file drifts from the code, so no other document repeats the numbers. Every finding prints its rule id in brackets; look the id up there. In outline:
 
-| Rule | internal | standard | regulated |
-|---|---|---|---|
-| placeholder scan on implementation fields | error | error | error |
-| unregistered static/hardcoded value | error | error | error |
-| `crossCutting.<section>.evidence` non-empty | warn | error | error |
-| `authorization.policyTests` non-empty | warn | error | error |
-| quality-gate evidence path must exist | warn | error | error |
-| test/evidence file must be non-empty | warn | error | error |
-| test file must reference the capability token | off | warn | error |
-| `manual:` evidence accepted | warn | warn | error |
-| every lifecycle state observable by a query capability | warn | error | error |
-| every non-initial lifecycle state reachable by a command capability | warn | error | error |
-| every declared role used by ≥1 screen and ≥1 capability | warn | error | error |
-| `decisions[]` still `assumed` at release | allow | warn | error |
-| separation of duties declared for critical commands | warn | warn | error |
-| `reviewedBy` present and not the implementer | warn | warn | error |
-| `implementedBy` recorded on an implemented capability | warn | warn | error |
-| accessibility + performance gates | may be `not-applicable` w/ rationale | required | required |
-| privileged-read audit | n/a | required if `regulatedData` | required |
+- **Structural and honesty rules fail at every profile:** wrong types (`manifest-type`), ids, unknown references, the placeholder scan, unregistered static values, evidence paths that do not exist or sit inside `.admin-console/`, missing gates, unresolved critical and high gaps, forbidden `declaredStatic` paths.
+- **Quality rules warn at `internal` and fail at `standard` and `regulated`:** evidence that resolves, is non-empty and says what ran; `crossCutting` evidence and `policyTests`; test files that look like tests and assert something; lifecycle observability and reachability; unused roles; `unknown-field` (a key the schema does not declare, so a typo in `add` or `set` surfaces instead of vanishing).
+- **Late rules warn until `regulated`:** `manual:` evidence, separation of duties for critical commands, an independent `reviewedBy`, a recorded `implementedBy`.
+- **Strict rules are off at `internal`, warn at `standard` and fail at `regulated`:** a test file that names the capability, `decisions[]` still `assumed`, evidence shared between claims, gate evidence unrelated to its gate, self-approved static values, an undecided `not-applicable` command.
+- **Tiered rules:** the `accessibility` and `performance` gates may be `not-applicable` with a rationale only at `internal`; privileged reads of regulated data must be audited at `regulated`, and at `standard` when `platform.regulatedData` is non-empty.
+- **Completeness rules** (starred in the table) describe an unfinished model, not a malformed one, so before `--phase release` they warn whatever the profile says. A half-built manifest is not blocked; a released one is.
 
-Choosing a profile is a recorded decision, not a default. Write it into `decisions[]` with `status: confirmed` and a reason drawn from evidence: data sensitivity, `platform.regulatedData`, tenancy and whether tenants are external customers, blast radius of the highest-risk command, operator population, and any contractual or audit obligation. An unexamined `init` default is an assumed decision and fails the release gate at `regulated`.
+Choosing a profile is a recorded decision, not a default. Write it into `decisions[]` with `status: confirmed` and a reason drawn from evidence: data sensitivity, `platform.regulatedData`, tenancy and whether tenants are external customers, blast radius of the highest-risk command, operator population, and any contractual or audit obligation. `init` records the choice as an `assumed` decision, `dec.profile` (`appliesTo: ["*"]`, the whole manifest), so an unexamined default cannot pass unnoticed: `decision-assumed` warns at `standard` and fails the release gate at `regulated` until the decision is confirmed with a real reason.
+
+```text
+python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'decisions[dec.profile].reason' --value 'multi-tenant, external customers, card data in scope; confirmed with the product owner'
+python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'decisions[dec.profile].status' --value confirmed
+```
 
 Honest tiering is the point. A team must be able to pass truthfully at its tier rather than falsify the top tier. A console used by six internal staff over non-regulated data cannot produce genuine dual-control and privileged-read-audit evidence; demanding it produces invented evidence files, which is strictly worse than an accurate `internal`. Choose the tier the platform actually occupies.
 
@@ -123,8 +117,8 @@ A gate is only as strong as the file it cites, so the validator judges the whole
 - A file cited as a test must be shaped like one (a `*.spec.*`, `*.test.*`, `test_*.py`, `*_test.go` name, or a test-runner call) and contain a real assertion. Comments and `import { assert }` do not count. At `regulated` a spec cited by N capabilities needs at least N assertions.
 - Test files are not placeholder-scanned; the boundary is where a path appears, not what the file contains.
 - A test file is not gate evidence (`evidence-is-test-file`), one file may not be the evidence for more than two gates or for a gate and a `crossCutting` section (`evidence-shared`), and one spec may not be the test for more than three capabilities, or for capabilities, screens and `policyTests` at once (`test-file-shared`).
-- Capability tokens are the capability id and its `serverOperations`, never its `uiRoutes` (every capability on a screen shares the route).
-- At `regulated` a gate's evidence must mention the gate id or a word from the gate's optional `command` field (`gate-evidence-unrelated`): record `command: "tsc --noEmit"` and the log of that command qualifies.
+- A cited test must name its capability (`evidence-token-match`): the capability id or one of its `serverOperations`, never a `uiRoute`, because every capability on a screen shares the route. A warning at `standard`, an error at `regulated`.
+- A gate's evidence must mention the gate id or a word from the gate's optional `command` field (`gate-evidence-unrelated`, a warning at `standard`, an error at `regulated`): record `command: "tsc --noEmit"` and the log of that command qualifies.
 - `declaredStatic[].path` may name a value, never a claim about the implementation: `dataBinding`, `sourceOfTruth`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `tests`, `evidence`, `dataSources`, `policyTests` and `uiRoutes` are refused (`declared-static-forbidden-path`). An `approvedBy` that names an agent, or the capability's own implementer or reviewer, is `declared-static-self-approved`. `emit --format gap-report` and `report` list every exemption with its reason and approver.
 - A `not-applicable` command, job or export must be named by a confirmed `decisions[].appliesTo` (`not-applicable-undecided`); the validate summary prints `not-applicable: N`.
 
@@ -169,9 +163,11 @@ Include negative tests. Hiding a control is not sufficient. Policy requirements 
 
 ## State and data coverage
 
-For every data surface cover the applicable UI states: loading, empty, populated, filtered-empty, error, forbidden, conflict, stale/partial, degraded, and success.
+**Required screen states.** An implemented screen must declare `loading`, `populated`, `error` and `forbidden` in `screens[].states`, plus `success` when the screen has `actions` (`screen-state-missing`, an error at every profile at release). This is the one definition; other documents say "the required states, as verification.md states them". A screen with no `dataSources` or no `states` yet is `screen-incomplete`: a warning while the architect and the ux-reviewer are still filling it in, an error at release.
 
-Each of those states requires a fixture that actually produces it. The required fixture dimensions, how to generate them, and which fixture proves which state are in [test-data.md](test-data.md). A state you cannot reach with seeded data is untested, whatever the manifest says.
+Those are the floor the validator checks, not the whole job. For every data surface also cover the applicable states the floor does not name: empty, filtered-empty, conflict, stale/partial, degraded and validation, and declare each one that applies.
+
+Each state requires a fixture that actually produces it. The required fixture dimensions, how to generate them, and which fixture proves which state are in [test-data.md](test-data.md). A state you cannot reach with seeded data is untested, whatever the manifest says.
 
 ## Browser verification
 
@@ -229,7 +225,7 @@ Attack the console; do not exercise it.
 | Impersonation limits | While impersonating, attempt escalation, prohibited commands, expiry extension, nested impersonation, and action after exit | Every attempt denied; real actor and effective user both present in audit; session terminates on expiry |
 | Audit tampering | Update or delete audit rows through the API, ORM, and admin surfaces; force a downstream failure mid-command; forge the actor field | Audit is append-only to application credentials; a failed command still records the attempt; actor derives from the authenticated session, never from request input |
 
-Extend the list from the platform's own risks. Testing method references: OWASP Web Security Testing Guide (https://owasp.org/www-project-web-security-testing-guide/) and OWASP ASVS (https://owasp.org/www-project-application-security-verification-standard/). High-risk or regulated platforms need qualified security review beyond this skill.
+Extend the list from the platform's own risks. Testing method references: OWASP Web Security Testing Guide (https://owasp.org/www-project-web-security-testing-guide/) and OWASP ASVS (https://owasp.org/projects/ASVS/). High-risk or regulated platforms need qualified security review beyond this skill.
 
 ## Gap audit
 
@@ -264,16 +260,16 @@ Run the project's own build, type check, lint, tests, security checks, and brows
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --project-root <project-root> --phase release
 python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <project-root>/.admin-console/manifest.json --project-root <project-root>
-python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report --out <project-root>/.admin-console/gap-report.md
+python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report --out <project-root>/docs/admin-gap-report.md
 ```
 
-| Command | Exit 0 | Non-zero exit means |
-|---|---|---|
-| `validate --phase release` | No rule at `error` severity for this profile failed. Warnings may still be printed. | At least one gate rule failed at `error` severity. Release is blocked. Fix the finding or change the fact; do not lower the profile to clear it. |
-| `coverage` | No structural gap found. | Orphans exist in one direction or the other: a capability with no screen, a screen with no capability, a lifecycle state no query observes, a non-initial state no command reaches, a role no screen or capability uses, an integration with no operational view. |
-| `emit --format gap-report` | The report was written. | The manifest could not be read or the output path could not be written. The exit code says nothing about the findings; read the report. |
+| Command | Exit 0 | Exit 1 | Exit 2 |
+|---|---|---|---|
+| `validate --phase release` | No rule at `error` severity for this profile failed. Warnings may still be printed. | At least one gate rule failed at `error` severity. Release is blocked. Fix the finding or change the fact; do not lower the profile to clear it. | The manifest could not be judged: unreadable file, bad arguments, or `--profile` below the manifest's own at release without `--allow-lower-profile`. |
+| `coverage` | No structural finding at `error` severity. | An orphan in one direction or the other: a capability with no role or (on a UI surface) no route-anchored screen, a screen with no capability, an entity with no query capability, a lifecycle state no capability's `entityStates` mention, a non-initial state no command reaches, a role no screen or capability uses, an implemented integration without its controls. | As above. `--project-root` is accepted so the two commands can share arguments; `coverage` reads no files and ignores it. |
+| `emit --format gap-report` | The report was written, at release severities. | not used | The manifest could not be read or the output path could not be written. The exit code says nothing about the findings; read the report. |
 
-Add `--json` to `validate` and `report` for machine-readable output when a CI job or another agent consumes the result.
+Add `--json` to `validate` and `report` for machine-readable output when a CI job or another agent consumes the result. Every `validate` summary line carries the effective profile, the phase, the skill commit and the rule-set hash (`ruleset`), so a transcript says which rules judged it. `--allow-lower-profile` exists for previewing a release at a lower profile and is never a way to certify one.
 
 Release validation must fail when any of these apply:
 
@@ -293,19 +289,19 @@ Never report completion with a non-zero gate and a narrative explanation.
 
 The validator is deterministic and structural. It reads the manifest and the filesystem. It verifies:
 
-- Schema conformance to manifest v2 and internal reference integrity
+- Schema conformance to manifest v2 (types, and keys the schema does not declare) and internal reference integrity
 - Placeholder tokens in the scanned implementation fields, with `declaredStatic[]` as the only escape
 - Presence of the required links per capability: server operations, policies, audit events, safeguards, tests, evidence
-- Existence and non-emptiness of every evidence and test path
-- At `regulated`, that the referenced test file mentions the capability token
+- Existence and non-emptiness of every evidence and test path, that a cited test looks like a test, and that no one file stands in for many claims
+- That a cited test mentions the capability id or a server operation (`evidence-token-match`)
 - Lifecycle observability and reachability, role usage, and unresolved `assumed` decisions
-- Profile-scoped severity for every rule in the matrix
+- Profile-scoped severity for every rule, as listed in [rule-matrix.md](rule-matrix.md)
 
 It cannot verify:
 
 | The validator sees | It cannot tell you |
 |---|---|
-| A test file exists, is non-empty, contains an assertion, and names the capability | Whether it asserts the *right* thing, or would fail if the guard were removed |
+| A test file exists, is shaped like a test, contains an assertion, and names the capability | Whether it asserts the *right* thing, or would fail if the guard were removed |
 | Evidence names counts, routes, or files rather than only claiming success | Whether the run it records actually happened, or happened against this build |
 | A screen traces to a capability, an operation, a policy, and a test | Whether the screen renders correctly, whether its controls do anything when pressed, or whether the console hangs together as one coherent product |
 | An authorization policy is referenced | Whether the policy defaults to deny, scopes to tenant, or covers the export and API paths |
@@ -317,7 +313,7 @@ It cannot verify:
 
 Residual responsibilities stay with the agent:
 
-1. Read the body of each cited test. Confirm it asserts the outcome, not the absence of an exception. The validator now refuses a test file with no assertion at all, and evidence whose whole content is a claim of success — but both are floors, and clearing a floor is not the same as being right.
+1. Read the body of each cited test. Confirm it asserts the outcome, not the absence of an exception. The validator refuses a cited test that has neither a test-style file name nor a test-runner call, and one with no assertion once comments are stripped (assertion words are matched as whole words, so `import { assert }` and a comment about adding assertions do not count). It refuses evidence only when the whole file is one short line claiming success. All three are floors, and clearing a floor is not the same as being right.
 2. Break the guard locally and confirm the test fails, for at least every `high` and `critical` capability.
 3. Follow `dataBinding` to the query and confirm it reaches the declared source of truth.
 4. Execute the command and read the audit record it produced, rather than trusting the declaration.
@@ -334,7 +330,7 @@ Verification is where the skill learns. Every friction, wrong instruction, missi
 python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-root>/.admin-console/manifest.json --kind feedback --json '{"id":"fb-001","observation":"the release gate never checked idempotency","category":"gap","scope":"references/verification.md","proposedChange":"state the idempotency rule in the capability table","evidence":["evidence/tests.log"]}'
 ```
 
-Categories: `gap`, `friction`, `incorrect-guidance`, `new-pattern`, `tooling`.
+Categories: `gap`, `friction`, `incorrect-guidance`, `new-pattern`, `tooling`. `scope` is required: the one thing the entry would change, as a `references/<file>.md` path, `SKILL.md`, `scripts` or `agents` (`add` refuses an entry without one, and clustering across projects groups by it). `harvest` stamps `promotedHash` on what it collects, so an entry edited afterwards is harvested again.
 
 Record the observation against the project first. Promote it into the skill only under the rules in [skill-evolution.md](skill-evolution.md):
 
@@ -364,44 +360,8 @@ Avoid a page-by-page screenshot dump. Summarize by operational domain and link t
 
 ## External review pass (optional)
 
-`scripts/code_review.py` bridges Alibaba Open Code Review (OCR) into the manifest when the
-`ocr` CLI is on PATH. It is optional and advisory: absent, blocked, or failing, it changes
-no gate above.
+`scripts/code_review.py` bridges Alibaba Open Code Review (OCR) into the manifest when the `ocr` CLI is available. It is optional and advisory: absent, blocked, or failing, it changes no gate above. Two engines: the **delegate** engine (default) computes the reviewable file set and the rules, and the reviewing agent reviews each file itself and returns findings through `record`; the **ocr** engine has OCR's configured LLM review and persists directly. `diff` serves Build and Repair; `scan` serves Audit and needs the ocr engine, because delegate mode has no full-file scan.
 
-Detection: `ocr` on PATH (or `ADMINWRIGHT_OCR_BIN` pointing at the executable). Two
-engines:
+Each finding persists as a `gaps[]` entry with `source: "ocr"` (via `add --kind gap`, one all-or-nothing batch), so it surfaces in `emit --format gap-report` like any other finding. The validator ignores OCR-sourced gaps when deciding whether a lifecycle state has an accepted escape, so review text that mentions a state name cannot silence a lifecycle check. Exit codes: 0 clean or nothing reviewable, 1 findings recorded, 2 usage, IO or validation failure, including a review that failed or could not cover every file. Exit 3 is unused: claim conflicts do not apply to this script.
 
-- **delegate** (default) — no OCR-side LLM or API key. The script runs `ocr delegate
-  preview --format json` and `ocr delegate rule --format json <files>` and writes the
-  bundle to `.admin-console/ocr-bundle.json`: mode, refs, every reviewable file keyed by
-  `(path, status)` — workspace mode can list the same path twice — rule groups, and the
-  findings schema. The reviewing agent then reviews each file itself and returns findings
-  through `record`; the script refuses to persist unless every bundled file ends reviewed
-  or explicitly skipped with a reason — and refuses findings for paths outside the bundle.
-  It reports `total_files`, `reviewed_files`, `skipped_files`, `coverage_rate`; a path
-  listed twice in the bundle counts once in coverage, since one review covers both
-  entries.
-- **ocr** (endpoint) — the script runs `ocr review --audience agent --format json`
-  (diff mode) or `ocr scan` (audit mode) itself. Requires prior `ocr config provider` and
-  `ocr config model`; the raw JSON is kept as evidence alongside the gaps it produced.
-
-Modes: `diff` serves Build and Repair (workspace, range, or single commit via
-`--from/--to/--commit`); `scan` serves Audit, reviewing whole files no diff covers.
-
-Each finding uses OCR's comment schema — `path`, `content`, `start_line`, `end_line`,
-`category` (bug, security, performance, maintainability, test, style, documentation,
-other), `severity` (critical, high, medium, low) — and persists as a `gaps[]` entry via
-`add --kind gap`, so it surfaces in `emit --format gap-report` like any other finding.
-Severity must be exact; an unknown category is recorded as `other` with a notice.
-
-Exit codes: 0 clean (or nothing reviewable), 1 findings recorded, 2 usage/IO/validation
-failure — including a refused `add`, which leaves the manifest unmodified (gaps are
-written as one all-or-nothing batch, and malformed payloads exit 2 with an `ERROR:`
-message, never a traceback). Exit 3 is intentionally unused: claim conflicts do not
-apply to this script.
-
-What this pass guarantees and what it does not: file coverage and line anchoring are
-deterministic; the findings themselves are judgments — the delegate engine's from the
-reviewing agent, the endpoint engine's from its configured LLM. They are evidence for the
-gap report, never a replacement for the adversarial pass, the permission matrix, policy
-tests, or `validate` and `coverage`. A clean run is a floor, not a proof.
+What this pass guarantees and what it does not: file coverage and line anchoring are deterministic; the findings themselves are judgments, the delegate engine's from the reviewing agent and the endpoint engine's from its configured LLM. They are evidence for the gap report, never a replacement for the adversarial pass, the permission matrix, policy tests, or `validate` and `coverage`. A clean run is a floor, not a proof. Setup, environment variables, bundles, coverage accounting and the Windows notes are in [../INTEGRATIONS.md](../INTEGRATIONS.md).

@@ -20,8 +20,8 @@ Three artifacts carry all coordination state:
 
 | Artifact | Path | Written by |
 |---|---|---|
-| Manifest | `<project-root>/.admin-console/manifest.json` | the script's `add`, `set`, `claim`, `release-claim` subcommands only |
-| Claim locks | held by the script next to the manifest | `claim` and `release-claim` only, never by hand |
+| Manifest | `<project-root>/.admin-console/manifest.json` | the script's `add`, `set`, `claim`, `release-claim`, `harvest` and `migrate --write` subcommands only; every write stamps `validatedWith` (the rule-set hash and skill commit that last touched it) |
+| Locks | `.admin-console/.lock` (the write lock) and `.admin-console/locks/<capability>.lock` (one per claimed capability) | the script only, never by hand; see [Manifest concurrency](#manifest-concurrency) |
 | Worklogs | `<project-root>/.admin-console/worklog/<agentId>.md` | the owning agent, using the file tools in your harness |
 
 Invocation form used throughout. Use `py -3` or `python3` if `python` is not on PATH:
@@ -55,22 +55,33 @@ Set-Content -Encoding utf8 role.json '{"id":"ops","name":"Ops team","responsibil
 python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-root>/.admin-console/manifest.json --kind role --json-file role.json
 ```
 
+A capability is attached to its entity with `--entity`; an entity added with `add --kind entity` may also carry its `capabilities` inline, and each gets the same defaults:
+
+```text
+python <skill-dir>/scripts/admin_console_manifest.py add \
+  --manifest <project-root>/.admin-console/manifest.json \
+  --kind capability --entity user \
+  --json '{"id":"user.reactivate","outcome":"Reactivate a suspended account","kind":"command","roles":["ops"],"risk":"moderate"}'
+```
+
 ## Roles
 
-Five roles. Each is a distinct pass, whether five agents run them or one agent runs them in sequence.
+Five claimable roles, run in this order: `architect`, `implementer`, `ux-reviewer`, `security`, `qa`. Each is a distinct pass, whether five agents run them or one agent runs them in sequence. `qa` runs last because it owns the release gate.
+
+The `harvester` is a sixth pass, not a role. It never registers in `agents[]` and never claims a capability (`claim --role harvester` is refused, and `add --kind agent` rejects the role). It runs after `qa`, changes no capability record, and writes only `feedback[]` (through `harvest`), the cross-project store and, in a checkout of the skill repository, lessons. See [skill-evolution.md](skill-evolution.md).
 
 | Role | Owns | Must not |
 |---|---|---|
 | `architect` | discovery, manifest modeling, capability derivation, IA, build order | write feature code |
 | `implementer` | vertical slices: data, service, policy, UI, audit, tests | mark its own work verified |
 | `ux-reviewer` | IA, tables, forms, states, accessibility, responsiveness, copy | change server logic |
-| `qa` | adversarial audit, permission matrix, negative tests, browser evidence, gap filing | fix its own findings silently |
 | `security` | threat model, authz matrix, audit completeness, data exposure | approve its own exceptions |
+| `qa` | adversarial audit, permission matrix, negative tests, browser evidence, gap filing, the release gate | fix its own findings silently |
 
 ### architect
 
 - **Entry:** the repository is readable and discovery has named entities, roles, and lifecycles. See [discovery.md](discovery.md).
-- **Exit:** every entity carries capabilities at `status: discovered` or better; every capability has `outcome`, `kind`, `roles`, `risk`, `entityStates`; build order is recorded in `decisions[]`; `validate --phase plan` exits 0.
+- **Exit:** every entity carries capabilities at `status: discovered` or better; every capability has `outcome`, `kind`, `roles`, `risk`, `entityStates`; the capabilities the build order schedules are moved from `discovered` to `planned` (the implementer's entry condition, and nobody else moves them); build order is recorded in `decisions[]`; `validate --phase plan` exits 0.
 - **Writes:** `platform`, `roles[]`, `entities[]`, capability skeletons, `screens[]`, `workQueues[]`, `integrations[]`, `crossCutting`, `qualityGates[]` ids and thresholds, `decisions[]`.
 
 ### implementer
@@ -82,20 +93,20 @@ Five roles. Each is a distinct pass, whether five agents run them or one agent r
 ### ux-reviewer
 
 - **Entry:** at least one screen is at `status: implemented` and the application runs.
-- **Exit:** every reviewed screen covers the required states, `accessibilityStatus` is set and `crossCutting.experience.evidence` names what was exercised, `responsive` reflects an actual viewport check, findings are filed as `gaps[]`, and no server code changed. See [experience-design.md](experience-design.md).
+- **Exit:** every reviewed screen declares the required states as [verification.md](verification.md#state-and-data-coverage) states them, `accessibilityStatus` is set and `crossCutting.experience.evidence` names what was exercised, `responsive` reflects an actual viewport check, findings are filed as `gaps[]`, and no server code changed. See [experience-design.md](experience-design.md).
 - **Writes:** `screens[].states`, `screens[].accessibilityStatus` (a status, not a path), `screens[].responsive`, `crossCutting.experience` (flags and `evidence`), `qualityGates[accessibility]`, `gaps[]`, `feedback[]`, `reviewedBy` then `reviewStatus` on capabilities it did not implement.
-
-### qa
-
-- **Entry:** the target domain's capabilities are `implemented` and the build passes.
-- **Exit:** `coverage` has been run and its findings filed; role-matrix and negative tests exist and were executed against the built system; `qualityGates[]` are `passed` or `failed` with evidence paths; `reviewStatus` is `reviewed` or `contested`. See [verification.md](verification.md) and [test-data.md](test-data.md).
-- **Writes:** `qualityGates[]`, `crossCutting.observability` and `crossCutting.data`, `gaps[]`, `reviewedBy` then `reviewStatus`, `tests[]` and `evidence[]` entries for tests it wrote, `feedback[]`.
 
 ### security
 
 - **Entry:** the authentication, authorization, tenancy, and audit spine is `implemented` and `emit --format authz-matrix` produces output.
 - **Exit:** `crossCutting.authentication`, `.authorization`, `.audit`, and `.safety` carry evidence; every `risk: high` or `risk: critical` capability has safeguards, audit events, and a negative test; accepted risks are `decisions[]` with `status: confirmed` and a named human approver. See [security-governance.md](security-governance.md).
-- **Writes:** `crossCutting.authentication`, `.authorization`, `.audit`, `.safety`, `roles[].separationOfDuties`, critical and high `gaps[]`, accepted-risk `decisions[]`, `reviewStatus` on privileged commands.
+- **Writes:** `crossCutting.authentication`, `.authorization`, `.audit`, `.safety`, `roles[].separationOfDuties`, critical and high `gaps[]`, accepted-risk `decisions[]`, `reviewedBy` then `reviewStatus` on privileged commands it did not implement.
+
+### qa
+
+- **Entry:** the target domain's capabilities are `implemented` and the build passes; for the release gate, the `ux-reviewer` and `security` passes are finished.
+- **Exit:** `coverage` has been run and its findings filed; role-matrix and negative tests exist and were executed against the built system; `qualityGates[]` are `passed` or `failed` with evidence paths; `reviewStatus` is `reviewed` or `contested`; for a release, `validate --phase release` and `coverage` exit 0 and the gap report is emitted. See [verification.md](verification.md) and [test-data.md](test-data.md).
+- **Writes:** `qualityGates[]`, `crossCutting.observability` and `crossCutting.data`, `gaps[]`, `reviewedBy` then `reviewStatus`, `tests[]` and `evidence[]` entries for tests it wrote, `feedback[]`.
 
 Each `crossCutting` section has one owner, so two agents never overwrite each other's evidence: `security` owns `authentication`, `authorization`, `audit` and `safety`; `ux-reviewer` owns `experience`; `qa` owns `observability` and `data`. The architect creates the empty structure; implementers do not edit it.
 
@@ -132,9 +143,9 @@ python <skill-dir>/scripts/admin_console_manifest.py claim \
   --agent <agentId> --role <role> --capability <capabilityId> [--capability <capabilityId> ...]
 ```
 
-The claim takes an exclusive lock, refuses capabilities another agent holds, and records ownership in `agents[].ownsCapabilities`. Claim before reading the code you intend to change, not after writing it.
+The claim registers the agent on its first claim, writes `locks/<capability>.lock` (the file holds the agent id) and records the capability in `agents[].ownsCapabilities`. It decides conflicts from the manifest as well as from lock files: it exits 3 when another `active` agent lists the capability or is its `owner`, or when the lock file names another agent. An agent whose `status` is `done` or `handed-off` no longer counts as a manifest-level holder, but a lock file it left behind still blocks a claim until `release-claim` or `--force-steal` removes it. A claim goes through the same write guard as `add` and `set`, so it cannot smuggle in an invalid record. Claim before reading the code you intend to change, not after writing it.
 
-What a claim stamps depends on the role. `--role implementer` (and `architect`) sets `owner` and, when it is empty, `implementedBy`; `implementedBy` is the record of who built the capability and `release-claim` never clears it, so a reviewer-identity check still works after the handoff. A reviewer role (`ux-reviewer`, `qa`, `security`) takes the lock and is listed in `ownsCapabilities` but leaves `owner` and `implementedBy` alone, so claiming a capability to review it does not make you its implementer. An agent id that has held capabilities as an implementer or architect cannot claim as a reviewer; use a different id.
+What a claim stamps depends on the role. `--role implementer` (and `architect`) sets `owner` and, when it is empty, `implementedBy` (an implementer claim replaces an `implementedBy` that names an architect); `implementedBy` is the record of who built the capability and `release-claim` never clears it, so a reviewer-identity check still works after the handoff. A reviewer role (`ux-reviewer`, `qa`, `security`) takes the lock and is listed in `ownsCapabilities` but leaves `owner` and `implementedBy` alone, so claiming a capability to review it does not make you its implementer. An agent id that has held capabilities as an implementer or architect cannot claim as a reviewer; use a different id.
 
 Release on finish or on stop. Omitting `--capability` releases everything the agent holds:
 
@@ -142,6 +153,10 @@ Release on finish or on stop. Omitting `--capability` releases everything the ag
 python <skill-dir>/scripts/admin_console_manifest.py release-claim \
   --manifest <project-root>/.admin-console/manifest.json --agent <agentId> [--capability <capabilityId>]
 ```
+
+A release blanks `owner`, moves the capability from `ownsCapabilities` to the agent's `previouslyOwned` (the history the reviewer-identity check also reads) and sets the agent `done` when nothing is left. It exits 3 and releases nothing for a capability the agent never held or whose lock names another agent.
+
+To take a capability from an agent that has stalled and cannot release it, run `claim` again with `--force-steal --reason '<why>'`; the reason is required. The capability leaves the victim's `ownsCapabilities` (it stays in `previouslyOwned`) and the thief's record gains `stolenFrom` and a note. Never steal from an agent that may still be writing.
 
 Safe to claim concurrently:
 
@@ -169,7 +184,7 @@ The spine is built to `implemented` by one agent before entity slices fan out. S
 
 ## Manifest concurrency
 
-Mutate the manifest only through `add` and `set`:
+Mutate the manifest only through the script (`add`, `set`, `claim`, `release-claim`, `harvest`, `migrate --write`):
 
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py set \
@@ -177,24 +192,25 @@ python <skill-dir>/scripts/admin_console_manifest.py set \
   --path 'entities[user].capabilities[user.suspend].status' --value in-progress
 ```
 
+`set --path` accepts a path exactly as `validate` prints it (a leading `manifest.`, numeric indexes such as `roles[0]`, and `evidence[0]`), so a finding's path can be pasted in.
+
 Never rewrite the manifest as a whole file. A whole-file write serializes the copy you read minutes ago, and every `add` and `set` another agent made since then disappears. Nothing reports the loss: the result is still well-formed, so validation passes and the deleted work reappears only as a missing capability at release. This is the most damaging failure mode in concurrent operation, and it is silent.
 
 The same rule holds in single-agent mode across passes. Your in-context copy of the manifest is stale the moment the script writes to it.
 
-Locking: `add`, `set`, `claim`, and `release-claim` take an exclusive lock for the duration of the write. Do not create, edit, or delete lock files yourself.
+Three different things get called a lock or a claim. Do not create or edit any of these files yourself, and do not mix them up:
 
-Stale lock: if a lock persists after an agent stops, confirm the holder's `agents[].status` is `done` or `handed-off`, or that its process is gone. Then release by agent id:
+| What | Where | Freed by |
+|---|---|---|
+| Write lock | `.admin-console/.lock`, held for milliseconds by every write command | Automatically. The file records the holder's pid: a lock whose process is dead is taken over after about 2 seconds, and any lock older than 120 seconds is taken over regardless (the pid check is local to the machine, so on a shared filesystem the 120 seconds is what frees it). A caller that waits 30 seconds gets exit 2 naming the holder's pid and the lock's age; delete the file only if that process is gone |
+| Capability lock | `.admin-console/locks/<capability>.lock`, holding the claiming agent's id | `release-claim --agent <holder> --capability <capabilityId>` (name the capability explicitly when the manifest has no record of the holder), or `claim --force-steal --reason`. It never expires by itself |
+| Manifest claim | `agents[].ownsCapabilities` of an `active` agent, and `capability.owner` | `release-claim`, or setting the holder's `status` to `done` or `handed-off` (`set --path 'agents[<agentId>].status' --value handed-off`), or `--force-steal` |
 
-```text
-python <skill-dir>/scripts/admin_console_manifest.py release-claim \
-  --manifest <project-root>/.admin-console/manifest.json --agent <deadAgentId>
-```
-
-Do not clear a lock while another agent may be mid-write.
+`claim` refuses on either of the last two rows, so deleting a lock file does not free a capability the manifest still assigns to an active agent, and setting the holder's status does not remove its lock file. Before freeing anything, confirm the holder's `agents[].status` is `done` or `handed-off`, or that its process is gone; never free a claim while its holder may be mid-write.
 
 Claim conflict returns exit code 3. The capability is held. Then:
 
-1. Re-read the manifest and identify the holder from `agents[]`.
+1. Read the message, which names the holder, and re-read the manifest to confirm it from `agents[]`.
 2. Claim a different unclaimed capability and continue.
 3. If nothing else is claimable, file a `gaps[]` entry naming the contended capability and its holder, set your `agents[].status` to `handed-off`, write the worklog, and stop.
 
@@ -218,7 +234,7 @@ Worklog format, at `<project-root>/.admin-console/worklog/<agentId>.md`:
 
 ```text
 # worklog <agentId>
-role: architect|implementer|ux-reviewer|qa|security
+role: architect|implementer|ux-reviewer|security|qa
 mode: build|extend|audit|repair    profile: internal|standard|regulated
 started: <ISO-8601>    ended: <ISO-8601>
 
@@ -266,7 +282,7 @@ Shape of a healthy run: serialize the spine, fan out on slices, converge for rev
 
 **Divergent decisions.** Both entries stay in `decisions[]`. Do not delete or edit another agent's decision. Add yours, then have the tie-breaker `set` the losing entry's `status` to `superseded` and name the replacement in the winner's `reason`.
 
-**Contested reviewStatus.** The reviewer sets `contested` and files a paired `gaps[]` entry with a reproduction or a file reference. Only an agent other than the implementer may return it to `reviewed`.
+**Contested reviewStatus.** The reviewer sets `contested` and files a paired `gaps[]` entry with a reproduction or a file reference. Only an agent other than the implementer may return it to `reviewed`. The loop (contest, fix, re-review) runs at most two rounds; a third disagreement is filed as a `gaps[]` entry with `status: blocked` and goes to the human. A `gaps[]` entry moves to `status: accepted` only on the human's word, recorded as a confirmed `decisions[]` entry whose `reason` names the approver; an agent never accepts a gap it filed or caused.
 
 **Tie-breakers**, in this order:
 
@@ -286,11 +302,11 @@ If two agents have already edited the same files, the later agent re-reads both 
 
 One agent runs all five roles in sequence. The separation is the value; compressing the passes produces one pass wearing five labels.
 
-Pass order: `architect`, `implementer`, `ux-reviewer`, `qa`, `security`. Cycle implementer and review per domain rather than implementing everything and reviewing once at the end.
+Pass order: `architect`, `implementer`, `ux-reviewer`, `security`, `qa`, then the `harvester` pass, which never claims anything. `qa` is last of the five because it owns the release gate. Cycle implementer and review per domain rather than implementing everything and reviewing once at the end.
 
 Minimum honest separation. All four are required:
 
-1. **A distinct agent id per pass** — `solo-architect`, `solo-impl-billing`, `solo-ux`, `solo-qa`, `solo-sec`. The manifest then still records who did what, and the independence rule stays machine-checkable.
+1. **A distinct agent id per pass** — `solo-architect`, `solo-impl-billing`, `solo-ux`, `solo-sec`, `solo-qa`. The manifest then still records who did what, and the independence rule stays machine-checkable.
 2. **An explicit role declaration in the worklog** before the pass starts, naming the exit condition you intend to satisfy.
 3. **A fresh read of the artifact under review**, from disk, at the start of every review pass. Open the files the manifest names and check them against the manifest's requirements. Do not review from recall, and do not review the diff you just produced.
 4. **A `qa` pass that runs against the built system** — the build, the test commands, the running application, the emitted authorization matrix. Never against your notes, and never against a description of what the code does.
