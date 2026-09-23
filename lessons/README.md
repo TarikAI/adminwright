@@ -156,9 +156,10 @@ evidence to that lesson or drop it. Never open a second file for the same idea.
 
 ## Index maintenance
 
-Every status, confidence, or scope change updates the lesson's row in [index.md](index.md) in
-the same edit. The index carries two header lines that the consolidation pass maintains:
-`Last consolidation` and `Guidance level`, the highest adopted lesson id.
+The index is generated from the lesson files: `lesson add` and `lesson index` rebuild it, so
+after any status, confidence, or scope change run `lesson index` in the same edit. Its two
+header lines are `Last consolidation`, kept by the consolidation pass, and `Guidance level`,
+the highest adopted lesson id, which the rebuild computes.
 
 Lesson `0001` is the worked example for this format. Its rule is real guidance; its project
 identifiers and file paths under `Evidence` are illustrative.

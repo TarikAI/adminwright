@@ -255,13 +255,13 @@ class TestObservationClustering(unittest.TestCase):
     def test_same_finding_in_different_words_groups(self):
         records = [
             self.observation(
-                "AIVORA",
+                "Project A",
                 "Audit modeled 7 entities and 5 gaps but zero roles, screens, capabilities;"
                 " harvest never ran",
                 "Audit guidance should require capabilities at discovered status so repair"
                 " mode has targets"),
             self.observation(
-                "ZenithAPP",
+                "Project B",
                 "Build session modeled entities and screens but zero roles and zero"
                 " capabilities across two rounds; harvest never ran",
                 "Phase ordering nudge: roles and capabilities before screens; end-of-mode"
@@ -270,7 +270,7 @@ class TestObservationClustering(unittest.TestCase):
         clusters = acm.cluster_observations(records)
         self.assertEqual(len(clusters), 1, "one finding, two projects")
         self.assertEqual(
-            {r["project"] for r in clusters[0]}, {"AIVORA", "ZenithAPP"})
+            {r["project"] for r in clusters[0]}, {"Project A", "Project B"})
 
     def test_unrelated_findings_stay_apart(self):
         records = [
@@ -750,7 +750,7 @@ class TestGlobalLearning(unittest.TestCase):
         self.assertIn("p_", raw, "project names must become fingerprints")
 
     def test_export_drops_evidence_paths(self):
-        manifest = self.make_project("Zenith", [("gap", "obs", "change")])
+        manifest = self.make_project("Project C", [("gap", "obs", "change")])
         run("harvest", "--manifest", manifest, "--date", "2026-08-08", env=self.env)
         bundle_path = self.tmp / "b.json"
         run("promote", "--min-projects", "1", "--export", bundle_path, env=self.env)

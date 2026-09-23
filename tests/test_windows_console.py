@@ -60,7 +60,7 @@ class TestNonCp1252Output(unittest.TestCase):
 
     def test_harvest_promote_and_lessons_survive_a_cp1252_console(self):
         fb = {"id": "fb-001", "observation": "Schlüssel \U0001F511 rotation missing",
-              "category": "gap", "proposedChange": "add a rotation step 日本語",
+              "category": "gap", "scope": "SKILL.md", "proposedChange": "add a rotation step 日本語",
               "evidence": ["evidence/x.log"]}
         code, _o, err = run("add", "--manifest", self.manifest, "--kind", "feedback",
                             "--json", json.dumps(fb))

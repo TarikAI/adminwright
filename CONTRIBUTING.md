@@ -106,10 +106,15 @@ To review locally the same way: install the CLI
 
 `.claude-plugin/plugin.json` and `marketplace.json` deliberately declare no `version`.
 Claude Code resolves a git-sourced plugin's version from the commit SHA when the field is
-absent, so everything merged to `main` reaches installed users on their next background
-refresh. Setting `version` pins the plugin instead: users then receive updates only when
-someone remembers to bump it, and a forgotten bump is invisible from this side — every
-install silently keeps running an old copy.
+absent, so every commit merged to `main` is a new version users can install. It does not
+push it to them: Claude Code leaves auto-update off for third-party marketplaces by
+default, so a merge reaches a user when they run `claude plugin marketplace update
+tarikai && claude plugin update adminwright` or enable auto-update for the marketplace
+([docs](https://code.claude.com/docs/en/discover-plugins#configure-auto-updates)).
+Setting `version` pins the plugin instead: users then receive updates only when someone
+remembers to bump it, and a forgotten bump is invisible from this side — every install
+silently keeps running an old copy. `admin_console_manifest.py --version` and the
+`validate` summary line show which commit an install is on.
 
 Adding the field is a breaking change to distribution, not housekeeping.
 `tests/test_plugin_packaging.py` fails if either file grows one.

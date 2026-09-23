@@ -219,11 +219,12 @@ break admin consoles in each.
 
 ## Install
 
-### Claude Code (recommended — stays up to date)
+### Claude Code (recommended)
 
 This repository is also a Claude Code plugin marketplace. Installing it this way makes the
-skill available in every project on the machine, and Claude Code refreshes it in the
-background as new commits land here:
+skill available in every project on the machine. Install once, then pick up new commits
+deliberately: Claude Code leaves auto-update **off** for third-party marketplaces by default
+([docs](https://code.claude.com/docs/en/discover-plugins#configure-auto-updates)).
 
 ```bash
 claude plugin marketplace add TarikAI/adminwright
@@ -234,8 +235,12 @@ claude plugin install adminwright@tarikai
 ```
 
 Then invoke it with `/adminwright:adminwright`, or just describe the admin work and let the
-model reach for it. To force a refresh instead of waiting for the background one, run
-`claude plugin marketplace update tarikai` followed by `claude plugin update adminwright`.
+model reach for it. To pick up new commits later, run
+`claude plugin marketplace update tarikai` followed by `claude plugin update adminwright`,
+or enable auto-update for the `tarikai` marketplace (`/plugin`, **Marketplaces**, `tarikai`,
+**Enable auto-update**). `python scripts/admin_console_manifest.py --version` prints the
+commit you are running, and every `validate` summary line carries it together with the
+rule-set hash, so a stale copy is visible in any transcript.
 
 ### Every other harness
 

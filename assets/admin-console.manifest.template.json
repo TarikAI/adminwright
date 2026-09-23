@@ -3,6 +3,7 @@
   "manifestVersion": "2.0",
   "profile": "standard",
   "platform": {
+    "id": "",
     "name": "",
     "summary": "",
     "archetypes": [],

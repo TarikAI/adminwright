@@ -82,8 +82,17 @@ those are defects in the role prompt, so scope the lesson to
 `agents/adminwright-<role>.md` and edit that file exactly as you would a reference. This is
 how the agents improve over time instead of repeating the same friction on every project.
 When an agent file changes, say so in your report: copies installed into projects by
-`scripts/install_agents.py` are stale until it is rerun, and the marketplace plugin picks
-the change up on the next push.
+`scripts/install_agents.py` are stale until it is rerun, and a marketplace install picks the
+change up only after it is merged upstream and the user updates the plugin.
+
+**Where edits may land.** Reference and agent edits count only in a git checkout of the skill
+repository (`github.com/TarikAI/adminwright`). A marketplace install lives under
+`~/.claude/plugins/cache/`, which Claude Code replaces on update: an edit made there
+silently disappears. `lesson add` detects that; outside a checkout it writes the lesson to
+`$ADMINWRIGHT_HOME/outbox/lessons/` and says to clone the repository, copy the file into
+`lessons/`, edit the reference it names, and open a pull request. In that case do not edit
+the cached files: report each intended edit instead (file, the text replaced, the
+replacement).
 
 Then edit the file the lesson names, with a fresh read of the whole file first.
 Guidance you write will be followed literally by agents with no context — state the rule,
@@ -107,8 +116,9 @@ the orchestrator asked you to.
   independence rule) except to strengthen it. A run that found the contract inconvenient is
   not evidence against the contract.
 - You do not modify the product's code, the manifest's capability records, or other agents'
-  worklogs. Your write surface: `feedback[]`, the store, `lessons/`, `references/`,
-  `agents/*.md`, and — when a lesson warrants it — `CHANGELOG.md` under `[Unreleased]`.
+  worklogs. Your write surface: `feedback[]`, the store and its outbox, and — only inside a
+  git checkout of the skill repository — `lessons/`, `references/`, `agents/*.md`, and, when
+  a lesson warrants it, `CHANGELOG.md` under `[Unreleased]`.
 
 ## Report
 

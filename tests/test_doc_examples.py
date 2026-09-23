@@ -141,7 +141,7 @@ WORLD = (
     ("role", {"id": "ops", "name": "Operations", "responsibilities": ["Admin"], "scopes": ["all"]}),
     ("entity", {"id": "user", "name": "User", "sourceOfTruth": "postgres:users",
                 "lifecycleStates": ["active"], "retention": "7 years"}),
-    ("feedback", {"id": "fb-003", "observation": "o", "category": "gap",
+    ("feedback", {"id": "fb-003", "observation": "o", "category": "gap", "scope": "SKILL.md",
                   "proposedChange": "c", "evidence": ["evidence/tests.log"]}),
 )
 

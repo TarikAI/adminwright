@@ -22,14 +22,16 @@ def load(path):
 
 
 class TestAutoUpdateContract(unittest.TestCase):
-    """No `version` field, deliberately — it is what makes installs auto-update.
+    """No `version` field, deliberately — it is what lets every commit be an update.
 
     Claude Code resolves a git-sourced plugin's version from the commit SHA
-    when `version` is omitted, so every push to main reaches users. Setting the
-    field pins the plugin instead: users then receive updates only when someone
-    remembers to bump it, and a forgotten bump is invisible from this side.
-    Adding `version` here is therefore a breaking change to distribution, not a
-    tidy-up.
+    when `version` is omitted, so every commit merged to main is a new version a
+    user can install. (It is not pushed to them: third-party marketplaces have
+    auto-update off by default, so users update with `claude plugin update` or
+    enable auto-update for the marketplace.) Setting the field pins the plugin
+    instead: users then receive updates only when someone remembers to bump it,
+    and a forgotten bump is invisible from this side. Adding `version` here is
+    therefore a breaking change to distribution, not a tidy-up.
     """
 
     def test_plugin_json_declares_no_version(self):

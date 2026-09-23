@@ -277,7 +277,9 @@ thing or a policy is correct. Those remain yours.
 
 Load [skill-evolution.md](references/skill-evolution.md).
 
-Capture observations during the build in `feedback[]`. At the end, move them into the
+Capture observations during the build in `feedback[]`, each with a `scope` (the one
+`references/<file>.md`, `SKILL.md`, `scripts`, or `agents` it would change; `add` refuses an
+entry without one). At the end, move them into the
 cross-project store and see what has earned promotion:
 
 ```text
@@ -296,6 +298,11 @@ Record an accepted candidate, then edit the reference it names:
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py lesson add --title "<rule>" --category <gap|friction|incorrect-guidance|new-pattern|tooling> --scope references/<file>.md --trigger "<what happened>" --rule "<the durable rule>" --date <YYYY-MM-DD>
 ```
+
+Edit the reference only in a git checkout of the skill repository. A marketplace install is a
+cache that Claude Code replaces on update, so an edit made there vanishes: outside a
+checkout, `lesson add` writes to `$ADMINWRIGHT_HOME/outbox/lessons/` and prints how to send
+the lesson upstream, and you report the intended edit instead of making it.
 
 Adoption is a judgement call about guidance others will follow literally. Run it with a
 capable model and a fresh read of the reference, not as an afterthought at the end of a long

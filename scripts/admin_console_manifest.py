@@ -132,6 +132,13 @@ COLLECTION_KEYS = (
 )
 
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
+# The one file or area of the skill a feedback entry would change. Clustering
+# buckets observations by it, so an entry without one lands in "unassigned" and
+# can never group with anything.
+FEEDBACK_SCOPE_PATTERN = re.compile(
+    r"^(?:SKILL\.md|references/[A-Za-z0-9_.-]+\.md|scripts(?:/[A-Za-z0-9_./-]+)?"
+    r"|agents(?:/[A-Za-z0-9_./-]+)?)$"
+)
 _PLACEHOLDER_WORDS = (
     r"mock(?:s|ed|ing)?|fake(?:s|d)?|stub(?:s|bed|bing)?|dumm(?:y|ies)"
     r"|placeholder(?:s)?|lorem|demo-only|todo(?:s)?|tbd|fixme|coming-soon|wip|xxx+"
@@ -260,6 +267,7 @@ RULES = {
     "gate-evidence-missing": E3,
     "gate-rationale-missing": E3,
     "gap-unresolved": E3,
+    "feedback-scope": W3,
     "gap-rationale-missing": E3,
     "placeholder-scan": E3,
     "unregistered-static": E3,
@@ -349,6 +357,47 @@ COMPLETENESS_RULES = frozenset(
         "not-applicable-undecided",
     }
 )
+
+def ruleset_version():
+    """Short hash of the rule table, so a transcript says which rules judged it.
+
+    An auto-updated install can change what `validate` accepts between two runs.
+    This is not a version number anyone maintains: it changes exactly when a
+    severity, a rule, or the completeness set changes.
+    """
+    payload = json.dumps(
+        {
+            "rules": {name: list(tiers) for name, tiers in sorted(RULES.items())},
+            "completeness": sorted(COMPLETENESS_RULES),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+
+_SKILL_VERSION = []
+
+
+def skill_version():
+    """The installed commit: `git rev-parse` in a checkout, else the plugin cache's sha dir."""
+    if _SKILL_VERSION:
+        return _SKILL_VERSION[0]
+    version = "unknown"
+    if any((c / ".git").exists() for c in [SKILL_ROOT] + list(SKILL_ROOT.parents)):
+        try:
+            done = subprocess.run(
+                ["git", "-C", str(SKILL_ROOT), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+            )
+            if done.returncode == 0 and done.stdout.strip():
+                version = done.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if version == "unknown" and re.fullmatch(r"[0-9a-f]{7,40}", SKILL_ROOT.name):
+        version = SKILL_ROOT.name[:12]
+    _SKILL_VERSION.append(version)
+    return version
+
 
 # Expected operational domains per archetype, as lowercase keyword sets.
 # Used only to ask "did this build actually engage the domain it claims?" — a
@@ -2434,6 +2483,14 @@ def validate_gaps(manifest, findings, release):
         check_required(item, ("id", "observation", "category", "proposedChange", "evidence", "status"), path, findings)
         check_enum(item.get("category"), FEEDBACK_CATEGORIES, path + ".category", findings, "category")
         check_enum(item.get("status"), FEEDBACK_STATUSES, path + ".status", findings, "status")
+        if item.get("status") == "open" and not FEEDBACK_SCOPE_PATTERN.match(text_of(item.get("scope"))):
+            findings.add(
+                "feedback-scope",
+                path + ".scope",
+                "name the one thing this would change: a references/<file>.md path, SKILL.md, "
+                "scripts, or agents; an unscoped entry cannot be grouped with the same finding "
+                "from another project",
+            )
 
 
 def validate_agents(manifest, findings):
@@ -3284,6 +3341,7 @@ DEFAULTS = {
         "id": "",
         "observation": "",
         "category": "gap",
+        "scope": "",
         "proposedChange": "",
         "evidence": [],
         "status": "open",
@@ -3522,18 +3580,26 @@ def slugify(value):
 SCRUB_PATTERNS = (
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "<email>"),
     (re.compile(r"\bhttps?://\S+"), "<url>"),
+    # Credential shapes, before the generic path and domain patterns can eat half
+    # of them: cloud, source-host and JWT tokens.
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b"), "<secret>"),
+    (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "<secret>"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "<secret>"),
     (re.compile(r"\b(?:sk|pk|ghp|gho|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b"), "<secret>"),
     (re.compile(r"\b[A-Fa-f0-9]{32,}\b"), "<hash>"),
     (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
     # Hostnames including every leading label: db-prod-eu1.acme.internal must not
     # survive as db-prod-eu1.<host>, which still names the machine.
     (re.compile(r"\b[\w-]+(?:\.[\w-]+)*\.(?:internal|local|corp|lan|test|intranet)\b", re.I), "<host>"),
-    (re.compile(r"\b[\w-]+(?:\.[\w-]+)+\.(?:com|net|org|io|dev|ai|co|app|cloud|sh)\b", re.I), "<domain>"),
-    (re.compile(r"\b[\w-]+\.(?:com|net|org|io|dev|ai|co|app|cloud|sh)\b", re.I), "<domain>"),
-    # Windows and POSIX paths, and bare Windows drive roots.
+    # Windows and POSIX paths, bare Windows drive roots, and relative paths such as
+    # src/acme/billing.ts, which name a project's layout as surely as an absolute one.
     (re.compile(r"\b[A-Za-z]:[\\/][^\s,;]*"), "<path>"),
     (re.compile(r"(?<!\w)~?/(?:[\w.-]+/)+[\w.-]*"), "<path>"),
     (re.compile(r"\b(?:[\w.-]+\\)+[\w.-]+"), "<path>"),
+    (re.compile(r"(?<![\w/.-])[\w.-]+/[\w./-]+"), "<path>"),
+    # Any dotted name that ends in a two-or-more-letter label reads as a hostname
+    # whatever the top-level domain is (acme.dev, acme.xyz, billing.acme.co.uk).
+    (re.compile(r"\b[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}\b", re.I), "<domain>"),
 )
 
 # Stacks coarsened to a family, so "PostgreSQL 16.2 on prod-eu-1" becomes "postgres".
@@ -3559,9 +3625,36 @@ def coarsen_stack(value):
     return sorted({family for family in STACK_FAMILIES if family in lowered})
 
 
-def project_fingerprint(name):
+def store_salt(store, create=True):
+    """The store's private random salt for project fingerprints.
+
+    A bare SHA-256 of a project name can be reversed by anyone who can guess the
+    name, and project names are guessable. The salt never leaves the store, so a
+    fingerprint in a published bundle cannot be checked against a list of names.
+    """
+    path = Path(store) / "salt"
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    except OSError:
+        pass
+    if not create:
+        return ""
+    value = os.urandom(16).hex()
+    try:
+        Path(store).mkdir(parents=True, exist_ok=True)
+        with open(str(path), "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(value + "\n")
+    except OSError as exc:
+        raise ManifestError("Cannot write the store salt at " + str(path) + ": " + str(exc))
+    return value
+
+
+def project_fingerprint(name, salt=""):
     """Stable pseudonym for a project, so recurrence is countable without naming it."""
-    return "p_" + hashlib.sha256(text_of(name).encode("utf-8")).hexdigest()[:12]
+    basis = (salt + "|" if salt else "") + text_of(name)
+    return "p_" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
 
 
 def global_store_dir(override=None):
@@ -3572,11 +3665,16 @@ def global_store_dir(override=None):
     each project's copy of the skill only knows about itself.
     """
     if override:
-        return Path(override).expanduser().resolve()
-    env = os.environ.get("ADMINWRIGHT_HOME")
-    if env:
-        return Path(env).expanduser().resolve()
-    return Path.home() / ".adminwright"
+        path = Path(override).expanduser().resolve()
+    else:
+        env = os.environ.get("ADMINWRIGHT_HOME")
+        path = Path(env).expanduser().resolve() if env else Path.home() / ".adminwright"
+    if path.exists() and not path.is_dir():
+        raise ManifestError(
+            "the observation store path " + str(path) + " exists and is not a directory; "
+            "check ADMINWRIGHT_HOME"
+        )
+    return path
 
 
 def run_git(store, *args, check=True):
@@ -3599,19 +3697,25 @@ def run_git(store, *args, check=True):
     return completed
 
 
+def observation_key(record):
+    return text_of(record.get("id")) or observation_fingerprint(record)
+
+
 def merge_observation_files(*paths):
-    """Union of observation records by id, order-stable.
+    """Union of observation records by id, in canonical (sorted) order.
 
     observations.jsonl is append-only, so a sync conflict is never a real
     disagreement -- it is two devices having appended different lines. Merging
     by id union means neither device loses work, which git's default
-    line-oriented merge cannot guarantee.
+    line-oriented merge cannot guarantee. Sorting by id makes the result a pure
+    function of the SET of records: two devices holding the same records write
+    the same bytes, so a later merge never has anything to disagree about.
     """
     merged = {}
     for path in paths:
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in decode_text_bytes(path.read_bytes(), path).splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -3619,9 +3723,17 @@ def merge_observation_files(*paths):
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            key = text_of(record.get("id")) or observation_fingerprint(record)
-            merged.setdefault(key, record)
-    return list(merged.values())
+            if not isinstance(record, dict):
+                continue
+            merged.setdefault(observation_key(record), record)
+    return [merged[key] for key in sorted(merged)]
+
+
+def write_observations(path, records):
+    write_text_file(
+        path,
+        "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records),
+    )
 
 
 STOPWORDS = frozenset("""
@@ -3634,6 +3746,8 @@ no nor own too very s t just don now
 # matching can only ever group a record with itself. Clustering compares the
 # content words of the observation and the proposed change instead.
 SIMILARITY_THRESHOLD = 0.45
+# Denominator floor for the overlap coefficient: see observation_similarity.
+SIMILARITY_FLOOR = 4
 
 
 def content_words(*texts):
@@ -3648,26 +3762,34 @@ def content_words(*texts):
 
 
 def observation_similarity(left, right):
-    """Overlap coefficient of two observations' content words, 0.0 to 1.0.
+    """Overlap of two observations' content words, 0.0 to 1.0.
 
     Overlap rather than Jaccard: one agent writes a sentence and another writes
     a paragraph about the same defect, and Jaccard punishes that difference in
-    length even when the shorter text is wholly contained in the longer.
+    length even when the shorter text is wholly contained in the longer. The
+    denominator has a floor, though: without one, two-word notes sharing a single
+    word scored 0.5 and merged with anything that mentioned it.
     """
     a = content_words(left.get("observation"), left.get("proposedChange"))
     b = content_words(right.get("observation"), right.get("proposedChange"))
     if not a or not b:
         return 0.0
-    return len(a & b) / float(min(len(a), len(b)))
+    return len(a & b) / float(max(min(len(a), len(b)), SIMILARITY_FLOOR))
 
 
 def cluster_observations(records, threshold=SIMILARITY_THRESHOLD):
     """Group observations that say the same thing in different words.
 
-    Scope and category must match exactly — they are the coordinates of what
+    Scope and category must match exactly -- they are the coordinates of what
     the rule would change, and a friction note about SKILL.md is not the same
     finding as a tooling bug in the validator however similar the wording.
-    Within a bucket, greedy single-link clustering on content-word overlap.
+    Within a bucket, greedy AVERAGE-link clustering: a record joins the cluster
+    whose members it resembles on average, best cluster first.
+
+    Single-link let one shared word chain unrelated findings into one cluster:
+    A resembled B, B resembled C, so A and C were "the same finding" although
+    they shared nothing. Average-link needs the record to resemble the cluster,
+    not merely one member of it.
 
     Field-tested: two projects reported "modelled entities and screens but no
     roles or capabilities" in different words. Exact fingerprint matching filed
@@ -3688,14 +3810,18 @@ def cluster_observations(records, threshold=SIMILARITY_THRESHOLD):
         members = sorted(
             members,
             key=lambda r: (text_of(r.get("date")), text_of(r.get("project")),
-                           text_of(r.get("fingerprint"))),
+                           text_of(r.get("fingerprint")), observation_key(r)),
         )
         local = []
         for record in members:
+            best = None
             for cluster in local:
-                if any(observation_similarity(record, other) >= threshold for other in cluster):
-                    cluster.append(record)
-                    break
+                scores = [observation_similarity(record, other) for other in cluster]
+                mean = sum(scores) / float(len(scores))
+                if mean >= threshold and (best is None or mean > best[0]):
+                    best = (mean, cluster)
+            if best is not None:
+                best[1].append(record)
             else:
                 local.append([record])
         clusters.extend(local)
@@ -3761,7 +3887,7 @@ def read_observations(store):
     records = []
     if not path.exists():
         return records
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in decode_text_bytes(path.read_bytes(), path).splitlines():
         line = line.strip()
         if not line:
             continue
@@ -3776,9 +3902,13 @@ def append_observations(store, records):
     store.mkdir(parents=True, exist_ok=True)
     path = store / "observations.jsonl"
     with FileLock(store / ".lock"):
-        with open(str(path), "a", encoding="utf-8") as handle:
+        with open(str(path), "a", encoding="utf-8", newline="\n") as handle:
             for record in records:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+LESSON_CONFIDENCES = ("observed-once", "repeated", "confirmed")
+LESSON_FILE_PATTERN = re.compile(r"^(\d{4})-.+\.md$")
 
 
 def next_lesson_number(lessons_dir):
@@ -3791,29 +3921,33 @@ def next_lesson_number(lessons_dir):
     return highest + 1
 
 
+def yaml_quote(value):
+    """A YAML double-quoted scalar. JSON string syntax is a subset of it."""
+    return json.dumps(" ".join(str(value).split()), ensure_ascii=False)
+
+
 def yaml_list(values):
-    if not values:
-        return "[]"
-    return "[" + ", ".join('"' + str(value).replace('"', "'") + '"' for value in values) + "]"
+    return "[" + ", ".join(yaml_quote(value) for value in values) + "]"
 
 
-# `platforms` carries the promotion bar: "seen on two or more distinct
-# projects" is unreadable from an index that does not name the projects. It is
-# written from --platform, the same source as the lesson's frontmatter, so the
-# index and the file cannot disagree.
-LESSON_INDEX_HEADER = (
-    "# Lessons index\n"
-    "\n"
-    "| id | title | category | scope | status | confidence | platforms | date |\n"
-    "|---|---|---|---|---|---|---|---|\n"
-)
+def parse_frontmatter_value(raw):
+    raw = raw.strip()
+    if raw.startswith("[") or raw.startswith('"'):
+        try:
+            return json.loads(raw)
+        except ValueError:
+            pass
+    if raw.startswith("["):
+        inner = raw.strip("[]")
+        return [part.strip().strip("'\"") for part in inner.split(",") if part.strip()]
+    return raw.strip("'\"")
 
 
 def read_lesson_frontmatter(path):
     fields = {}
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+        text = decode_text_bytes(path.read_bytes(), path)
+    except (OSError, ManifestError):
         return fields
     if not text.startswith("---"):
         return fields
@@ -3824,8 +3958,76 @@ def read_lesson_frontmatter(path):
         if ":" not in line:
             continue
         key, _sep, value = line.partition(":")
-        fields[key.strip()] = value.strip().strip('"')
+        fields[key.strip()] = parse_frontmatter_value(value)
     return fields
+
+
+def lesson_files(lessons_dir):
+    if not lessons_dir.exists():
+        return []
+    return sorted(p for p in lessons_dir.glob("*.md") if LESSON_FILE_PATTERN.match(p.name))
+
+
+LESSON_INDEX_PREAMBLE = (
+    "One row per lesson, ordered by id. `lesson add` rebuilds the table from the lesson\n"
+    "files, so the index cannot drift from them. Field meanings, statuses, and the review\n"
+    "procedure are in [README.md](README.md). The promotion bar is in\n"
+    "[../references/skill-evolution.md](../references/skill-evolution.md).\n"
+    "\n"
+    "`scope` is skill-root-relative and names the single reference file the rule lands in.\n"
+)
+# `platforms` carries the promotion bar: "seen on two or more distinct
+# projects" is unreadable from an index that does not name the projects.
+LESSON_INDEX_COLUMNS = "| id | title | category | scope | status | confidence | platforms | date |"
+
+
+def rebuild_lesson_index(lessons_dir):
+    """Regenerate index.md from the lesson files; return the guidance level.
+
+    The index used to be appended to by hand and drifted: its `Guidance level`
+    read 0001 while four later lessons were adopted, and its rows named lessons
+    without linking them. It is now a pure function of the files.
+    """
+    index_path = lessons_dir / "index.md"
+    consolidation = "unknown"
+    if index_path.exists():
+        found = re.search(r"^Last consolidation:\s*(.+)$", index_path.read_text(encoding="utf-8"), re.M)
+        if found:
+            consolidation = found.group(1).strip()
+    rows = []
+    adopted = []
+    for path in lesson_files(lessons_dir):
+        fields = read_lesson_frontmatter(path)
+        lesson_id = fields.get("id") or path.name[:4]
+        if fields.get("status") == "adopted":
+            adopted.append(lesson_id)
+        platforms = fields.get("platforms")
+        if isinstance(platforms, list):
+            platforms = "; ".join(str(item) for item in platforms)
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    "[" + lesson_id + "](" + path.name + ")",
+                    cell(fields.get("title", "")),
+                    cell(fields.get("category", "")),
+                    cell(fields.get("scope", "")),
+                    cell(fields.get("status", "")),
+                    cell(fields.get("confidence", "")),
+                    cell(platforms or ""),
+                    cell(fields.get("date", "")),
+                ]
+            )
+            + " |"
+        )
+    level = max(adopted) if adopted else "none"
+    text = (
+        "# Lesson index\n\nLast consolidation: " + consolidation + "\nGuidance level: " + level
+        + "\n\n" + LESSON_INDEX_PREAMBLE + "\n" + LESSON_INDEX_COLUMNS + "\n"
+        "|---|---|---|---|---|---|---|---|\n" + "".join(row + "\n" for row in rows)
+    )
+    write_text_file(index_path, text)
+    return level
 
 
 # --------------------------------------------------------------------------
@@ -3867,6 +4069,11 @@ def cmd_init(args):
     manifest = load_json(TEMPLATE_PATH)
     manifest["profile"] = args.profile
     manifest["platform"]["name"] = args.name
+    # A stable handle for the cross-project store: the promotion bar counts
+    # distinct projects, and a display name is not one.
+    manifest["platform"]["id"] = (
+        slugify(args.name)[:32].rstrip("-") + "-" + os.urandom(3).hex()
+    )
     manifest["platform"]["archetypes"] = list(dict.fromkeys(args.archetype or []))
     # An unrecognised archetype silently disables coverage checking, and the
     # first field tests proved nobody notices. Warn at the moment of typing,
@@ -3943,6 +4150,10 @@ def print_findings(findings, phase, profile_source):
         + findings.profile
         + ", phase "
         + phase
+        + ", adminwright "
+        + skill_version()
+        + ", ruleset "
+        + ruleset_version()
         + "]"
     )
 
@@ -3986,6 +4197,8 @@ def cmd_validate(args):
                     "manifestProfile": declared,
                     "allowLowerProfile": bool(args.allow_lower_profile),
                     "warning": warning,
+                    "skillVersion": skill_version(),
+                    "rulesetVersion": ruleset_version(),
                     "phase": args.phase,
                     "manifest": str(manifest_path),
                     "projectRoot": str(project_root),
@@ -4220,6 +4433,11 @@ def cmd_add(args):
                 raise ManifestError(kind + " '" + entry_id + "' already exists" + duplicate_where)
             if entry_id in batch_ids:
                 raise ManifestError(kind + " '" + entry_id + "' appears twice in this batch")
+            if kind == "feedback" and not FEEDBACK_SCOPE_PATTERN.match(text_of(entry.get("scope"))):
+                raise ManifestError(
+                    "feedback '" + entry_id + "' needs a scope: the one thing it would change, "
+                    "as a references/<file>.md path, SKILL.md, scripts, or agents"
+                )
             batch_ids.add(entry_id)
         collection.extend(entries)
         introduced, warned = new_findings(
@@ -4470,25 +4688,62 @@ def cmd_release_claim(args):
     return 3 if skipped else 0
 
 
+def feedback_content_hash(item):
+    """Identity of what an agent actually wrote, so an edit is noticed."""
+    basis = "|".join(
+        text_of(item.get(key)) for key in ("category", "scope", "observation", "proposedChange")
+    )
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
+
+
+def project_key_of(manifest, manifest_path, override=None):
+    """The identity a project is counted by: an explicit id, else its name.
+
+    A bare display name is a poor key -- two unrelated projects both called
+    'admin' were one, and one project renamed was two. `platform.id` is the
+    stable handle; the name is the fallback.
+    """
+    platform = as_dict(manifest.get("platform"))
+    return (
+        text_of(override)
+        or text_of(platform.get("id"))
+        or text_of(platform.get("name"))
+        or Path(manifest_path).resolve().parent.parent.name
+    )
+
+
 def cmd_harvest(args):
     manifest_path = resolve_manifest_path(args.manifest)
     manifest = load_json(manifest_path)
     store = global_store_dir(args.store)
     platform = as_dict(manifest.get("platform"))
     project = text_of(args.project) or text_of(platform.get("name")) or manifest_path.parent.parent.name
+    key = project_key_of(manifest, manifest_path, args.project)
     stack = as_dict(platform.get("stack"))
     stack_summary = ", ".join(
-        text_of(stack.get(key)) for key in ("frontend", "backend", "database") if text_of(stack.get(key))
+        text_of(stack.get(name)) for name in ("frontend", "backend", "database") if text_of(stack.get(name))
     )
-    known = {record.get("id") for record in read_observations(store)}
+    try:
+        known = {record.get("id") for record in read_observations(store)}
+    except OSError as exc:
+        raise ManifestError("Cannot read the observation store at " + str(store) + ": " + str(exc))
     harvested = []
+    flipped = []
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
         for _path, item in iter_named(manifest, "feedback"):
-            if item.get("status") != "open":
+            chash = feedback_content_hash(item)
+            status = item.get("status")
+            edited = (
+                status == "promoted"
+                and text_of(item.get("promotedHash"))
+                and text_of(item.get("promotedHash")) != chash
+            )
+            if status != "open" and not edited:
                 continue
             record = {
                 "project": project,
+                "projectKey": key,
                 "archetypes": [text_of(a) for a in as_list(platform.get("archetypes"))],
                 "stack": stack_summary,
                 "category": text_of(item.get("category")),
@@ -4497,21 +4752,120 @@ def cmd_harvest(args):
                 "scope": text_of(item.get("scope")) or "unassigned",
                 "evidence": [text_of(e) for e in as_list(item.get("evidence"))],
                 "date": text_of(args.date) or "unknown",
+                "contentHash": chash,
             }
             record["fingerprint"] = observation_fingerprint(record)
-            record["id"] = project + ":" + text_of(item.get("id"))
-            if record["id"] in known:
-                continue
-            harvested.append(record)
-            item["status"] = "promoted"
+            # The content hash is part of the id: an entry edited after it was
+            # promoted is a NEW observation, not a duplicate of the old one.
+            record["id"] = key + ":" + text_of(item.get("id")) + ":" + chash
+            flipped.append((item, chash))
+            if record["id"] not in known:
+                harvested.append(record)
+        # Store first, manifest second. Marking feedback `promoted` before the
+        # store write meant a mis-set ADMINWRIGHT_HOME stamped everything
+        # promoted, crashed, and the entries were skipped forever.
         if harvested:
+            try:
+                append_observations(store, harvested)
+            except OSError as exc:
+                raise ManifestError(
+                    "Cannot write the observation store at " + str(store) + " (" + str(exc)
+                    + "); no feedback was marked promoted. Check ADMINWRIGHT_HOME."
+                )
+        for item, chash in flipped:
+            item["status"] = "promoted"
+            item["promotedHash"] = chash
+        if flipped:
             write_json(manifest_path, manifest)
-    if harvested:
-        append_observations(store, harvested)
     print("Harvested " + str(len(harvested)) + " observation(s) from project '" + project + "'")
     print("Store: " + str(store))
     if not text_of(args.date):
         stderr("WARN: no --date supplied; observations recorded as 'unknown'")
+    return 0
+
+
+STORE_FILES = ("observations.jsonl", "README.md", ".gitignore")
+STORE_README = (
+    "# Adminwright observation store\n\n"
+    "Observations harvested from every project on this machine.\n"
+    "Private by default. Nothing here leaves this machine except (a) `store sync`, which\n"
+    "pushes these files to the private git remote you configured, and (b) `promote --export`,\n"
+    "which writes a sanitised bundle that is shared only if you open a pull request with it.\n"
+    "Observations quote your engineering notes: use a PRIVATE remote.\n"
+)
+
+
+def commit_store(store, message):
+    run_git(store, "add", "--", *[name for name in STORE_FILES if (store / name).exists()])
+    if run_git(store, "status", "--porcelain", "--", *STORE_FILES, check=False).stdout.strip():
+        run_git(store, "-c", "user.name=adminwright", "-c", "user.email=adminwright@localhost",
+                "commit", "-q", "-m", message)
+        return True
+    return False
+
+
+def sync_store(store, args):
+    if not (store / ".git").exists():
+        raise ManifestError("store is not a git repository; run `store init --remote <url>` first")
+    if not run_git(store, "config", "user.email", check=False).stdout.strip():
+        run_git(store, "config", "user.name", "adminwright", check=False)
+        run_git(store, "config", "user.email", "adminwright@localhost", check=False)
+    has_remote = run_git(store, "remote", "get-url", "origin", check=False).returncode == 0
+    local_path = store / "observations.jsonl"
+    # The whole sync runs under the store lock: append_observations takes it, so
+    # a harvest can no longer write between our read and our rewrite.
+    with FileLock(store / ".lock"):
+        # Normalise first, so what we commit is already the canonical union.
+        write_observations(local_path, merge_observation_files(local_path))
+        print(
+            "Committed local observations."
+            if commit_store(store, "observations: " + (text_of(args.date) or "sync"))
+            else "Nothing new to commit."
+        )
+        if not has_remote:
+            print("No remote configured; nothing to push.")
+            return 0
+        fetched = run_git(store, "fetch", "-q", "origin", check=False)
+        if fetched.returncode != 0:
+            raise ManifestError("could not reach the remote:\n" + fetched.stderr.strip())
+        remote_ref = "origin/" + args.branch
+        if run_git(store, "rev-parse", "--verify", "-q", remote_ref, check=False).returncode == 0:
+            theirs = run_git(store, "show", remote_ref + ":observations.jsonl", check=False)
+            if theirs.returncode == 0:
+                incoming = store / ".incoming.jsonl"
+                try:
+                    write_text_file(incoming, theirs.stdout)
+                    merged = merge_observation_files(local_path, incoming)
+                finally:
+                    if incoming.exists():
+                        incoming.unlink()
+                write_observations(local_path, merged)
+                print("Merged " + str(len(merged)) + " observation(s) by id union.")
+                # Commit the union BEFORE joining histories, so the tree the merge
+                # keeps already holds every record from both sides.
+                commit_store(store, "merge remote observations")
+            # Join histories keeping OUR tree outright (`-s ours`). `-X ours` still
+            # merges line by line and, when two devices held the same records in a
+            # different order, re-applied the reorder as a deletion. Our tree is the
+            # canonical union of both sides, so nothing on the remote can be lost by
+            # ignoring it. --allow-unrelated-histories: each device runs `store init`
+            # itself, so two stores share no ancestor the first time they meet.
+            joined = run_git(
+                store, "-c", "user.name=adminwright", "-c", "user.email=adminwright@localhost",
+                "merge", "-q", "--no-edit", "--allow-unrelated-histories", "-s", "ours",
+                remote_ref, check=False,
+            )
+            if joined.returncode != 0:
+                run_git(store, "merge", "--abort", check=False)
+                raise ManifestError(
+                    "could not join the remote history:\n"
+                    + (joined.stderr or joined.stdout).strip()
+                    + "\nThe local store is unchanged. Resolve by hand in " + str(store)
+                )
+        pushed = run_git(store, "push", "-q", "origin", "HEAD:" + args.branch, check=False)
+        if pushed.returncode != 0:
+            raise ManifestError("push failed:\n" + (pushed.stderr or pushed.stdout).strip())
+    print("Synced with " + args.branch + ".")
     return 0
 
 
@@ -4521,7 +4875,11 @@ def cmd_store(args):
 
     if action == "status":
         records = read_observations(store)
-        projects = {text_of(r.get("project")) for r in records if text_of(r.get("project"))}
+        projects = {
+            text_of(r.get("projectKey")) or text_of(r.get("project"))
+            for r in records
+            if text_of(r.get("projectKey")) or text_of(r.get("project"))
+        }
         print("Store: " + str(store))
         print("Exists: " + ("yes" if store.exists() else "no"))
         print("Observations: " + str(len(records)) + " across " + str(len(projects)) + " project(s)")
@@ -4536,10 +4894,14 @@ def cmd_store(args):
         return 0
 
     if action == "init":
-        store.mkdir(parents=True, exist_ok=True)
+        try:
+            store.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ManifestError("Cannot create the store at " + str(store) + ": " + str(exc))
         observations = store / "observations.jsonl"
         if not observations.exists():
-            observations.write_text("", encoding="utf-8")
+            write_text_file(observations, "")
+        store_salt(store)
         if not (store / ".git").exists():
             run_git(store, "init", "-q")
             run_git(store, "checkout", "-q", "-B", "main", check=False)
@@ -4551,16 +4913,13 @@ def cmd_store(args):
         run_git(store, "config", "user.email", "adminwright@localhost", check=False)
         gitignore = store / ".gitignore"
         if not gitignore.exists():
-            gitignore.write_text(".lock\nlocks/\n", encoding="utf-8")
+            # The salt is deliberately not synced: it exists so a published
+            # fingerprint cannot be reversed, and a synced copy on every device
+            # (and on the remote) would widen who can reverse one.
+            write_text_file(gitignore, ".lock\nlocks/\n.incoming.jsonl\nsalt\noutbox/\n")
         readme = store / "README.md"
         if not readme.exists():
-            readme.write_text(
-                "# Adminwright observation store\n\n"
-                "Observations harvested from every project on this machine.\n"
-                "Private by default. Nothing here leaves the machine unless you run\n"
-                "`promote --export` and choose to share the result.\n",
-                encoding="utf-8",
-            )
+            write_text_file(readme, STORE_README)
         if args.remote:
             existing = run_git(store, "remote", "get-url", "origin", check=False)
             if existing.returncode == 0:
@@ -4576,90 +4935,12 @@ def cmd_store(args):
         return 0
 
     if action == "sync":
-        if not (store / ".git").exists():
-            raise ManifestError("store is not a git repository; run `store init --remote <url>` first")
-        if not run_git(store, "config", "user.email", check=False).stdout.strip():
-            run_git(store, "config", "user.name", "adminwright", check=False)
-            run_git(store, "config", "user.email", "adminwright@localhost", check=False)
-        has_remote = run_git(store, "remote", "get-url", "origin", check=False).returncode == 0
-        run_git(store, "add", "-A")
-        status = run_git(store, "status", "--porcelain", check=False)
-        if status.stdout.strip():
-            message = "observations: " + (text_of(args.date) or "sync")
-            run_git(store, "-c", "user.name=adminwright", "-c",
-                    "user.email=adminwright@localhost", "commit", "-q", "-m", message)
-            print("Committed local observations.")
-        else:
-            print("Nothing new to commit.")
-        if not has_remote:
-            print("No remote configured; nothing to push.")
-            return 0
-        fetched = run_git(store, "fetch", "-q", "origin", check=False)
-        if fetched.returncode != 0:
-            raise ManifestError("could not reach the remote:\n" + fetched.stderr.strip())
-        remote_ref = "origin/" + args.branch
-        exists = run_git(store, "rev-parse", "--verify", "-q", remote_ref, check=False)
-        if exists.returncode == 0:
-            local_path = store / "observations.jsonl"
-            theirs = run_git(store, "show", remote_ref + ":observations.jsonl", check=False)
-            if theirs.returncode == 0:
-                incoming = store / ".incoming.jsonl"
-                incoming.write_text(theirs.stdout, encoding="utf-8")
-                merged = merge_observation_files(local_path, incoming)
-                incoming.unlink()
-                with open(str(local_path), "w", encoding="utf-8") as handle:
-                    for record in merged:
-                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                print("Merged " + str(len(merged)) + " observation(s) by id union.")
-                # Commit the union BEFORE joining histories. git merge rewrites
-                # the working tree from the merge result, so an uncommitted union
-                # is silently discarded -- which loses exactly the remote lines
-                # this step exists to keep.
-                run_git(store, "add", "-A")
-                if run_git(store, "status", "--porcelain", check=False).stdout.strip():
-                    run_git(store, "-c", "user.name=adminwright", "-c",
-                            "user.email=adminwright@localhost", "commit", "-q", "-m",
-                            "merge remote observations")
-            # Join histories with our committed union winning any conflict.
-            # --allow-unrelated-histories is required, not optional: each device
-            # runs `store init` independently, so two stores pointed at the same
-            # remote genuinely have no common ancestor the first time they meet.
-            joined = run_git(
-                store, "merge", "-q", "--no-edit", "--allow-unrelated-histories",
-                "-X", "ours", remote_ref, check=False,
-            )
-            if joined.returncode != 0:
-                run_git(store, "merge", "--abort", check=False)
-                raise ManifestError(
-                    "could not join the remote history:\n"
-                    + (joined.stderr or joined.stdout).strip()
-                    + "\nThe local store is unchanged. Resolve by hand in " + str(store)
-                )
-            # git resolves the file line by line and happily keeps both sides of
-            # a non-conflicting hunk, which duplicates records our id-union had
-            # already collapsed. Normalise the file itself as the last word.
-            local_path = store / "observations.jsonl"
-            deduped = merge_observation_files(local_path)
-            before = local_path.read_text(encoding="utf-8") if local_path.exists() else ""
-            after = "".join(
-                json.dumps(record, ensure_ascii=False) + "\n" for record in deduped
-            )
-            if after != before:
-                local_path.write_text(after, encoding="utf-8")
-                run_git(store, "add", "-A")
-                if run_git(store, "status", "--porcelain", check=False).stdout.strip():
-                    run_git(store, "commit", "-q", "-m", "normalise observations")
-                print("Deduplicated to " + str(len(deduped)) + " observation(s).")
-        pushed = run_git(store, "push", "-q", "origin", "HEAD:" + args.branch, check=False)
-        if pushed.returncode != 0:
-            raise ManifestError("push failed:\n" + (pushed.stderr or pushed.stdout).strip())
-        print("Synced with " + args.branch + ".")
-        return 0
+        return sync_store(store, args)
 
     raise ManifestError("unknown store action: " + str(action))
 
 
-def sanitise_candidate(candidate):
+def sanitise_candidate(candidate, salt=""):
     """Strip a promotion candidate down to what is safe to publish."""
     return {
         "fingerprint": candidate["fingerprint"],
@@ -4670,10 +4951,15 @@ def sanitise_candidate(candidate):
         "archetypes": sorted({scrub_text(a) for a in candidate["archetypes"] if a}),
         "stacks": sorted({family for stack in candidate["stacks"] for family in coarsen_stack(stack)}),
         "projectCount": candidate["projectCount"],
-        "projects": [project_fingerprint(name) for name in candidate["projects"]],
+        "projects": [project_fingerprint(name, salt) for name in candidate["projectKeys"]],
         # Evidence paths are dropped entirely: they name files in someone's
         # private repository and prove nothing to a reader who cannot open them.
     }
+
+
+def record_project_key(record):
+    """What counts as 'one project' for the promotion bar."""
+    return text_of(record.get("projectKey")) or text_of(record.get("project"))
 
 
 def cmd_promote(args):
@@ -4695,23 +4981,28 @@ def cmd_promote(args):
         # The lowest member fingerprint is a stable cluster id: it does not
         # change when a third report joins an existing pair.
         key = min(text_of(item.get("fingerprint")) for item in cluster)
-        groups[key] = cluster
+        groups.setdefault(key, []).extend(cluster)
 
     candidates = []
     for fingerprint, items in groups.items():
-        projects = sorted({text_of(item.get("project")) for item in items if text_of(item.get("project"))})
+        # The bar counts distinct projects, not distinct name strings: a project
+        # is its stable key (platform.id, else name), so a renamed project is
+        # still one and two unrelated projects that share a name are still two.
+        keys = sorted({record_project_key(item) for item in items if record_project_key(item)})
+        names = sorted({text_of(item.get("project")) for item in items if text_of(item.get("project"))})
         archetypes = sorted({a for item in items for a in as_list(item.get("archetypes"))})
         stacks = sorted({text_of(item.get("stack")) for item in items if text_of(item.get("stack"))})
         category = text_of(items[0].get("category"))
         # A correction of wrong guidance promotes on first sighting; everything
         # else waits for corroboration from a second, distinct project.
         immediate = category == "incorrect-guidance"
-        if len(projects) >= args.min_projects or immediate:
+        if len(keys) >= args.min_projects or immediate:
             candidates.append(
                 {
                     "fingerprint": fingerprint,
-                    "projects": projects,
-                    "projectCount": len(projects),
+                    "projects": names,
+                    "projectKeys": keys,
+                    "projectCount": len(keys),
                     "archetypes": archetypes,
                     "stacks": stacks,
                     "category": category,
@@ -4719,19 +5010,30 @@ def cmd_promote(args):
                     "proposedChange": text_of(items[0].get("proposedChange")),
                     "observation": text_of(items[0].get("observation")),
                     "evidence": sorted({e for item in items for e in as_list(item.get("evidence"))}),
-                    "reason": "correction" if immediate else "seen on " + str(len(projects)) + " projects",
+                    "reason": "correction" if immediate else "seen on " + str(len(keys)) + " projects",
                     "communityEvidence": sum(1 for item in items if item.get("community")),
+                    # Who was merged into this cluster, so a bad merge is visible.
+                    "members": [
+                        {
+                            "id": observation_key(item),
+                            "project": text_of(item.get("project")),
+                            "date": text_of(item.get("date")),
+                            "observation": text_of(item.get("observation"))[:160],
+                        }
+                        for item in items
+                    ],
                 }
             )
-    candidates.sort(key=lambda c: (-c["projectCount"], c["scope"]))
+    candidates.sort(key=lambda c: (-c["projectCount"], c["scope"], c["fingerprint"]))
 
     if getattr(args, "export", None):
+        salt = store_salt(store)
         bundle = {
             "bundleVersion": "1",
             "generatedFor": "adminwright community observations",
-            "note": "Sanitised. Project names are one-way fingerprints; paths, hosts, "
-                    "emails, URLs and evidence references are removed.",
-            "observations": [sanitise_candidate(c) for c in candidates],
+            "note": "Sanitised. Project names are salted one-way fingerprints; paths, hosts, "
+                    "emails, URLs, credentials and evidence references are removed.",
+            "observations": [sanitise_candidate(c, salt) for c in candidates],
         }
         out_path = Path(args.export).resolve()
         write_text_file(out_path, json.dumps(bundle, indent=2, ensure_ascii=False) + "\n")
@@ -4739,7 +5041,7 @@ def cmd_promote(args):
         print()
         print("READ THE FILE BEFORE SHARING IT.")
         print("Patterns removed emails, URLs, paths, IP addresses, hostnames, domains,")
-        print("tokens and hashes, replaced project names with one-way fingerprints, and")
+        print("tokens and hashes, replaced project names with salted one-way fingerprints, and")
         print("dropped evidence references entirely.")
         print()
         print("What no pattern can catch: a company, product, customer or person's name")
@@ -4784,6 +5086,11 @@ def cmd_promote(args):
         print("- Proposed: " + candidate["proposedChange"])
         if candidate["evidence"]:
             print("- Evidence: " + ", ".join(candidate["evidence"]))
+        print("- Merged from " + str(len(candidate["members"])) + " observation(s); if two of "
+              "these are not the same finding, do not adopt them as one:")
+        for member in candidate["members"]:
+            print("    - " + member["id"] + " (" + (member["date"] or "undated") + "): "
+                  + member["observation"])
         print()
     print("Record each accepted candidate with `lesson add`, then edit the reference it")
     print("names and open a pull request. Promotion is a judgement call: read")
@@ -4791,84 +5098,125 @@ def cmd_promote(args):
     return 0
 
 
-def cmd_lesson_add(args):
-    lessons_dir = Path(args.lessons_dir).resolve() if args.lessons_dir else SKILL_ROOT / "lessons"
-    lessons_dir.mkdir(parents=True, exist_ok=True)
-    number = next_lesson_number(lessons_dir)
-    lesson_id = "%04d" % number
-    slug = slugify(args.title)
-    path = lessons_dir / (lesson_id + "-" + slug + ".md")
-    date = text_of(args.date) or "unknown"
-    if date == "unknown":
-        stderr("WARN: no --date supplied; recorded as 'unknown'")
-    front = [
+def in_plugin_cache(path):
+    parts = [part.lower() for part in Path(path).parts]
+    return any(parts[i] == "plugins" and parts[i + 1] == "cache" for i in range(len(parts) - 1))
+
+
+def skill_is_checkout():
+    """True when this copy of the skill is a git checkout of its own repository.
+
+    A marketplace install lives under ~/.claude/plugins/cache/<marketplace>/
+    <plugin>/<sha>/ -- no .git, and the whole directory is replaced on update --
+    so anything written into its lessons/ or references/ is silently discarded.
+    """
+    if in_plugin_cache(SKILL_ROOT):
+        return False
+    return any((candidate / ".git").exists() for candidate in [SKILL_ROOT] + list(SKILL_ROOT.parents))
+
+
+def clean_block(text):
+    """Keep a multi-line argument from forging a heading the format forbids."""
+    return "\n".join(
+        ("\\" + line if line.lstrip().startswith("#") else line) for line in text.strip().splitlines()
+    )
+
+
+def scope_exists(scope, lessons_dir):
+    relative = Path(scope)
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+    return any((base / relative).is_file() for base in (Path(lessons_dir).parent, SKILL_ROOT))
+
+
+def build_lesson_text(lesson_id, args, date):
+    evidence = [clean_block(item) for item in (args.evidence or [])]
+    lines = [
         "---",
-        "id: " + lesson_id,
-        'title: "' + args.title.replace('"', "'") + '"',
+        "id: " + yaml_quote(lesson_id),
+        "title: " + yaml_quote(args.title),
         "date: " + date,
         "category: " + args.category,
-        'scope: "' + args.scope.replace('"', "'") + '"',
+        "scope: " + yaml_quote(args.scope),
         "status: " + args.status,
         "confidence: " + args.confidence,
         "platforms: " + yaml_list(args.platform or []),
-        'trigger: "' + args.trigger.replace('"', "'") + '"',
-        'rule: "' + args.rule.replace('"', "'") + '"',
-        "evidence: " + yaml_list(args.evidence or []),
         "---",
-        "",
-        "# " + args.title,
         "",
         "## Trigger",
         "",
-        args.trigger,
+        clean_block(args.trigger),
         "",
         "## Rule",
         "",
-        args.rule,
+        clean_block(args.rule),
         "",
         "## Evidence",
         "",
     ]
-    if args.evidence:
-        front.extend("- " + item for item in args.evidence)
-    else:
-        front.append("- none recorded")
-    front.extend(
-        [
-            "",
-            "## Promotion",
-            "",
-            "Status is `" + args.status + "`. Promote into a reference file only under the promotion bar,",
-            "and state what the adoption replaces or trims.",
-            "",
-        ]
-    )
-    write_text_file(path, "\n".join(front))
+    lines.extend(("- " + item) for item in evidence) if evidence else lines.append("- none recorded")
+    lines.extend(["", "## Proposed edit", "", "## Review notes", ""])
+    return "\n".join(lines)
 
-    index_path = lessons_dir / "index.md"
-    if index_path.exists():
-        existing = index_path.read_text(encoding="utf-8").rstrip("\n") + "\n"
-    else:
-        existing = LESSON_INDEX_HEADER
-    row = (
-        "| "
-        + " | ".join(
-            [
-                lesson_id,
-                cell(args.title),
-                cell(args.category),
-                cell(args.scope),
-                args.status,
-                args.confidence,
-                cell("; ".join(args.platform or [])) or "-",
-                date,
-            ]
+
+def cmd_lesson_add(args):
+    if args.status == "adopted":
+        raise ManifestError(
+            "a lesson is opened as 'proposed'; adoption is a separate reviewed edit "
+            "(lessons/README.md, section 7), never part of opening it"
         )
-        + " |\n"
-    )
-    write_text_file(index_path, existing + row)
+    date = text_of(args.date) or "unknown"
+    if date == "unknown":
+        stderr("WARN: no --date supplied; recorded as 'unknown'")
+    outbox = False
+    if args.lessons_dir:
+        lessons_dir = Path(args.lessons_dir).resolve()
+    elif skill_is_checkout():
+        lessons_dir = SKILL_ROOT / "lessons"
+    else:
+        outbox = True
+        lessons_dir = global_store_dir() / "outbox" / "lessons"
+    if not scope_exists(args.scope, lessons_dir):
+        raise ManifestError(
+            "--scope '" + args.scope + "' is not an existing file under the skill root; name the "
+            "one reference the rule lands in, e.g. references/architecture.md"
+        )
+    try:
+        lessons_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ManifestError("Cannot create " + str(lessons_dir) + ": " + str(exc))
+    slug = slugify(args.title)
+    if outbox:
+        # Not a checkout: numbering and the index belong to the repository, and a
+        # plugin cache is replaced on update. Park the lesson where it survives.
+        path = lessons_dir / ((date if date != "unknown" else "undated") + "-" + slug + ".md")
+        write_text_file(path, build_lesson_text("pending", args, date))
+        print("Wrote " + str(path))
+        print(
+            "This copy of adminwright is not a git checkout (a marketplace plugin cache is "
+            "replaced on update), so the lesson was written to your outbox instead of lessons/.\n"
+            "To adopt it: clone github.com/TarikAI/adminwright, copy the file into lessons/ under "
+            "the next id, edit the reference it names, and open a pull request."
+        )
+        return 0
+    with FileLock(lessons_dir / ".lock"):
+        lesson_id = "%04d" % next_lesson_number(lessons_dir)
+        path = lessons_dir / (lesson_id + "-" + slug + ".md")
+        write_text_file(path, build_lesson_text(lesson_id, args, date))
+        rebuild_lesson_index(lessons_dir)
     print("Wrote " + str(path))
-    print("Updated " + str(index_path))
+    print("Updated " + str(lessons_dir / "index.md"))
+    return 0
+
+
+def cmd_lesson_index(args):
+    lessons_dir = Path(args.lessons_dir).resolve() if args.lessons_dir else SKILL_ROOT / "lessons"
+    if not lessons_dir.exists():
+        stderr("No lessons directory at " + str(lessons_dir))
+        return 2
+    with FileLock(lessons_dir / ".lock"):
+        level = rebuild_lesson_index(lessons_dir)
+    print("Rebuilt " + str(lessons_dir / "index.md") + "; guidance level " + level)
     return 0
 
 
@@ -4878,9 +5226,7 @@ def cmd_lesson_list(args):
         stderr("No lessons directory at " + str(lessons_dir))
         return 2
     rows = []
-    for path in sorted(lessons_dir.glob("*.md")):
-        if not re.match(r"^\d{4}-", path.name):
-            continue
+    for path in lesson_files(lessons_dir):
         fields = read_lesson_frontmatter(path)
         if args.status and fields.get("status") != args.status:
             continue
@@ -4902,6 +5248,8 @@ def cmd_lesson_list(args):
 def cmd_lesson(args):
     if args.lesson_command == "add":
         return cmd_lesson_add(args)
+    if args.lesson_command == "index":
+        return cmd_lesson_index(args)
     return cmd_lesson_list(args)
 
 
@@ -4910,9 +5258,22 @@ def cmd_lesson(args):
 # --------------------------------------------------------------------------
 
 
+class VersionAction(argparse.Action):
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print("adminwright " + skill_version() + " (ruleset " + ruleset_version() + ")")
+        parser.exit(0)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Model, validate, and audit admin-console capability manifests"
+    )
+    parser.add_argument(
+        "--version", action=VersionAction,
+        help="print the installed commit and the rule-set hash, then exit",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -5007,7 +5368,7 @@ def build_parser():
     lesson_sub = lesson_parser.add_subparsers(dest="lesson_command", required=True)
     lesson_add = lesson_sub.add_parser("add", help="Write lessons/NNNN-<slug>.md")
     lesson_add.add_argument("--title", required=True)
-    lesson_add.add_argument("--category", required=True)
+    lesson_add.add_argument("--category", required=True, choices=FEEDBACK_CATEGORIES)
     lesson_add.add_argument("--scope", required=True)
     lesson_add.add_argument("--trigger", required=True)
     lesson_add.add_argument("--rule", required=True)
@@ -5015,7 +5376,7 @@ def build_parser():
     lesson_add.add_argument("--platform", action="append", default=[])
     lesson_add.add_argument("--date", help="caller-supplied date; the script never reads the clock")
     lesson_add.add_argument("--status", choices=LESSON_STATUSES, default="proposed")
-    lesson_add.add_argument("--confidence", choices=("low", "medium", "high"), default="low")
+    lesson_add.add_argument("--confidence", choices=LESSON_CONFIDENCES, default="observed-once")
     lesson_add.add_argument("--lessons-dir", help="override the skill lessons directory")
     lesson_add.set_defaults(func=cmd_lesson)
     harvest = subparsers.add_parser(
@@ -5063,6 +5424,9 @@ def build_parser():
     store_parser.add_argument("--date", help="caller-supplied date; the script never reads the clock")
     store_parser.set_defaults(func=cmd_store)
 
+    lesson_index = lesson_sub.add_parser("index", help="Rebuild lessons/index.md from the lesson files")
+    lesson_index.add_argument("--lessons-dir")
+    lesson_index.set_defaults(func=cmd_lesson)
     lesson_list = lesson_sub.add_parser("list", help="Print the lessons index")
     lesson_list.add_argument("--status", choices=LESSON_STATUSES)
     lesson_list.add_argument("--lessons-dir")

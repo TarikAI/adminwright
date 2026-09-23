@@ -47,6 +47,10 @@
         "volumes"
       ],
       "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable handle for this platform, written by `init`. `harvest` counts distinct projects by it, so renaming the platform does not make it two projects and two platforms called 'admin' are not one."
+        },
         "name": {
           "type": "string"
         },
@@ -891,6 +895,10 @@
               "tooling"
             ]
           },
+          "scope": {
+            "type": "string",
+            "description": "The one thing this would change in the skill: a references/<file>.md path, SKILL.md, scripts, or agents. Observations are grouped by scope and category, so an unscoped entry can never corroborate the same finding from another project."
+          },
           "proposedChange": {
             "type": "string"
           },
@@ -906,6 +914,10 @@
               "promoted",
               "rejected"
             ]
+          },
+          "promotedHash": {
+            "type": "string",
+            "description": "Written by `harvest`: a hash of the entry's wording when it was banked. An entry edited afterwards is banked again as a new observation."
           }
         }
       }

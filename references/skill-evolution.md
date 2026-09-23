@@ -137,10 +137,16 @@ Before opening, run `lesson list` and read the `rejected` and `adopted` entries.
 idea matches a rejected lesson, either add new evidence from a distinct project to that
 lesson or drop it. Do not open a second file for the same idea.
 
-`lesson add` requires a title, a category, a `scope` (the single reference file the rule
-would land in, named by its inventory path), a trigger, and a rule. It writes
-`status: proposed`, `confidence: observed-once`, `platforms: []`, and empty
-`Proposed edit` and `Review notes` sections. Fill `platforms` from the project manifest's
+`lesson add` requires a title, a category from the feedback vocabulary, a `scope` (the single
+reference file the rule would land in, named by its inventory path; it must exist), a
+trigger, and a rule. It writes the frontmatter and the five headings exactly as
+[../lessons/README.md](../lessons/README.md) documents them, with `status: proposed`,
+`confidence: observed-once` (or `--confidence repeated|confirmed`), `platforms` from
+`--platform`, and empty `Proposed edit` and `Review notes` sections; it refuses
+`--status adopted`, because adoption is a separate reviewed edit. It rebuilds
+`lessons/index.md` from the lesson files, so the index and its `Guidance level` (the highest
+adopted id) cannot drift; `lesson index` does the same on demand. Outside a git checkout of
+the skill it writes to `$ADMINWRIGHT_HOME/outbox/lessons/` instead. Fill `platforms` from the project manifest's
 `platform.archetypes` and `platform.stack` before review. A lesson cannot be adopted with
 empty `platforms`, an empty `Proposed edit`, or a `scope` that is not a real reference file.
 

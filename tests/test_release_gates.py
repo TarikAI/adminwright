@@ -476,7 +476,8 @@ class TestProfileOverride(ReleaseGateCase):
     def test_the_summary_line_names_the_effective_profile(self):
         self.save()
         _code, out, _err = self.validate()
-        self.assertIn("[profile regulated, phase release]", out)
+        self.assertIn("[profile regulated, phase release, adminwright ", out)
+        self.assertIn(", ruleset ", out)
 
 
 class TestNotApplicableRelabel(ReleaseGateCase):
