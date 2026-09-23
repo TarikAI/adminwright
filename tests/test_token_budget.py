@@ -60,7 +60,7 @@ class TestTokenBudget(unittest.TestCase):
 
     def test_each_agent_prompt_stays_small(self):
         for path in sorted(glob.glob(str(SKILL_ROOT / "agents" / "adminwright-*.md"))):
-            used = len(open(path, encoding="utf-8").read()) // 4
+            used = len(Path(path).read_text(encoding="utf-8")) // 4
             self.assertLessEqual(used, AGENT_CEILING, path + " costs about %d tokens" % used)
 
     def test_the_entry_points_name_files_that_exist(self):

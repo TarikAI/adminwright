@@ -3697,7 +3697,14 @@ def new_findings(before, after, project_root, manifest_dir, renamed=None):
             fresh.append(item)
     return (
         [i for i in fresh if i["severity"] == ERROR],
-        [i for i in fresh if i["severity"] == WARN and i["rule"] != "plan-note"],
+        # Completeness rules describe an unfinished model, which every incremental
+        # add produces (a new role is unused until its first capability exists);
+        # echoing them after each write teaches agents to skip the warnings that
+        # matter, so only real findings such as reviewer-identity are printed.
+        [
+            i for i in fresh
+            if i["severity"] == WARN and i["rule"] != "plan-note" and i["rule"] not in COMPLETENESS_RULES
+        ],
     )
 
 

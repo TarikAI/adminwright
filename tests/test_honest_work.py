@@ -330,9 +330,11 @@ class TestScreensAreAddedIncrementally(TempProject):
         code, _o, err = run("add", "--manifest", self.manifest, "--kind", "screen",
                             "--json", json.dumps(screen))
         self.assertEqual(code, 0, err)
-        self.assertIn("screen-incomplete", err)
+        self.assertNotIn("screen-incomplete", err, "an unfinished screen is not a warning to echo")
         _code, out, _err = self.validate(phase="release")
         self.assertIn("ERROR: [screen-incomplete]", out)
+        _code, out, _err = self.validate(phase="plan")
+        self.assertIn("WARN: [screen-incomplete]", out)
 
 
 if __name__ == "__main__":
