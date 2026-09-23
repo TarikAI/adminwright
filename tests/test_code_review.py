@@ -1601,8 +1601,9 @@ class BatchIoErrors(unittest.TestCase):
     def test_a_manifest_refusal_still_removes_the_temp_file(self):
         refused = subprocess.CompletedProcess([], 2, stdout="", stderr="gap 'x' is invalid")
         with mock.patch.object(bridge.subprocess, "run", return_value=refused):
-            with self.assertRaises(bridge.ReviewError) as caught:
-                self.persist()
+            with mock.patch.object(bridge, "stderr"):  # the expected diagnostic line
+                with self.assertRaises(bridge.ReviewError) as caught:
+                    self.persist()
         self.assertIn("nothing was persisted", str(caught.exception))
         self.assertEqual(list(self.manifest.parent.glob("*.tmp")), [])
 
