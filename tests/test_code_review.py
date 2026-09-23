@@ -89,6 +89,11 @@ FAKE_OCR_SOURCE = (
     "    with open(log, 'a', encoding='utf-8') as handle:\n"
     "        handle.write(json.dumps({'args': args,"
     " 'no_update': os.environ.get('OCR_NO_UPDATE')}) + '\\n')\n"
+    "if os.environ.get('FAKE_GRANDCHILD'):\n"
+    "    import subprocess\n"
+    "    code = 'import os, sys, time\\nopen(sys.argv[1], \"w\").write(str(os.getpid()))\\n"
+    "time.sleep(60)\\n'\n"
+    "    subprocess.Popen([sys.executable, '-c', code, os.environ['FAKE_GRANDCHILD']])\n"
     "if os.environ.get('FAKE_SLEEP'):\n"
     "    time.sleep(float(os.environ['FAKE_SLEEP']))\n"
     "if os.environ.get('FAKE_FAIL'):\n"
@@ -225,6 +230,29 @@ class TempConsole(unittest.TestCase):
             if line.strip()
         ]
 
+    def bundles(self):
+        return sorted((self.root / ".admin-console").glob("ocr-bundle*.json"))
+
+    def only_bundle(self):
+        found = self.bundles()
+        self.assertEqual(len(found), 1, found)
+        return found[0]
+
+    def rel(self, path):
+        """A path as the manifest cites it: relative to the project root, forward slashes."""
+        return str(Path(path).relative_to(self.root)).replace("\\", "/")
+
+    def diff(self, *extra, **kwargs):
+        code, out, err = self.review("diff", "--manifest", self.manifest, *extra, **kwargs)
+        self.assertEqual(code, 0, err)
+        return out
+
+    def record(self, payload, *extra, **kwargs):
+        return self.review(
+            "record", "--manifest", self.manifest, "--findings", json.dumps(payload),
+            *extra, **kwargs
+        )
+
 
 class AbsentOcr(TempConsole):
     """ocr genuinely not installed: no override, nothing named ocr on PATH."""
@@ -284,14 +312,16 @@ class DelegateDiff(TempConsole):
     def test_writes_bundle_with_instructions_and_next_command(self):
         code, out, err = self.review("diff", "--manifest", self.manifest)
         self.assertEqual(code, 0, err)
-        bundle_path = self.root / ".admin-console" / "ocr-bundle.json"
-        self.assertTrue(bundle_path.exists())
+        bundle_path = self.only_bundle()
+        self.assertRegex(bundle_path.name, r"^ocr-bundle-\d{8}-\d{6}-\d+\.json$")
         bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
         self.assertEqual(bundle["engine"], "delegate")
         self.assertIn({"path": "src/orders.py", "status": "modified"}, bundle["reviewable_files"])
         self.assertIn("instructions", bundle)
         self.assertIn("severity", bundle["instructions"])
         self.assertIn("record", out)
+        # The exact bundle is handed to `record`; nothing is left to guess.
+        self.assertIn("--bundle " + str(bundle_path), out)
 
     def test_empty_preview_reports_nothing_to_review(self):
         env = {"FAKE_PREVIEW": json.dumps({"schema_version": "1", "mode": "workspace", "reviewable_files": []})}
@@ -312,7 +342,7 @@ class Record(TempConsole):
         super().setUp()
         code, out, err = self.review("diff", "--manifest", self.manifest)
         self.assertEqual(code, 0, err)
-        self.bundle_path = self.root / ".admin-console" / "ocr-bundle.json"
+        self.bundle_path = self.only_bundle()
 
     def findings_payload(self, **overrides):
         finding = {
@@ -337,7 +367,7 @@ class Record(TempConsole):
         self.assertEqual(gaps[0]["severity"], "high")
         self.assertIn("src/orders.py:10", gaps[0]["description"])
         self.assertIn("OCR delegate pass", gaps[0]["rationale"])
-        self.assertIn(".admin-console/ocr-bundle.json", gaps[0]["evidence"])
+        self.assertIn(self.rel(self.bundle_path), gaps[0]["evidence"])
 
     def test_refuses_silent_omission(self):
         payload = {"findings": [], "skipped": []}
@@ -392,6 +422,7 @@ class Record(TempConsole):
                 {"path": "src/orders.py", "status": "untracked"},
             ],
         })}
+        self.bundle_path.unlink()  # setUp's bundle would make two live bundles
         code, _out, err = self.review("diff", "--manifest", self.manifest, env=env)
         self.assertEqual(code, 0, err)
         payload = {"findings": [], "skipped": [{"path": "src/orders.py", "reason": "recreated untracked"}]}
@@ -424,8 +455,10 @@ class Record(TempConsole):
         self.assertIn("(other, high)", self.gaps()[0]["description"])
 
     def test_repeated_records_never_exhaust_ids(self):
-        payload = json.dumps(self.findings_payload())
+        # Six different findings on one file all want the same base id
+        # (same day, same slug, index 1); each must still get a free one.
         for run_index in range(6):
+            payload = json.dumps(self.findings_payload(content="distinct finding %d" % run_index))
             code, _out, _err = self.review("record", "--manifest", self.manifest, "--findings", payload)
             self.assertEqual(code, 1, "run " + str(run_index + 1))
         ids = [gap["id"] for gap in self.gaps()]
@@ -462,14 +495,17 @@ class Record(TempConsole):
         self.assertEqual(self.gaps(), [])
 
     def test_second_run_gets_suffixed_id(self):
-        payload = json.dumps(self.findings_payload())
-        code, _out, _err = self.review("record", "--manifest", self.manifest, "--findings", payload)
+        # A different finding at the same base id is suffixed, never refused.
+        first = json.dumps(self.findings_payload(content="first finding"))
+        second = json.dumps(self.findings_payload(content="second finding"))
+        code, _out, _err = self.review("record", "--manifest", self.manifest, "--findings", first)
         self.assertEqual(code, 1)
-        code, _out, _err = self.review("record", "--manifest", self.manifest, "--findings", payload)
+        code, _out, _err = self.review("record", "--manifest", self.manifest, "--findings", second)
         self.assertEqual(code, 1)
         ids = [gap["id"] for gap in self.gaps()]
         self.assertEqual(len(ids), 2)
         self.assertNotEqual(ids[0], ids[1])
+        self.assertTrue(ids[1].endswith("-r2"), ids)
 
 
     def test_preview_entry_without_path_exits_two(self):
@@ -566,6 +602,673 @@ class EndpointEngine(TempConsole):
         gaps = self.gaps()
         self.assertEqual(len(gaps), 1)
         self.assertIn("scan mode", gaps[0]["rationale"])
+
+
+def comment(path="src/orders.py", **extra):
+    """One OCR-schema finding."""
+    item = {
+        "path": path,
+        "content": "SQL built by string concatenation",
+        "start_line": 10,
+        "end_line": 10,
+        "category": "security",
+        "severity": "high",
+    }
+    item.update(extra)
+    return item
+
+
+class EndpointVerdict(TempConsole):
+    """Audit 6.14: a review that failed must never read as "0 finding(s) recorded"."""
+
+    def endpoint(self, document, rc=0, *extra, **kwargs):
+        env = {"FAKE_FINDINGS": json.dumps(document), "FAKE_RC": str(rc)}
+        return self.review(
+            "diff", "--manifest", self.manifest, "--engine", "ocr", *extra, env=env, **kwargs
+        )
+
+    def assert_failed_run(self, code, out, err, *needles):
+        self.assertEqual(code, 2, out + err)
+        self.assertNotIn("finding(s) recorded", out)
+        self.assertNotIn("Traceback", err)
+        for needle in needles:
+            self.assertIn(needle, err)
+        self.assertEqual(self.gaps(), [])
+        self.assertEqual(list((self.root / ".admin-console").glob("ocr-diff-*.json")), [])
+
+    def test_nonzero_exit_with_a_failed_status_body_exits_two(self):
+        code, out, err = self.endpoint(
+            {"status": "failed", "error": "provider rejected the token"}, rc=1
+        )
+        self.assert_failed_run(code, out, err, "provider rejected the token", "exit code 1", "status 'failed'")
+
+    def test_nonzero_exit_alone_is_enough_even_with_findings_in_the_body(self):
+        code, out, err = self.endpoint({"comments": [comment()]}, rc=3)
+        self.assert_failed_run(code, out, err, "exit code 3")
+
+    def test_failed_status_with_exit_zero(self):
+        code, out, err = self.endpoint({"status": "failed", "message": "quota exceeded", "comments": [comment()]})
+        self.assert_failed_run(code, out, err, "quota exceeded", "status 'failed'")
+
+    def test_terminal_state_other_than_completed(self):
+        for document in (
+            {"manifest": {"terminal_state": "aborted"}, "comments": [comment()]},
+            {"terminal_state": "failed", "comments": [comment()]},
+            {"run_manifest": {"terminal_state": "in_progress"}, "comments": [comment()]},
+        ):
+            code, out, err = self.endpoint(document)
+            self.assert_failed_run(code, out, err, "terminal_state")
+
+    def test_a_completed_run_with_nothing_failed_is_recorded_normally(self):
+        code, out, err = self.endpoint({
+            "status": "success",
+            "manifest": {"terminal_state": "completed"},
+            "coverage": {"failed": [], "failed_files": 0},
+            "comments": [comment()],
+        })
+        self.assertEqual(code, 1, err)
+        self.assertIn("1 finding(s) recorded", out)
+        self.assertEqual(len(self.gaps()), 1)
+
+    def test_a_clean_completed_run_exits_zero(self):
+        code, out, err = self.endpoint({"manifest": {"terminal_state": "completed"}, "comments": []})
+        self.assertEqual(code, 0, err)
+        self.assertIn("0 finding(s) recorded", out)
+
+    def test_failed_files_are_listed_and_exit_two_but_real_findings_are_kept(self):
+        for index, (label, document) in enumerate((
+            ("coverage.failed", {"coverage": {"failed": ["src/a.py", {"path": "src/b.py", "reason": "timeout"}]}}),
+            ("manifest.coverage.failed_files", {"manifest": {"coverage": {"failed_files": ["src/a.py", "src/b.py"]}}}),
+        )):
+            document["comments"] = [comment(path="src/ok%d.py" % index)]
+            code, out, err = self.endpoint(document)
+            self.assertEqual(code, 2, label + ": " + err)
+            self.assertIn("src/a.py", err, label)
+            self.assertIn("src/b.py", err, label)
+            self.assertIn("could not review 2 file(s)", err, label)
+            self.assertIn("1 finding(s) recorded", out, label)
+            self.assertNotIn("Traceback", err, label)
+        # The reviewed files' findings were kept both times.
+        self.assertEqual(len(self.gaps()), 2)
+
+    def test_a_failed_file_count_without_names_still_exits_two(self):
+        code, _out, err = self.endpoint({"coverage": {"failed": 3}, "comments": []})
+        self.assertEqual(code, 2)
+        self.assertIn("could not review 3 file(s)", err)
+
+    def test_scan_gets_the_same_verdicts(self):
+        env = {"FAKE_FINDINGS": json.dumps({"status": "failed", "error": "boom"}), "FAKE_RC": "1"}
+        code, out, err = self.review("scan", "--manifest", self.manifest, env=env)
+        self.assert_failed_run(code, out, err, "boom", "ocr scan did not complete")
+
+    def test_silent_failure_still_explains_itself(self):
+        code, _out, err = self.review(
+            "diff", "--manifest", self.manifest, "--engine", "ocr", env={"FAKE_FINDINGS": "", "FAKE_RC": "4"}
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("exit code 4", err)
+
+
+class BundleLifecycle(TempConsole):
+    """Audit 6.15: per-run bundles, consumed on record, expired when abandoned."""
+
+    def payload(self, **extra):
+        return {"findings": [comment(**extra)], "skipped": []}
+
+    def test_concurrent_diffs_do_not_clobber_each_other(self):
+        self.diff("--agent", "qa-1")
+        self.diff("--agent", "security-1")
+        found = self.bundles()
+        self.assertEqual(len(found), 2)
+        self.assertEqual(
+            sorted(json.loads(p.read_text(encoding="utf-8"))["agent"] for p in found),
+            ["qa-1", "security-1"],
+        )
+        self.assertTrue(any("qa-1" in p.name for p in found))
+        self.assertTrue(any("security-1" in p.name for p in found))
+
+    def test_record_refuses_to_guess_between_live_bundles(self):
+        self.diff("--agent", "qa-1")
+        self.diff("--agent", "security-1")
+        code, _out, err = self.record(self.payload())
+        self.assertEqual(code, 2)
+        self.assertIn("--bundle", err)
+        self.assertIn("qa-1", err)
+        self.assertIn("security-1", err)
+        self.assertEqual(self.gaps(), [])
+
+    def test_explicit_bundle_records_and_leaves_the_other_agents_bundle_live(self):
+        self.diff("--agent", "qa-1")
+        self.diff("--agent", "security-1")
+        qa = [p for p in self.bundles() if "qa-1" in p.name][0]
+        code, out, err = self.record(self.payload(), "--bundle", str(qa))
+        self.assertEqual(code, 1, err)
+        self.assertIn(self.rel(qa), self.gaps()[0]["evidence"])
+        # security-1's bundle is now the only live one, so it is picked up.
+        code, out, err = self.record({"findings": [], "skipped": [{"path": "src/orders.py", "reason": "vendored"}]})
+        self.assertEqual(code, 0, err)
+        self.assertIn("coverage_rate=100%", out)
+        self.assertIn("security-1", out)
+
+    def test_diff_prints_the_bundle_it_wrote_in_the_record_command(self):
+        out = self.diff("--agent", "qa-1")
+        bundle = self.only_bundle()
+        self.assertIn("--bundle " + str(bundle), out)
+        self.assertIn("qa-1", bundle.name)
+
+    def test_bundle_records_agent_and_refs(self):
+        self.diff("--agent", "qa-1", "--from", "main", "--to", "feature")
+        bundle = json.loads(self.only_bundle().read_text(encoding="utf-8"))
+        self.assertEqual(bundle["agent"], "qa-1")
+        self.assertEqual(bundle["refs"], {"from": "main", "to": "feature"})
+
+    def test_an_agent_id_cannot_escape_the_directory(self):
+        self.diff("--agent", "../../evil name")
+        bundle = self.only_bundle()
+        self.assertEqual(bundle.parent, self.root / ".admin-console")
+        self.assertNotIn("/", bundle.name)
+        self.assertNotIn("\\", bundle.name)
+
+    def test_record_closes_its_bundle_and_keeps_the_skip_reasons(self):
+        self.diff()
+        bundle_path = self.only_bundle()
+        payload = {"findings": [], "skipped": [{"path": "src/orders.py", "reason": "generated code"}]}
+        code, _out, err = self.record(payload)
+        self.assertEqual(code, 0, err)
+        closed = json.loads(bundle_path.read_text(encoding="utf-8"))["closed"]
+        self.assertEqual(closed["by"], "record")
+        self.assertEqual(closed["skipped"], [{"path": "src/orders.py", "reason": "generated code"}])
+        # Spent: the next record is no longer gated by, or checked against, it.
+        code, out, err = self.record(self.payload(path="anywhere/else.py"))
+        self.assertEqual(code, 1, err)
+        self.assertIn("coverage: unknown", out)
+
+    def test_closed_bundle_cannot_be_recorded_against_again(self):
+        self.diff()
+        bundle_path = self.only_bundle()
+        self.assertEqual(self.record(self.payload())[0], 1)
+        code, _out, err = self.record(self.payload(content="another"), "--bundle", str(bundle_path))
+        self.assertEqual(code, 2)
+        self.assertIn("already closed", err)
+        self.assertEqual(len(self.gaps()), 1)
+
+    def test_a_refused_record_leaves_the_bundle_usable(self):
+        self.diff()
+        code, _out, _err = self.record({"findings": [], "skipped": []})  # silent omission
+        self.assertEqual(code, 2)
+        self.assertNotIn("closed", json.loads(self.only_bundle().read_text(encoding="utf-8")))
+        self.assertEqual(self.record(self.payload())[0], 1)
+
+    def test_an_empty_diff_supersedes_that_agents_stale_bundle(self):
+        self.diff("--agent", "qa-1")
+        bundle_path = self.only_bundle()
+        empty = {"FAKE_PREVIEW": json.dumps({"schema_version": "1", "mode": "workspace", "reviewable_files": []})}
+        out = self.diff("--agent", "qa-1", env=empty)
+        self.assertIn("nothing to review", out)
+        closed = json.loads(bundle_path.read_text(encoding="utf-8"))["closed"]
+        self.assertEqual(closed["by"], "diff")
+        # The stale bundle no longer gates a record about something else.
+        code, out, err = self.record(self.payload(path="docs/readme.md"))
+        self.assertEqual(code, 1, err)
+        self.assertIn("coverage: unknown", out)
+
+    def test_an_empty_diff_never_touches_another_agents_bundle(self):
+        self.diff("--agent", "security-1")
+        bundle_path = self.only_bundle()
+        empty = {"FAKE_PREVIEW": json.dumps({"schema_version": "1", "mode": "workspace", "reviewable_files": []})}
+        self.diff("--agent", "qa-1", env=empty)
+        self.diff(env=empty)
+        self.assertNotIn("closed", json.loads(bundle_path.read_text(encoding="utf-8")))
+
+    def test_the_same_agent_rerunning_diff_replaces_its_own_bundle(self):
+        self.diff("--agent", "qa-1")
+        first = self.only_bundle()
+        self.diff("--agent", "qa-1")
+        self.assertEqual(len(self.bundles()), 2)
+        self.assertEqual(json.loads(first.read_text(encoding="utf-8"))["closed"]["by"], "diff")
+        code, out, err = self.record(self.payload())  # no ambiguity: only one is live
+        self.assertEqual(code, 1, err)
+
+    def test_an_abandoned_bundle_expires(self):
+        self.diff()
+        bundle_path = self.only_bundle()
+        two_days_ago = time.time() - 2 * 24 * 3600
+        os.utime(str(bundle_path), (two_days_ago, two_days_ago))
+        code, out, err = self.record(self.payload(path="docs/readme.md"))
+        self.assertEqual(code, 1, err)
+        self.assertIn("expired", err)
+        self.assertIn("coverage: unknown", out)
+
+    def test_a_bundle_inside_the_ttl_still_gates(self):
+        self.diff()
+        bundle_path = self.only_bundle()
+        an_hour_ago = time.time() - 3600
+        os.utime(str(bundle_path), (an_hour_ago, an_hour_ago))
+        code, _out, err = self.record(self.payload(path="docs/readme.md"))
+        self.assertEqual(code, 2)
+        self.assertIn("not in the review bundle", err)
+
+    def test_the_old_shared_bundle_name_is_still_honoured(self):
+        legacy = self.root / ".admin-console" / "ocr-bundle.json"
+        legacy.write_text(json.dumps({
+            "schema_version": "1", "engine": "delegate", "mode": "workspace",
+            "reviewable_files": [{"path": "src/orders.py", "status": "modified"}],
+        }), encoding="utf-8")
+        code, _out, err = self.record(self.payload(path="docs/readme.md"))
+        self.assertEqual(code, 2)
+        self.assertIn("not in the review bundle", err)
+
+    def test_without_a_bundle_coverage_is_unknown_not_a_hundred_percent(self):
+        code, out, err = self.record(self.payload(path="any/invented/path.py"))
+        self.assertEqual(code, 1, err)
+        self.assertIn("coverage: unknown", out)
+        self.assertNotIn("coverage_rate=100%", out)
+        self.assertNotIn("total_files", out)
+        self.assertIn("no review bundle", err)
+
+    def test_the_no_bundle_evidence_file_is_unique_per_run(self):
+        self.record(self.payload(content="one"))
+        self.record(self.payload(content="two"))
+        records = list((self.root / ".admin-console").glob("ocr-record-*.json"))
+        self.assertEqual(len(records), 2)
+        cited = {gap["evidence"][0] for gap in self.gaps()}
+        self.assertEqual(len(cited), 2)
+
+
+class Deduplication(TempConsole):
+    """Audit 6.15: a successful re-run must not pile up copies of a finding."""
+
+    def payload(self, **extra):
+        return {"findings": [comment(**extra)], "skipped": []}
+
+    def test_an_identical_rerun_records_nothing_new_but_still_reports_findings(self):
+        self.assertEqual(self.record(self.payload())[0], 1)
+        code, out, err = self.record(self.payload())
+        self.assertEqual(code, 1, err)  # findings exist: not "clean"
+        self.assertIn("recorded 0 finding(s) as gaps (1 already recorded)", out)
+        self.assertEqual(len(self.gaps()), 1)
+
+    def test_a_changed_line_or_content_is_a_new_finding(self):
+        self.assertEqual(self.record(self.payload())[0], 1)
+        self.assertEqual(self.record(self.payload(start_line=11))[0], 1)
+        self.assertEqual(self.record(self.payload(content="a different problem"))[0], 1)
+        self.assertEqual(len(self.gaps()), 3)
+
+    def test_severity_or_category_drift_does_not_defeat_the_match(self):
+        self.assertEqual(self.record(self.payload())[0], 1)
+        self.record(self.payload(severity="low", category="bug"))
+        self.assertEqual(len(self.gaps()), 1)
+
+    def test_duplicates_inside_one_payload_are_written_once(self):
+        payload = {"findings": [comment(), comment(), comment(start_line=99)], "skipped": []}
+        code, out, err = self.record(payload)
+        self.assertEqual(code, 1, err)
+        self.assertEqual(len(self.gaps()), 2)
+        self.assertIn("(1 already recorded)", out)
+
+    def test_a_fixed_gap_that_comes_back_is_recorded_again(self):
+        self.assertEqual(self.record(self.payload())[0], 1)
+        gap_id = self.gaps()[0]["id"]
+        code, _out, err = run(
+            MANIFEST_SCRIPT, "set", "--manifest", self.manifest,
+            "--path", "gaps[" + gap_id + "].status", "--value", "fixed",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.record(self.payload())[0], 1)
+        self.assertEqual([g["status"] for g in self.gaps()], ["fixed", "open"])
+
+    def test_an_accepted_gap_is_not_recorded_a_second_time(self):
+        self.assertEqual(self.record(self.payload())[0], 1)
+        gap_id = self.gaps()[0]["id"]
+        code, _out, err = run(
+            MANIFEST_SCRIPT, "set", "--manifest", self.manifest,
+            "--path", "gaps[" + gap_id + "].status", "--value", "accepted",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.record(self.payload())[0], 1)
+        self.assertEqual(len(self.gaps()), 1)
+
+    def test_endpoint_reruns_do_not_duplicate(self):
+        for _ in range(3):
+            code, out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr")
+            self.assertEqual(code, 1, err)
+        self.assertEqual(len(self.gaps()), 1)
+        self.assertIn("(1 already recorded)", out)
+
+    def test_path_separator_style_does_not_defeat_the_match(self):
+        self.assertEqual(self.record(self.payload(path="src/orders.py"))[0], 1)
+        # Backslash spelling of the same path (a Windows agent): same finding.
+        self.record({"findings": [comment(path="src\\orders.py")], "skipped": []})
+        self.assertEqual(len(self.gaps()), 1)
+
+
+class GapShape(TempConsole):
+    """Every gap the bridge writes is marked ocr and can never be a lifecycle escape."""
+
+    def test_delegate_gaps_carry_source_ocr_and_no_entity_or_capability(self):
+        payload = {"findings": [comment(), comment(path="src/b.py", start_line=3)], "skipped": []}
+        self.assertEqual(self.record(payload)[0], 1)
+        for gap in self.gaps():
+            self.assertEqual(gap["source"], "ocr")
+            self.assertNotIn("entity", gap)
+            self.assertNotIn("capability", gap)
+            self.assertRegex(gap["rationale"], r"; fp:[0-9a-f]{12}$")
+
+    def test_endpoint_gaps_carry_the_same_marks(self):
+        code, _out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr")
+        self.assertEqual(code, 1, err)
+        code, _out, err = self.review("scan", "--manifest", self.manifest)
+        self.assertEqual(code, 1, err)
+        gaps = self.gaps()
+        self.assertGreaterEqual(len(gaps), 1)
+        for gap in gaps:
+            self.assertEqual(gap["source"], "ocr")
+            self.assertNotIn("entity", gap)
+            self.assertNotIn("capability", gap)
+
+    def test_a_finding_that_mentions_an_entity_cannot_grow_an_entity_field(self):
+        # OCR content is free text; whatever it says, the gap keeps its fixed shape.
+        finding = comment(content="order.quarantined is never reachable", entity="order",
+                          capability="order.quarantine")
+        self.assertEqual(self.record({"findings": [finding]})[0], 1)
+        gap = self.gaps()[0]
+        self.assertEqual(gap["source"], "ocr")
+        self.assertNotIn("entity", gap)
+        self.assertNotIn("capability", gap)
+
+
+class RuleFiles(TempConsole):
+    """A missing rule file must not silently drop the shipped admin-console rules."""
+
+    def test_missing_rule_file_exits_two_on_every_command(self):
+        missing = str(self.tmp / "no-such-rules.json")
+        for args in (
+            ("diff", "--manifest", self.manifest, "--rule", missing),
+            ("diff", "--manifest", self.manifest, "--engine", "ocr", "--rule", missing),
+            ("scan", "--manifest", self.manifest, "--rule", missing),
+        ):
+            code, _out, err = self.review(*args)
+            self.assertEqual(code, 2, args)
+            self.assertIn("no-such-rules.json", err)
+            self.assertNotIn("Traceback", err)
+        self.assertEqual(self.ocr_calls(), [], "ocr must not have been run without its rules")
+
+    def test_the_shipped_rules_are_passed_by_default_as_an_absolute_path(self):
+        self.diff()
+        preview = self.ocr_calls()[0]["args"]
+        rule = preview[preview.index("--rule") + 1]
+        self.assertTrue(os.path.isabs(rule), rule)
+        self.assertTrue(os.path.samefile(rule, str(SKILL_ROOT / "assets" / "adminwright-ocr-rules.json")))
+
+    def test_a_custom_rule_file_replaces_the_default(self):
+        custom = self.tmp / "custom-rules.json"
+        custom.write_text("{}", encoding="utf-8")
+        self.diff("--rule", str(custom))
+        preview = self.ocr_calls()[0]["args"]
+        self.assertTrue(os.path.samefile(preview[preview.index("--rule") + 1], str(custom)))
+
+    def test_missing_shipped_rules_are_an_error_not_a_silent_omission(self):
+        namespace = mock.Mock(rule=None)
+        with mock.patch.object(bridge, "DEFAULT_RULE_PATH", self.tmp / "gone.json"):
+            with self.assertRaises(bridge.ReviewError) as caught:
+                bridge.rule_arguments(namespace)
+        self.assertIn("--rule", str(caught.exception))
+
+
+class GapIds(unittest.TestCase):
+    def test_a_slug_cut_at_forty_characters_never_ends_in_a_hyphen(self):
+        # 39 letters, a slash, more: the cut lands on the hyphen that replaced
+        # the slash, which the id pattern refuses once "-<n>" follows it.
+        self.assertEqual(bridge.slug_for("a" * 39 + "/b.py"), "a" * 39)
+        self.assertEqual(bridge.slug_for("src/orders.py"), "src-orders-py")
+        self.assertEqual(bridge.slug_for("///"), "file")
+
+
+class GapIdsEndToEnd(TempConsole):
+    def test_a_path_whose_slug_ends_at_the_cut_is_recorded(self):
+        path = "a" * 39 + "/b.py"
+        code, _out, err = self.record({"findings": [comment(path=path)]})
+        self.assertEqual(code, 1, err)
+        gap_id = self.gaps()[0]["id"]
+        self.assertNotIn("--", gap_id)
+
+
+class ProjectRoot(TempConsole):
+    """Audit 6.15: --project-root defaults to the manifest's project root, not the cwd."""
+
+    def repo_of(self, call):
+        args = call["args"]
+        return args[args.index("--repo") + 1]
+
+    def same(self, left, right):
+        return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(os.path.abspath(str(right)))
+
+    def set_project_root(self, value):
+        data = json.loads(self.manifest.read_text(encoding="utf-8"))
+        data["projectRoot"] = value
+        self.manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def test_default_is_the_manifests_project_root_regardless_of_cwd(self):
+        self.diff()  # run() executes from the test runner's cwd, not the project
+        calls = self.ocr_calls()
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertTrue(self.same(self.repo_of(call), self.root), call)
+
+    def test_repo_never_trails_the_file_list(self):
+        self.diff()
+        rule_call = [c for c in self.ocr_calls() if c["args"][:2] == ["delegate", "rule"]][0]["args"]
+        self.assertLess(rule_call.index("--repo"), rule_call.index("src/orders.py"))
+
+    def test_endpoint_engine_and_scan_use_it_too(self):
+        self.review("diff", "--manifest", self.manifest, "--engine", "ocr")
+        self.review("scan", "--manifest", self.manifest)
+        for call in self.ocr_calls():
+            self.assertTrue(self.same(self.repo_of(call), self.root), call)
+
+    def test_explicit_flag_wins(self):
+        other = self.tmp / "other-repo"
+        other.mkdir()
+        self.diff("--project-root", str(other))
+        for call in self.ocr_calls():
+            self.assertTrue(self.same(self.repo_of(call), other), call)
+
+    def test_manifest_project_root_is_relative_to_the_manifest_directory(self):
+        (self.root / "packages" / "admin").mkdir(parents=True)
+        self.set_project_root("../packages/admin")
+        self.diff()
+        for call in self.ocr_calls():
+            self.assertTrue(self.same(self.repo_of(call), self.root / "packages" / "admin"), call)
+
+    def test_manifest_project_root_may_be_absolute(self):
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        self.set_project_root(str(elsewhere))
+        self.diff()
+        for call in self.ocr_calls():
+            self.assertTrue(self.same(self.repo_of(call), elsewhere), call)
+
+    def test_a_project_root_that_does_not_exist_is_an_error(self):
+        self.set_project_root("../no-such-dir")
+        code, _out, err = self.review("diff", "--manifest", self.manifest)
+        self.assertEqual(code, 2)
+        self.assertIn("project root", err)
+        self.assertIn("--project-root", err)
+        self.assertEqual(self.ocr_calls(), [])
+
+
+class ProjectRootHelper(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="adminwright-root-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.manifest = self.tmp / "repo" / "apps" / "admin" / ".admin-console" / "manifest.json"
+        self.manifest.parent.mkdir(parents=True)
+
+    def write(self, text, encoding="utf-8"):
+        self.manifest.write_bytes(text.encode(encoding))
+
+    def root(self):
+        return bridge.project_root_of(self.manifest)
+
+    def test_default_is_the_grandparent_of_the_manifest_file(self):
+        self.write("{}")
+        self.assertEqual(self.root(), Path(os.path.abspath(str(self.manifest.parent.parent))))
+
+    def test_declared_root_is_resolved_against_the_manifest_directory(self):
+        self.write(json.dumps({"projectRoot": "../../.."}))
+        self.assertEqual(self.root(), Path(os.path.abspath(str(self.tmp / "repo"))))
+
+    def test_bom_blank_non_string_and_unreadable_manifests_fall_back_to_the_default(self):
+        default = Path(os.path.abspath(str(self.manifest.parent.parent)))
+        self.write("﻿" + json.dumps({"projectRoot": ""}))
+        self.assertEqual(self.root(), default)
+        self.write(json.dumps({"projectRoot": 7}))
+        self.assertEqual(self.root(), default)
+        self.write("{not json")
+        self.assertEqual(self.root(), default)
+        self.manifest.unlink()
+        self.assertEqual(self.root(), default)
+
+    def test_a_bom_manifest_still_honours_its_declared_root(self):
+        self.write("﻿" + json.dumps({"projectRoot": "../../.."}))
+        self.assertEqual(self.root(), Path(os.path.abspath(str(self.tmp / "repo"))))
+
+    def test_evidence_is_cited_relative_to_the_declared_root(self):
+        self.write(json.dumps({"projectRoot": "../../.."}))
+        captured = {}
+
+        def fake_add(manifest, gaps):
+            captured["gaps"] = gaps
+            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        finding = bridge.normalize_finding(
+            {"path": "a.py", "content": "c", "start_line": 1, "severity": "low", "category": "bug"}
+        )
+        evidence = self.manifest.parent / "ocr-bundle-x.json"
+        with mock.patch.object(bridge, "add_gaps", side_effect=fake_add):
+            bridge.persist_findings(self.manifest, [finding], "delegate", "delegate review", evidence)
+        self.assertEqual(captured["gaps"][0]["evidence"], ["apps/admin/.admin-console/ocr-bundle-x.json"])
+
+
+def pid_alive(pid):
+    if os.name == "nt":
+        listing = subprocess.run(
+            ["tasklist", "/FI", "PID eq %d" % pid, "/NH"], capture_output=True, text=True
+        )
+        return str(pid) in listing.stdout
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+class Timeouts(TempConsole):
+    """Audit 6.15: run_ocr had no timeout, so a hung ocr hung the agent."""
+
+    def test_flag_stops_a_hung_ocr_with_a_clear_message(self):
+        started = time.time()
+        code, _out, err = self.review(
+            "diff", "--manifest", self.manifest, "--timeout", "1", env={"FAKE_SLEEP": "30"}
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("did not finish within 1 seconds", err)
+        self.assertIn("--timeout", err)
+        self.assertLess(time.time() - started, 25)
+        self.assertNotIn("Traceback", err)
+
+    def test_environment_variable_sets_the_default(self):
+        code, _out, err = self.review(
+            "scan", "--manifest", self.manifest,
+            env={"FAKE_SLEEP": "30", "ADMINWRIGHT_OCR_TIMEOUT": "1"},
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("did not finish within 1 seconds", err)
+
+    def test_bad_timeouts_are_usage_errors(self):
+        for args, env in (
+            (("--timeout", "0"), {}),
+            (("--timeout", "-5"), {}),
+            ((), {"ADMINWRIGHT_OCR_TIMEOUT": "soon"}),
+        ):
+            code, _out, err = self.review("diff", "--manifest", self.manifest, *args, env=env)
+            self.assertEqual(code, 2, (args, env))
+            self.assertNotIn("Traceback", err)
+        self.assertEqual(self.ocr_calls(), [])
+
+    def test_a_slow_but_finishing_ocr_is_not_cut_off(self):
+        self.diff("--timeout", "20", env={"FAKE_SLEEP": "0.5"})
+
+    def test_the_default_is_generous_enough_for_a_real_review(self):
+        self.assertGreaterEqual(bridge.DEFAULT_TIMEOUT_SECONDS, 600)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("ADMINWRIGHT_OCR_TIMEOUT", None)
+            self.assertEqual(bridge.ocr_timeout(mock.Mock(timeout=None)), bridge.DEFAULT_TIMEOUT_SECONDS)
+
+    def test_the_whole_process_tree_is_stopped(self):
+        # The npm launcher is node spawning the native binary: killing only the
+        # direct child would leave the review running after "timed out".
+        pidfile = self.tmp / "grandchild.pid"
+        code, _out, _err = self.review(
+            "diff", "--manifest", self.manifest, "--timeout", "4",
+            env={"FAKE_SLEEP": "30", "FAKE_GRANDCHILD": str(pidfile)},
+        )
+        self.assertEqual(code, 2)
+        deadline = time.time() + 10
+        while time.time() < deadline and not (pidfile.exists() and pidfile.read_text().strip()):
+            time.sleep(0.1)
+        if not (pidfile.exists() and pidfile.read_text().strip()):
+            self.skipTest("the grandchild never started; nothing to observe")
+        pid = int(pidfile.read_text().strip())
+
+        def reap():
+            if pid_alive(pid):
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+                else:
+                    os.kill(pid, 9)
+
+        self.addCleanup(reap)
+        deadline = time.time() + 10
+        while time.time() < deadline and pid_alive(pid):
+            time.sleep(0.2)
+        self.assertFalse(pid_alive(pid), "the timed-out ocr left a child process running")
+
+
+class ConsoleEncoding(TempConsole):
+    """Review text is arbitrary Unicode; a legacy console codepage must not crash it."""
+
+    TEXT = "Schlüssel \U0001f511 ключ — 日本語"
+
+    def test_non_cp1252_text_survives_a_cp1252_console(self):
+        payload = {"findings": [comment(path="src/über.py", content=self.TEXT)]}
+        path = self.tmp / "findings.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        code, out, err = self.review(
+            "record", "--manifest", self.manifest, "--findings", "@" + str(path),
+            env={"PYTHONIOENCODING": "cp1252"},
+        )
+        self.assertEqual(code, 1, err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("Schlüssel", self.gaps()[0]["description"])
+        self.assertIn("日本語", self.gaps()[0]["description"])
+
+    def test_a_bom_findings_file_from_powershell_is_accepted(self):
+        path = self.tmp / "findings.json"
+        path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"findings": [comment()]}).encode("utf-8"))
+        code, _out, err = self.review(
+            "record", "--manifest", self.manifest, "--findings", "@" + str(path)
+        )
+        self.assertEqual(code, 1, err)
+
+    def test_a_bom_on_stdin_and_non_ascii_text_on_stdin(self):
+        text = "﻿" + json.dumps({"findings": [comment(content=self.TEXT)]}, ensure_ascii=False)
+        code, _out, err = self.review(
+            "record", "--manifest", self.manifest, "--findings", "-", input=text,
+            env={"PYTHONIOENCODING": "cp1252"},  # stdin would otherwise decode as cp1252
+        )
+        self.assertEqual(code, 1, err)
+        self.assertIn("Schlüssel", self.gaps()[0]["description"])
 
 
 class ShimResolution(unittest.TestCase):
