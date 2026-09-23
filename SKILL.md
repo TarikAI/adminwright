@@ -100,7 +100,7 @@ Do not read every reference up front. Load what the current phase needs.
 | Narrow extension | [discovery.md](references/discovery.md), [stack-adapters.md](references/stack-adapters.md), plus the reference for the changed capability |
 | Audit only | [discovery.md](references/discovery.md), [capability-catalog.md](references/capability-catalog.md), [verification.md](references/verification.md), [security-governance.md](references/security-governance.md) |
 | Repair | [verification.md](references/verification.md) plus the reference covering each finding |
-| Release claim | [verification.md](references/verification.md) and [security-governance.md](references/security-governance.md), always |
+| Release declaration | [verification.md](references/verification.md) and [security-governance.md](references/security-governance.md), always |
 
 ## Phase 1: Discover the platform
 
@@ -277,11 +277,11 @@ Run the project's build, type check, lint, tests, security checks, and browser t
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --project-root <project-root> --phase release
 python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <project-root>/.admin-console/manifest.json
-python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report
+python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report --out <project-root>/docs/admin-gap-report.md
 ```
 
 Exit 0 is clean, 1 means findings at error severity, 2 a usage or IO failure, 3 a claim
-conflict. Both `validate` and `coverage` must exit 0 before any release claim. A refused
+conflict. Both `validate` and `coverage` must exit 0 before any release declaration. A refused
 `add` or `set` also exits 2 — the manifest was left unmodified, so the request could not be
 carried out; exit 1 always means "read it, and it has findings".
 

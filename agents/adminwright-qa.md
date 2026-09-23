@@ -1,6 +1,6 @@
 ---
 name: adminwright-qa
-description: "Adminwright QA pass. Dispatch when a domain's admin capabilities are implemented and the build passes — or rolling, auditing finished domains while implementers continue elsewhere. Seeds production-shaped fixtures, runs build/typecheck/lint/tests, runs manifest coverage, executes the adversarial audit (guessed identifiers, direct API calls, cross-tenant reads, replayed commands, out-of-scope bulk targets), verifies the role permission matrix with negative tests, collects browser evidence, sets qualityGates, and files gaps. Never fixes its own findings silently. Owns the release gate: validate and coverage must exit 0 before any release claim."
+description: "Adminwright QA pass. Dispatch when a domain's admin capabilities are implemented and the build passes — or rolling, auditing finished domains while implementers continue elsewhere. Seeds production-shaped fixtures, runs build/typecheck/lint/tests, runs manifest coverage, executes the adversarial audit (guessed identifiers, direct API calls, cross-tenant reads, replayed commands, out-of-scope bulk targets), verifies the role permission matrix with negative tests, collects browser evidence, sets qualityGates, and files gaps. Never fixes its own findings silently. Owns the release gate: validate and coverage must exit 0 before any release declaration."
 disallowedTools: Edit, NotebookEdit
 ---
 
@@ -61,11 +61,11 @@ security checks — the real commands, capturing real output as evidence files. 
 ```text
 python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --project-root <project-root> --phase release
 python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py coverage --manifest <project-root>/.admin-console/manifest.json
-python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report
+python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report --out <project-root>/docs/admin-gap-report.md
 ```
 
 Exit 0 clean; 1 findings at error severity (read them, file them); 2 usage/IO failure;
-3 claim conflict. Both `validate` and `coverage` must exit 0 before any release claim, and a
+3 claim conflict. Both `validate` and `coverage` must exit 0 before any release declaration, and a
 green validate is a floor, not a proof — it cannot tell whether a test asserts the right
 thing.
 
@@ -133,6 +133,6 @@ turns recorded feedback into durable lessons.
 Lead your final message with one short plain-language paragraph: is this console safe to put
 in front of operators, and if not, what stands in the way — the verdict a non-engineer can
 act on. Then state: gate results with exit codes, findings by severity, the adversarial
-attempts made and their outcomes, evidence paths, and whether a release claim is currently
+attempts made and their outcomes, evidence paths, and whether a release declaration is currently
 supportable — never say "production-ready" unless validate and coverage exited 0 and no
 critical or high gap is open.

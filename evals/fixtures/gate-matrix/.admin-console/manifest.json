@@ -4,7 +4,7 @@
   "profile": "gold",
   "projectRoot": "..",
   "platform": {
-    "id": "gate-matrix-c2cb0a",
+    "id": "gate-matrix-000000",
     "name": "gate-matrix",
     "summary": "",
     "archetypes": [
@@ -717,6 +717,6 @@
   "agents": [],
   "validatedWith": {
     "ruleset": "30d8ebc4",
-    "skill": "a65e7bc"
+    "skill": "d137e35"
   }
 }

@@ -73,7 +73,8 @@ GAP_SEVERITIES = ("critical", "high", "medium", "low")
 GAP_STATUSES = ("open", "fixed", "accepted", "blocked")
 FEEDBACK_CATEGORIES = ("gap", "friction", "incorrect-guidance", "new-pattern", "tooling")
 FEEDBACK_STATUSES = ("open", "promoted", "rejected")
-AGENT_ROLES = ("architect", "implementer", "ux-reviewer", "qa", "security")
+# The pass order: security reviews before qa closes the release gate.
+AGENT_ROLES = ("architect", "implementer", "ux-reviewer", "security", "qa")
 AGENT_STATUSES = ("active", "done", "handed-off")
 REVIEW_STATUSES = ("unreviewed", "reviewed", "contested")
 LESSON_STATUSES = ("proposed", "adopted", "rejected", "superseded")
@@ -435,7 +436,9 @@ ARCHETYPE_DOMAINS = {
     # The domains here are the controls that were missing every time.
     "llm-gateway": ("provider", "credential", "api key", "base url", "model", "routing",
                     "fallback", "rate limit", "quota", "usage", "cost", "rotation",
-                    "invitation", "user"),
+                    "invitation", "user", "spend cap", "budget", "request log", "payload",
+                    "prompt", "pii", "redact", "retention", "ssrf", "allowlist",
+                    "health check", "revoke"),
     "agent-operated": ("agent", "tool", "scope", "approval", "provenance", "kill switch",
                        "pause", "replay", "spend", "cap"),
 }
@@ -2761,7 +2764,7 @@ def validate_evidence(manifest, findings, project_root):
             findings.add(
                 "evidence-token-match",
                 path + ".tests",
-                "no listed test file mentions the capability id, a server operation, or a UI route; "
+                "no listed test file mentions the capability id or one of its server operations; "
                 "the link between manifest and test is unproven",
             )
     for path, screen in iter_named(manifest, "screens"):
@@ -4834,7 +4837,7 @@ def report_overridden(introduced, allow_invalid, manifest, manifest_path):
     if persisting:
         stderr(
             str(len(persisting)) + " of them still fail `validate --phase release`. "
-            "Resolve them before any release claim."
+            "Resolve them before any release declaration."
         )
     else:
         stderr("None of them fail `validate --phase release`; they were plan-phase findings.")

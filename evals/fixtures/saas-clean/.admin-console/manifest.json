@@ -4,7 +4,7 @@
   "profile": "regulated",
   "projectRoot": "..",
   "platform": {
-    "id": "saas-clean-7b067d",
+    "id": "saas-clean-000000",
     "name": "saas-clean",
     "summary": "Multi-tenant B2B SaaS admin console slice.",
     "archetypes": [
@@ -574,6 +574,6 @@
   "agents": [],
   "validatedWith": {
     "ruleset": "30d8ebc4",
-    "skill": "a65e7bc"
+    "skill": "d137e35"
   }
 }

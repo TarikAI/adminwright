@@ -34,7 +34,8 @@ Shape of a healthy run, orchestrated from the main session:
    `unreviewed`, and a different reviewer than the contester reviews next. A capability
    contested twice goes to the user, not to a third round: file a `blocked` gap stating both
    positions. A gap becomes `accepted` only by the user, or by a named approver recorded as a
-   confirmed `decisions[]` entry; agents propose, they never accept.
+   confirmed `decisions[]` entry; agents propose, they never accept. The two-round rule and the
+   approver rule are stated once, in [../references/multi-agent.md](../references/multi-agent.md).
 6. Dispatch `adminwright-harvester` last, passing it a short digest of this session's
    conversation — corrections the user made, guidance that proved wrong, phases that were
    skipped — so what the run taught outlives the chat.

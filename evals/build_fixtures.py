@@ -47,6 +47,12 @@ def scaffold(name, archetype, profile):
     )
     if kept is not None:
         (root / "expected-findings.json").write_bytes(kept)
+    # `init` gives every platform a random id; a fixture must regenerate byte-for-byte.
+    manifest_path = root / ".admin-console" / "manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data["platform"]["id"] = name + "-000000"
+    with open(str(manifest_path), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(data, indent=2) + "\n")
     return root
 
 

@@ -4,7 +4,7 @@
   "profile": "standard",
   "projectRoot": "..",
   "platform": {
-    "id": "logistics-gaps-fdbdc4",
+    "id": "logistics-gaps-000000",
     "name": "logistics-gaps",
     "summary": "Dispatch and delivery operations console.",
     "archetypes": [
@@ -376,6 +376,6 @@
   "agents": [],
   "validatedWith": {
     "ruleset": "30d8ebc4",
-    "skill": "a65e7bc"
+    "skill": "d137e35"
   }
 }

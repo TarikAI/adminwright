@@ -947,8 +947,8 @@
               "architect",
               "implementer",
               "ux-reviewer",
-              "qa",
-              "security"
+              "security",
+              "qa"
             ]
           },
           "ownsCapabilities": {
