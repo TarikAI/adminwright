@@ -181,6 +181,12 @@ therefore says which rule set judged it, even on an install that updated in betw
   installed as test-time checkers, an allowed-to-fail job that runs the real `ocr` binary, and
   Dependabot for the first-party actions.
 
+- `remove --kind <kind> --id <id>` and `rename --kind <kind> --id <old> --to <new>`: delete an
+  entry, or change an id and every reference to it (screens, transitions, agents, decisions,
+  gaps, declared-static paths), under the write guard, so a wrong entry no longer has to be
+  fixed by hand-editing the manifest. `set` takes a whole object as JSON.
+- `tests/test_token_budget.py`: a ceiling on what each entry point (full build, narrow
+  extension, audit, repair) and each agent prompt costs to load.
 ### Changed
 
 - The `ux-reviewer` agent now reviews what the validator provably cannot: that every control
@@ -288,6 +294,17 @@ therefore says which rule set judged it, even on an install that updated in betw
 - Adopted and shipped lessons no longer name real projects; the GitHub links to features that
   are not enabled (private advisories, Discussions) were replaced with a working contact route.
 
+- References were corrected against current upstream documentation: Next.js `proxy.ts`
+  (the `middleware` convention was renamed in Next 16), Supabase publishable and secret keys and
+  Cron, DRF `has_object_permission` versus Django `ModelAdmin` hooks, the WCAG 2.2 criteria that
+  matter to dense consoles, the six Dashboard Design Patterns genres, and a dead ASVS link.
+  `security-governance.md` gains SSRF, rate limiting and lockout, break-glass, CSRF per stack
+  family and SCIM/SSO deprovisioning, and ties "tamper-evident" to the hash-chain columns;
+  `capability-catalog.md` gains the llm-gateway logging-policy, spend-cap, request-log and
+  SSRF controls (with matching `ARCHETYPE_DOMAINS` keywords); `verification.md` links to the
+  generated rule matrix instead of keeping a hand-written one, and defines the four required
+  screen states once; `multi-agent.md` separates the manifest-level claim from the two kinds of
+  lock file, states that the harvester is a pass, and uses one pass order (security before qa).
 ### Fixed
 
 - `promote` grouped observations by an exact hash of their wording while its docstring

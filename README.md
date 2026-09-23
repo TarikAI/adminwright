@@ -173,6 +173,7 @@ report    coverage summary: counts by status, kind, risk, review, gates; declare
 coverage  structural gap audit on its own
 emit      authz-matrix | test-plan | nav-map | seed-plan | operator-handbook | gap-report | rule-matrix
 add/set   safe partial writes under a lock (never rewrite the whole file)
+remove/rename  delete an item, or change an id and every reference to it
 claim     multi-agent capability ownership                    (3 = conflict)
 release-claim  give a claim back when you stop or hand off    (3 = not yours to release)
 harvest   move this project's feedback into the cross-project store

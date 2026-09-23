@@ -5,8 +5,8 @@
 
 Standard library only. Runs on Windows and POSIX.
 
-Commands: init, migrate, validate, report, coverage, emit, add, set, claim,
-release-claim, lesson.
+Commands: init, migrate, validate, report, coverage, emit, add, set, remove, rename,
+claim, release-claim, harvest, promote, store, lesson.
 
 Exit codes: 0 ok, 1 findings at error severity, 2 usage or IO failure,
 3 capability claim conflict.
@@ -4876,6 +4876,174 @@ def cmd_set(args):
     return 0
 
 
+def find_item(manifest, kind, item_id, entity_id=None):
+    """Return (collection, index) for an item, or raise ManifestError."""
+    if kind == "capability":
+        for _eid, entity in iter_entities(manifest):
+            if entity_id and text_of(entity.get("id")) != entity_id:
+                continue
+            collection = entity.get("capabilities")
+            if not isinstance(collection, list):
+                continue
+            for index, item in enumerate(collection):
+                if isinstance(item, dict) and text_of(item.get("id")) == item_id:
+                    return collection, index
+        raise ManifestError("capability '" + item_id + "' is not in the manifest")
+    key = KIND_TARGETS[kind]
+    collection = manifest.get(key)
+    if isinstance(collection, list):
+        for index, item in enumerate(collection):
+            if isinstance(item, dict) and text_of(item.get("id")) == item_id:
+                return collection, index
+    raise ManifestError(kind + " '" + item_id + "' is not in the manifest")
+
+
+def cmd_remove(args):
+    """Delete one item. The write guard refuses it if anything still points at it.
+
+    SKILL.md forbids hand-editing the manifest, and there was no command that could
+    delete an entry, so a wrong `add` could only be undone by breaking the rule.
+    """
+    manifest_path = resolve_manifest_path(args.manifest)
+    with FileLock(manifest_path.parent / ".lock"):
+        manifest = load_json(manifest_path)
+        before = json.loads(json.dumps(manifest))
+        collection, index = find_item(manifest, args.kind, args.id, args.entity)
+        collection.pop(index)
+        introduced, warned = new_findings(
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent
+        )
+        if introduced and not args.allow_invalid:
+            stderr("Refusing to remove: something still depends on " + args.kind + " '" + args.id + "'.")
+            for item in introduced:
+                stderr("  ERROR: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
+            stderr("Remove or update those first, or pass --allow-invalid.")
+            return 2
+        commit_manifest(manifest_path, manifest)
+    print("Removed " + args.kind + " '" + args.id + "' from " + str(manifest_path))
+    report_new_warnings(warned)
+    report_overridden(introduced, args.allow_invalid, manifest, manifest_path)
+    return 0
+
+
+def swap_in_list(container, key, old, new):
+    changed = 0
+    values = container.get(key) if isinstance(container, dict) else None
+    if isinstance(values, list):
+        for index, value in enumerate(values):
+            if value == old:
+                values[index] = new
+                changed += 1
+    return changed
+
+
+def swap_scalar(container, key, old, new):
+    if isinstance(container, dict) and container.get(key) == old:
+        container[key] = new
+        return 1
+    return 0
+
+
+def rewrite_references(manifest, kind, old, new):
+    """Point every reference to `old` at `new`; return how many were changed."""
+    changed = 0
+    capabilities = [cap for _path, _entity, cap in iter_capabilities(manifest)]
+    if kind == "role":
+        for cap in capabilities:
+            changed += swap_in_list(cap, "roles", old, new)
+        for _path, screen in iter_named(manifest, "screens"):
+            changed += swap_in_list(screen, "roles", old, new)
+        for key in ("workQueues", "integrations"):
+            for _path, item in iter_named(manifest, key):
+                changed += swap_in_list(item, "roles", old, new)
+        for _eid, entity in iter_entities(manifest):
+            for transition in as_list(entity.get("lifecycleTransitions")):
+                changed += swap_in_list(transition, "actorRoles", old, new)
+    if kind == "capability":
+        for _path, screen in iter_named(manifest, "screens"):
+            changed += swap_in_list(screen, "capabilities", old, new)
+        for _eid, entity in iter_entities(manifest):
+            for transition in as_list(entity.get("lifecycleTransitions")):
+                changed += swap_scalar(transition, "command", old, new)
+        for _path, agent in iter_named(manifest, "agents"):
+            changed += swap_in_list(agent, "ownsCapabilities", old, new)
+            changed += swap_in_list(agent, "previouslyOwned", old, new)
+        for _path, gap in iter_named(manifest, "gaps"):
+            changed += swap_scalar(gap, "capability", old, new)
+        for source in as_list(as_dict(manifest.get("platform")).get("researchSources")):
+            changed += swap_in_list(source, "appliedTo", old, new)
+    if kind == "screen":
+        for _path, agent in iter_named(manifest, "agents"):
+            changed += swap_in_list(agent, "ownsScreens", old, new)
+    if kind == "entity":
+        for _path, gap in iter_named(manifest, "gaps"):
+            changed += swap_scalar(gap, "entity", old, new)
+    if kind == "agent":
+        for cap in capabilities:
+            for key in ("owner", "implementedBy", "reviewedBy"):
+                changed += swap_scalar(cap, key, old, new)
+        for _path, entry in iter_named(manifest, "declaredStatic"):
+            changed += swap_scalar(entry, "approvedBy", old, new)
+    if kind in ("role", "capability", "screen", "entity", "queue", "integration", "gap"):
+        for _path, decision in iter_named(manifest, "decisions"):
+            changed += swap_in_list(decision, "appliesTo", old, new)
+    if kind in ("role", "capability", "screen", "entity", "queue", "integration"):
+        # declaredStatic paths name items by id: entities[old].capabilities[x].dataBinding
+        for _path, entry in iter_named(manifest, "declaredStatic"):
+            target = text_of(entry.get("path"))
+            if "[" + old + "]" in target:
+                entry["path"] = target.replace("[" + old + "]", "[" + new + "]")
+                changed += 1
+    return changed
+
+
+def cmd_rename(args):
+    """Change an item's id and every reference to it, atomically.
+
+    A capability id is repeated in screens, transitions, agents, decisions and gaps;
+    renaming it by hand is exactly the multi-file edit that goes wrong.
+    """
+    manifest_path = resolve_manifest_path(args.manifest)
+    new_id = args.to
+    if not ID_PATTERN.fullmatch(new_id):
+        raise ManifestError("id '" + new_id + "' must be lowercase alphanumeric with dots or hyphens")
+    with FileLock(manifest_path.parent / ".lock"):
+        manifest = load_json(manifest_path)
+        before = json.loads(json.dumps(manifest))
+        collection, index = find_item(manifest, args.kind, args.id, args.entity)
+        for other in collection:
+            if isinstance(other, dict) and text_of(other.get("id")) == new_id:
+                raise ManifestError(args.kind + " '" + new_id + "' already exists")
+        if args.kind == "capability" and new_id in capability_index(manifest):
+            raise ManifestError("capability id '" + new_id + "' is used by another entity")
+        collection[index]["id"] = new_id
+        changed = rewrite_references(manifest, args.kind, args.id, new_id)
+        introduced, warned = new_findings(
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent,
+            renamed=(args.id, new_id),
+        )
+        if introduced and not args.allow_invalid:
+            stderr("Refusing to rename: the result would introduce validation errors.")
+            for item in introduced:
+                stderr("  ERROR: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
+            return 2
+        commit_manifest(manifest_path, manifest)
+        if args.kind == "capability":
+            old_lock = manifest_path.parent / "locks" / lock_file_name(args.id)
+            if old_lock.exists():
+                try:
+                    old_lock.replace(manifest_path.parent / "locks" / lock_file_name(new_id))
+                except OSError:
+                    pass
+    print(
+        "Renamed " + args.kind + " '" + args.id + "' to '" + new_id + "' and updated "
+        + str(changed) + " reference(s) in " + str(manifest_path)
+    )
+    report_new_warnings(warned)
+    report_overridden(introduced, args.allow_invalid, manifest, manifest_path)
+    return 0
+
+
 def lock_file_name(capability_id):
     return re.sub(r"[^A-Za-z0-9._-]", "_", capability_id) + ".lock"
 
@@ -5147,7 +5315,7 @@ def project_key_of(manifest, manifest_path, override=None):
         text_of(override)
         or text_of(platform.get("id"))
         or text_of(platform.get("name"))
-        or Path(manifest_path).resolve().parent.parent.name
+        or project_root_of(manifest_path, manifest).name
     )
 
 
@@ -5156,7 +5324,10 @@ def cmd_harvest(args):
     manifest = load_json(manifest_path)
     store = global_store_dir(args.store)
     platform = as_dict(manifest.get("platform"))
-    project = text_of(args.project) or text_of(platform.get("name")) or manifest_path.parent.parent.name
+    project = (
+        text_of(args.project) or text_of(platform.get("name"))
+        or project_root_of(manifest_path, manifest).name
+    )
     key = project_key_of(manifest, manifest_path, args.project)
     stack = as_dict(platform.get("stack"))
     stack_summary = ", ".join(
@@ -5818,6 +5989,33 @@ def build_parser():
         help="write even if the change introduces validation errors (they are listed)",
     )
     set_parser.set_defaults(func=cmd_set)
+
+    remove_parser = subparsers.add_parser(
+        "remove", help="Delete one item; refused if anything still depends on it"
+    )
+    remove_parser.add_argument("--manifest", required=True, help="path to manifest.json")
+    remove_parser.add_argument("--kind", required=True, choices=sorted(KIND_TARGETS))
+    remove_parser.add_argument("--id", required=True, help="id of the item to delete")
+    remove_parser.add_argument("--entity", help="entity id, to disambiguate when --kind capability")
+    remove_parser.add_argument(
+        "--allow-invalid", action="store_true",
+        help="delete even if that leaves dangling references (they are listed)",
+    )
+    remove_parser.set_defaults(func=cmd_remove)
+
+    rename_parser = subparsers.add_parser(
+        "rename", help="Change an item's id and every reference to it"
+    )
+    rename_parser.add_argument("--manifest", required=True, help="path to manifest.json")
+    rename_parser.add_argument("--kind", required=True, choices=sorted(KIND_TARGETS))
+    rename_parser.add_argument("--id", required=True, help="current id")
+    rename_parser.add_argument("--to", required=True, help="new id")
+    rename_parser.add_argument("--entity", help="entity id, to disambiguate when --kind capability")
+    rename_parser.add_argument(
+        "--allow-invalid", action="store_true",
+        help="rename even if the result introduces validation errors (they are listed)",
+    )
+    rename_parser.set_defaults(func=cmd_rename)
 
     claim_parser = subparsers.add_parser("claim", help="Take exclusive ownership of capabilities")
     claim_parser.add_argument("--manifest", required=True, help="path to manifest.json")

@@ -20,7 +20,7 @@ Three artifacts carry all coordination state:
 
 | Artifact | Path | Written by |
 |---|---|---|
-| Manifest | `<project-root>/.admin-console/manifest.json` | the script's `add`, `set`, `claim`, `release-claim`, `harvest` and `migrate --write` subcommands only; every write stamps `validatedWith` (the rule-set hash and skill commit that last touched it) |
+| Manifest | `<project-root>/.admin-console/manifest.json` | the script's `add`, `set`, `remove`, `rename`, `claim`, `release-claim`, `harvest` and `migrate --write` subcommands only; every write stamps `validatedWith` (the rule-set hash and skill commit that last touched it) |
 | Locks | `.admin-console/.lock` (the write lock) and `.admin-console/locks/<capability>.lock` (one per claimed capability) | the script only, never by hand; see [Manifest concurrency](#manifest-concurrency) |
 | Worklogs | `<project-root>/.admin-console/worklog/<agentId>.md` | the owning agent, using the file tools in your harness |
 
@@ -184,7 +184,7 @@ The spine is built to `implemented` by one agent before entity slices fan out. S
 
 ## Manifest concurrency
 
-Mutate the manifest only through the script (`add`, `set`, `claim`, `release-claim`, `harvest`, `migrate --write`):
+Mutate the manifest only through the script (`add`, `set`, `remove`, `rename`, `claim`, `release-claim`, `harvest`, `migrate --write`):
 
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py set \

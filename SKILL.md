@@ -150,7 +150,11 @@ python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-roo
 python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'entities[user].capabilities[user.list].status' --value planned
 ```
 
-Model incrementally with `add` and `set`. Pass structured values as one quoted argument
+Model incrementally with `add` and `set`; `remove --kind <kind> --id <id>` deletes a wrong entry
+(refused while anything still points at it) and `rename --kind <kind> --id <old> --to <new>`
+changes an id and every reference to it, so the manifest is never hand-edited. `set` also
+takes a whole object as JSON (`--path crossCutting.audit --value '{...}'`) instead of one call
+per flag. Pass structured values as one quoted argument
 (`--json '{"id":"ops", ...}'`), or, in PowerShell 5.1 — which strips the quotes inside
 single-quoted JSON — write the object to a file and use `--json-file role.json`. Before release, an unfinished model reports gaps as
 warnings rather than blocking — a role is unused until its first capability exists. Malformed
