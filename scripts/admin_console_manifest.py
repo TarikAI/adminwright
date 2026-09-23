@@ -268,6 +268,7 @@ RULES = {
     "gate-rationale-missing": E3,
     "gap-unresolved": E3,
     "feedback-scope": W3,
+    "unknown-field": QUALITY,
     "gap-rationale-missing": E3,
     "placeholder-scan": E3,
     "unregistered-static": E3,
@@ -682,6 +683,13 @@ def write_text_file(path, text):
     try:
         with open(str(tmp), "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
+            handle.flush()
+            # The rename below is atomic, but not durable: without an fsync a crash
+            # can leave the renamed file empty.
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
         for attempt in range(10):
             try:
                 os.replace(str(tmp), str(path))
@@ -700,6 +708,17 @@ def write_text_file(path, text):
 
 def write_json(path, data):
     write_text_file(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def commit_manifest(path, manifest):
+    """Write a manifest, stamping which rule set and skill commit last touched it.
+
+    An auto-updated install can change what `validate` accepts between two runs;
+    the stamp lets anyone reading the manifest tell which rules its last edit
+    was checked against.
+    """
+    manifest["validatedWith"] = {"ruleset": ruleset_version(), "skill": skill_version()}
+    write_json(path, manifest)
 
 
 def nonempty(value):
@@ -722,18 +741,132 @@ def text_of(value):
     return value.strip() if isinstance(value, str) else ""
 
 
+def label(value, default="unknown"):
+    """A hashable, printable stand-in for a value that may have the wrong type."""
+    if value is None:
+        return default
+    return value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
+
+
+def str_items(value):
+    """The string members of a list; anything else is skipped rather than crashed on."""
+    return [item for item in as_list(value) if isinstance(item, str)]
+
+
 def stderr(message):
     print(message, file=sys.stderr)
 
 
+def pid_alive(pid):
+    """Best-effort: is this process still running on this machine?"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                # 5 = access denied: the process exists but is not ours.
+                return ctypes.windll.kernel32.GetLastError() == 5
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        except (AttributeError, OSError):
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 class FileLock:
-    """Exclusive lock on a single path. Breaks locks older than the stale window."""
+    """Exclusive lock on a single path. Breaks locks older than the stale window.
+
+    The lock file records the holder's pid and a random token. Two things depend
+    on that. A stale lock is taken over by atomically RENAMING it away (only one
+    contender's rename can succeed), and it is released only if the file still
+    carries our token -- with a bare unlink, two waiters that both judged the lock
+    stale each "took" it, and the first to finish deleted the second's live lock.
+    And when a caller does time out, the message names the holder, the lock's
+    age, and what to do about it, instead of "held by another process".
+    """
 
     def __init__(self, path, stale=LOCK_STALE_SECONDS, timeout=LOCK_TIMEOUT_SECONDS):
         self.path = Path(path)
         self.stale = stale
         self.timeout = timeout
         self.held = False
+        self.token = "%d-%s" % (os.getpid(), os.urandom(6).hex())
+
+    def read_holder(self):
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except OSError:
+            return None, ""
+        pid = 0
+        token = ""
+        for line in text.splitlines():
+            if line.startswith("pid="):
+                try:
+                    pid = int(line[4:].strip())
+                except ValueError:
+                    pid = 0
+            elif line.startswith("token="):
+                token = line[6:].strip()
+        return pid, token
+
+    def describe_holder(self):
+        pid, _token = self.read_holder()
+        try:
+            age = int(time.time() - self.path.stat().st_mtime)
+        except OSError:
+            age = None
+        text = "held by pid " + str(pid) if pid else "held by an unknown process"
+        if age is not None:
+            text += " for " + str(age) + "s"
+        return text
+
+    def take_over_stale(self):
+        """Remove a dead or stale lock; True if this process did it.
+
+        A bare rename-and-delete is not safe: two waiters both judge the lock stale,
+        the first removes it and takes a fresh one, and the second then removes THAT
+        one. So removal happens under a short-lived guard file only one process can
+        create, and the staleness is re-checked under it.
+        """
+        guard = self.path.with_name(self.path.name + ".takeover")
+        try:
+            handle = os.open(str(guard), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except OSError:
+            try:
+                if time.time() - guard.stat().st_mtime > 10.0:
+                    guard.unlink()  # a guard left by a crash between create and unlink
+            except OSError:
+                pass
+            return False
+        try:
+            os.close(handle)
+            try:
+                age = time.time() - self.path.stat().st_mtime
+            except OSError:
+                return True  # already gone
+            holder_pid, _token = self.read_holder()
+            dead = age > 2.0 and holder_pid and not pid_alive(holder_pid)
+            if age > self.stale or dead:
+                try:
+                    self.path.unlink()
+                except OSError:
+                    return False
+                return True
+            return False
+        finally:
+            try:
+                guard.unlink()
+            except OSError:
+                pass
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -749,15 +882,17 @@ class FileLock:
                     age = time.time() - self.path.stat().st_mtime
                 except OSError:
                     age = None
-                if age is not None and age > self.stale:
-                    try:
-                        self.path.unlink()
-                    except OSError:
-                        pass
+                holder_pid, _token = self.read_holder()
+                dead = (
+                    age is not None and age > 2.0 and holder_pid and not pid_alive(holder_pid)
+                )
+                if age is not None and (age > self.stale or dead):
+                    self.take_over_stale()
                     continue
                 if time.time() >= deadline:
                     raise LockError(
-                        "Manifest lock is held by another process: " + str(self.path)
+                        "Manifest lock " + self.path.name + " is " + self.describe_holder()
+                        + ". If that process is gone, delete " + str(self.path) + " and retry."
                     )
                 time.sleep(0.2)
                 continue
@@ -776,17 +911,23 @@ class FileLock:
                 continue
             except OSError as exc:
                 raise LockError("Cannot create lock " + str(self.path) + ": " + str(exc))
-            os.write(handle, ("pid=" + str(os.getpid()) + "\n").encode("utf-8"))
+            os.write(
+                handle, ("pid=" + str(os.getpid()) + "\ntoken=" + self.token + "\n").encode("utf-8")
+            )
             os.close(handle)
             self.held = True
             return self
 
     def __exit__(self, exc_type, exc, tb):
         if self.held:
-            try:
-                self.path.unlink()
-            except OSError:
-                pass
+            _pid, token = self.read_holder()
+            # Only remove a lock that is still ours: if it was taken over while we
+            # ran, the file now belongs to someone else.
+            if token == self.token or (_pid is None):
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
             self.held = False
         return False
 
@@ -1447,7 +1588,7 @@ def run_placeholder_scan(manifest, findings, release):
 
 
 def check_id(value, path, findings):
-    if not isinstance(value, str) or not ID_PATTERN.match(value):
+    if not isinstance(value, str) or not ID_PATTERN.fullmatch(value):
         findings.add(
             "id-invalid",
             path,
@@ -1470,7 +1611,12 @@ def check_unique_ids(manifest, key, findings):
         check_id(value, path + ".id", findings)
         if isinstance(value, str):
             if value in seen:
-                findings.add("id-duplicate", key, "duplicate id '" + value + "'")
+                # The position is part of the message: identical findings are
+                # de-duplicated, and a second duplicate of the same id must still
+                # count as new to the write guard.
+                findings.add(
+                    "id-duplicate", key, "duplicate id '" + value + "' at position " + str(index)
+                )
             seen.add(value)
 
 
@@ -1920,7 +2066,7 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
     check_required(manifest, TOP_LEVEL_KEYS, "manifest", findings)
     if isinstance(manifest, dict):
         schema = load_schema()
-        check_schema_types(manifest, schema, schema, "", findings)
+        check_schema_types(manifest, schema, schema, "", findings, unknown_field=True)
         findings.static_allowed = frozenset(static_index(manifest, findings))
 
     version = manifest.get("manifestVersion")
@@ -2766,7 +2912,7 @@ def emit_authz_matrix(manifest):
         obligations.extend(as_list(capability.get("safeguards")))
         if capability.get("risk") in ("high", "critical"):
             obligations.append("step-up or approval required by risk")
-        for role_id in as_list(capability.get("roles")):
+        for role_id in str_items(capability.get("roles")):
             role = as_dict(roles.get(role_id))
             lines.append(
                 "| "
@@ -2960,11 +3106,11 @@ def emit_operator_handbook(manifest):
     lines = ["# Operator handbook", ""]
     caps_by_role = {}
     for _path, entity, capability in iter_capabilities(manifest):
-        for role_id in as_list(capability.get("roles")):
+        for role_id in str_items(capability.get("roles")):
             caps_by_role.setdefault(role_id, []).append((entity, capability))
     screens_by_role = {}
     for _path, screen in iter_named(manifest, "screens"):
-        for role_id in as_list(screen.get("roles")):
+        for role_id in str_items(screen.get("roles")):
             screens_by_role.setdefault(role_id, []).append(screen)
     roles = list(iter_named(manifest, "roles"))
     if not roles:
@@ -3081,6 +3227,21 @@ def emit_gap_report(manifest, profile):
     return "\n".join(lines) + "\n"
 
 
+def emit_rule_matrix():
+    """RULES as a markdown table, so the published matrix cannot drift from the code."""
+    lines = [
+        "| Rule | internal | standard | regulated |",
+        "|---|---|---|---|",
+    ]
+    for name in sorted(RULES):
+        tiers = RULES[name]
+        mark = "*" if name in COMPLETENESS_RULES else ""
+        lines.append(
+            "| `" + name + "`" + mark + " | " + " | ".join(tiers) + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 EMITTERS = {
     "authz-matrix": lambda manifest, profile: emit_authz_matrix(manifest),
     "test-plan": lambda manifest, profile: emit_test_plan(manifest),
@@ -3119,6 +3280,10 @@ def migrate_manifest(manifest):
     ensure_key(manifest, "profile", DEFAULT_PROFILE, "manifest", changes)
 
     platform = manifest.setdefault("platform", {})
+    if not isinstance(platform, dict):
+        raise ManifestError("cannot migrate: platform must be an object")
+    if not isinstance(manifest.get("crossCutting", {}), dict):
+        raise ManifestError("cannot migrate: crossCutting must be an object")
     ensure_key(
         platform,
         "stack",
@@ -3366,6 +3531,14 @@ def merge_defaults(kind, obj):
     for key, value in obj.items():
         if key not in merged:
             merged[key] = value
+    if kind == "entity" and isinstance(merged.get("capabilities"), list):
+        # An entity added with its capabilities inline: each one gets the same
+        # defaults `add --kind capability` would give it. Without this, four
+        # undocumented required keys refused the whole entity.
+        merged["capabilities"] = [
+            merge_defaults("capability", item) if isinstance(item, dict) else item
+            for item in merged["capabilities"]
+        ]
     return merged
 
 
@@ -3447,18 +3620,37 @@ def parse_json_entries(raw):
     raise ManifestError("--json must be a JSON object or a non-empty array of objects")
 
 
-def new_findings(before, after, project_root, manifest_dir):
+def new_findings(before, after, project_root, manifest_dir, renamed=None):
     """Errors and warnings an edit introduced, judged at plan phase.
 
     The guard MUST validate with the project root: without it a relative evidence
     path resolves to nothing, every passed gate raised `evidence-not-resolvable`,
     and a gate could never be `set` to `passed` from anywhere.
+
+    Findings are compared as a multiset, not a set: with a set, once one duplicate
+    id existed the next duplicate produced an identical signature and slipped
+    through. `renamed=(old, new)` maps the before-findings of a renamed id onto
+    the new one, so renaming an item that already carries errors is not blamed for
+    them.
     """
     profile = active_profile(after, None)[0]
     seen = validate_manifest(before, "plan", project_root, profile, manifest_dir)
     now = validate_manifest(after, "plan", project_root, profile, manifest_dir)
-    known = {(i["rule"], i["path"], i["message"]) for i in seen.items}
-    fresh = [i for i in now.items if (i["rule"], i["path"], i["message"]) not in known]
+    known = Counter()
+    for item in seen.items:
+        path, message = item["path"], item["message"]
+        if renamed:
+            old, new = renamed
+            path = path.replace("[" + old + "]", "[" + new + "]")
+            message = message.replace("'" + old + "'", "'" + new + "'")
+        known[(item["rule"], path, message)] += 1
+    fresh = []
+    for item in now.items:
+        key = (item["rule"], item["path"], item["message"])
+        if known[key] > 0:
+            known[key] -= 1
+        else:
+            fresh.append(item)
     return (
         [i for i in fresh if i["severity"] == ERROR],
         [i for i in fresh if i["severity"] == WARN and i["rule"] != "plan-note"],
@@ -3482,6 +3674,10 @@ def report_new_warnings(warnings):
 
 
 def parse_path_expression(expression):
+    # `validate` prints paths such as manifest.roles[ops].name; a finding's path
+    # must be pasteable into `set --path` as it stands.
+    if expression.startswith("manifest."):
+        expression = expression[len("manifest."):]
     segments = []
     buffer = ""
     depth = 0
@@ -3512,7 +3708,25 @@ def parse_path_expression(expression):
     return parsed
 
 
+def select_item(items, selector, key):
+    """An array element by id, or by index as the paths `validate` prints use."""
+    for item in items:
+        if isinstance(item, dict) and text_of(item.get("id")) == selector:
+            return item
+    index = selector[1:] if selector.startswith("#") else selector
+    if index.isdigit() and int(index) < len(items) and isinstance(items[int(index)], dict):
+        return items[int(index)]
+    raise ManifestError("--path selector '" + selector + "' matches no item in '" + key + "'")
+
+
 def resolve_path_parent(manifest, segments):
+    """Walk to the container of the last segment.
+
+    A selector is an item's id, or its array index (`[0]`, or `[#0]` for an item
+    with no id yet): `validate` prints indexed paths and they must be pasteable.
+    A last segment with a numeric selector names one element of a list of strings
+    (`evidence[0]`); the container returned is then that list and the key its index.
+    """
     current = manifest
     for key, selector in segments[:-1]:
         if not isinstance(current, dict) or key not in current:
@@ -3522,45 +3736,60 @@ def resolve_path_parent(manifest, segments):
             continue
         if not isinstance(current, list):
             raise ManifestError("--path selector on '" + key + "' requires an array")
-        found = None
-        for item in current:
-            if isinstance(item, dict) and text_of(item.get("id")) == selector:
-                found = item
-                break
-        if found is None:
-            raise ManifestError("--path selector '" + selector + "' matches no item in '" + key + "'")
-        current = found
+        current = select_item(current, selector, key)
     key, selector = segments[-1]
-    if selector is not None:
-        raise ManifestError("--path must end at a field, not a selector")
     if not isinstance(current, dict):
         raise ManifestError("--path does not resolve to an object field")
-    return current, key
+    if selector is None:
+        return current, key
+    values = current.get(key)
+    index = selector[1:] if selector.startswith("#") else selector
+    if not isinstance(values, list) or not index.isdigit() or int(index) >= len(values):
+        raise ManifestError("--path must end at a field or at an existing list element")
+    return values, int(index)
 
 
 def coerce_value(raw, current):
-    lowered = raw.strip().lower()
-    if lowered in ("true", "false"):
-        return lowered == "true"
-    if lowered == "null":
-        return None
+    """Turn --value into the type the field already has.
+
+    Strings are stored as written: `platform.name` set to "true" became the boolean
+    `true` and validated clean, and "null" erased a field. `true`, `false` and
+    `null` are converted only where the field is already a boolean, or unset. A
+    value that starts with `{` or `[` for a list, object or unset field must be
+    valid JSON -- an object used to be stored as a string and a malformed list
+    silently fell back to comma-splitting -- and is refused otherwise.
+    """
+    stripped = raw.strip()
+    if isinstance(current, str):
+        return raw
+    if stripped[:1] in ("{", "["):
+        try:
+            return json.loads(stripped)
+        except ValueError as exc:
+            raise ManifestError(
+                "--value starts with '" + stripped[:1] + "', so it must be valid JSON: " + str(exc)
+            )
+    lowered = stripped.lower()
     if isinstance(current, bool):
+        if lowered in ("true", "false"):
+            return lowered == "true"
         raise ManifestError("field is boolean; --value must be true or false")
-    if isinstance(current, int) and not isinstance(current, bool):
+    if isinstance(current, dict):
+        raise ManifestError(
+            "field is an object; pass it as JSON, e.g. --value '{\"from\": [\"a\"], \"to\": []}'"
+        )
+    if isinstance(current, int):
         try:
             return int(raw)
         except ValueError:
             raise ManifestError("field is numeric; --value must be an integer")
     if isinstance(current, list):
-        stripped = raw.strip()
-        if stripped.startswith("["):
-            try:
-                parsed = json.loads(stripped)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, list):
-                return parsed
         return [part.strip() for part in raw.split(",") if part.strip()]
+    if current is None:
+        if lowered in ("true", "false"):
+            return lowered == "true"
+        if lowered == "null":
+            return None
     return raw
 
 
@@ -4058,23 +4287,57 @@ def project_root_of(manifest_path, manifest=None):
     return base.parent
 
 
+ADMIN_CONSOLE_GITIGNORE = (
+    "# Working state of the admin-console tooling. Commit the manifest, its schema copy,\n"
+    "# the worklogs and the emitted reports; never these.\n"
+    "locks/\n"
+    ".lock\n"
+    "*.tmp\n"
+    "*.stale.*\n"
+    "ocr-bundle*.json\n"
+    "ocr-record-*.json\n"
+    "ocr-diff-*.json\n"
+    "ocr-scan-*.json\n"
+)
+
+
 def cmd_init(args):
     project_root = Path(args.project_root).resolve()
-    target_dir = project_root / ".admin-console"
-    target = target_dir / "manifest.json"
+    if args.manifest:
+        target = Path(args.manifest).resolve()
+        target_dir = target.parent
+    else:
+        target_dir = project_root / ".admin-console"
+        target = target_dir / "manifest.json"
     if target.exists() and not args.force:
         stderr("Manifest already exists: " + str(target))
+        stderr(
+            "init is for a new console. To continue work on this one: read the manifest, read "
+            "every worklog whose agents[].status is handed-off, run `validate --phase plan`, and "
+            "resume at the first phase whose exit condition fails. Pass --force only to discard "
+            "the manifest and start over."
+        )
         return 2
     target_dir.mkdir(parents=True, exist_ok=True)
     manifest = load_json(TEMPLATE_PATH)
     manifest["profile"] = args.profile
+    try:
+        relative_root = os.path.relpath(str(project_root), str(target_dir)).replace("\\", "/")
+    except ValueError:  # another drive: no relative path exists
+        relative_root = str(project_root).replace("\\", "/")
+    manifest["projectRoot"] = relative_root
     manifest["platform"]["name"] = args.name
     # A stable handle for the cross-project store: the promotion bar counts
     # distinct projects, and a display name is not one.
     manifest["platform"]["id"] = (
         slugify(args.name)[:32].rstrip("-") + "-" + os.urandom(3).hex()
     )
-    manifest["platform"]["archetypes"] = list(dict.fromkeys(args.archetype or []))
+    archetypes = []
+    for raw in args.archetype or []:
+        # --archetype a,b used to store the single string "a,b", which resolved to
+        # one archetype (or none).
+        archetypes.extend(part.strip() for part in raw.split(",") if part.strip())
+    manifest["platform"]["archetypes"] = list(dict.fromkeys(archetypes))
     # An unrecognised archetype silently disables coverage checking, and the
     # first field tests proved nobody notices. Warn at the moment of typing,
     # when the fix costs one word.
@@ -4098,32 +4361,66 @@ def cmd_init(args):
     ):
         if value:
             stack[key] = value
-    write_json(target, manifest)
+    # Choosing a profile is a recorded decision, not a default. init makes it an
+    # ASSUMED one, so an unconfirmed profile fails the release gate at regulated
+    # (decision-assumed) until someone with authority confirms it.
+    manifest["decisions"] = [{
+        "id": "dec.profile",
+        "decision": "Run at the " + args.profile + " profile",
+        "reason": "chosen when the manifest was created; not yet confirmed with the owner",
+        "evidence": [],
+        "status": "assumed",
+        "appliesTo": ["*"],
+    }]
+    commit_manifest(target, manifest)
     schema_copy = target_dir / "admin-console.manifest.schema.json"
     shutil.copyfile(str(SCHEMA_PATH), str(schema_copy))
+    ignore_path = target_dir / ".gitignore"
+    if not ignore_path.exists():
+        write_text_file(ignore_path, ADMIN_CONSOLE_GITIGNORE)
     print("Created " + str(target))
     print("Created " + str(schema_copy))
-    print("Profile: " + args.profile)
+    print("Profile: " + args.profile + " (recorded as the assumed decision dec.profile; confirm it)")
+    print("Project root: " + relative_root + " (relative to the manifest's folder)")
+    print("adminwright " + skill_version() + ", ruleset " + ruleset_version())
     return 0
+
+
+def migrate_safely(manifest):
+    try:
+        return migrate_manifest(manifest)
+    except (TypeError, AttributeError, KeyError, ValueError) as exc:
+        raise ManifestError(
+            "cannot migrate: this 1.0 manifest is malformed (" + type(exc).__name__ + ": "
+            + str(exc) + "). Fix the shape it names, or start from `init`."
+        )
 
 
 def cmd_migrate(args):
     manifest_path = resolve_manifest_path(args.manifest)
-    manifest = load_json(manifest_path)
-    original_version = manifest.get("manifestVersion")
-    migrated, changes = migrate_manifest(manifest)
-    if original_version == MANIFEST_VERSION:
-        print("Manifest is already at version " + MANIFEST_VERSION + "; nothing to migrate.")
-        return 0
-    print("Migration " + str(original_version) + " -> " + MANIFEST_VERSION)
-    print("Added or changed " + str(len(changes)) + " key(s):")
-    for change in changes:
-        print("  + " + change)
-    if not args.write:
-        print("Dry run. Re-run with --write to persist.")
-        return 0
-    with FileLock(manifest_path.parent / ".lock"):
-        write_json(manifest_path, migrated)
+    # Read, migrate and write under one lock, so a concurrent add cannot be
+    # overwritten by a migration of the copy read before it.
+    lock = FileLock(manifest_path.parent / ".lock") if args.write else None
+    if lock is not None:
+        lock.__enter__()
+    try:
+        manifest = load_json(manifest_path)
+        original_version = manifest.get("manifestVersion")
+        migrated, changes = migrate_safely(manifest)
+        if original_version == MANIFEST_VERSION:
+            print("Manifest is already at version " + MANIFEST_VERSION + "; nothing to migrate.")
+            return 0
+        print("Migration " + str(original_version) + " -> " + MANIFEST_VERSION)
+        print("Added or changed " + str(len(changes)) + " key(s):")
+        for change in changes:
+            print("  + " + change)
+        if not args.write:
+            print("Dry run. Re-run with --write to persist.")
+            return 0
+        commit_manifest(manifest_path, migrated)
+    finally:
+        if lock is not None:
+            lock.__exit__(None, None, None)
     print("Wrote " + str(manifest_path))
     return 0
 
@@ -4237,21 +4534,20 @@ def summarize(manifest):
             "feedback": len(as_list(manifest.get("feedback"))),
             "agents": len(as_list(manifest.get("agents"))),
         },
-        "capabilityStatus": dict(Counter(cap.get("status", "unknown") for cap in capabilities)),
-        "capabilityKind": dict(Counter(cap.get("kind", "unknown") for cap in capabilities)),
-        "capabilityRisk": dict(Counter(cap.get("risk", "unknown") for cap in capabilities)),
-        "reviewStatus": dict(Counter(cap.get("reviewStatus", "unreviewed") for cap in capabilities)),
+        "capabilityStatus": dict(Counter(label(cap.get("status")) for cap in capabilities)),
+        "capabilityKind": dict(Counter(label(cap.get("kind")) for cap in capabilities)),
+        "capabilityRisk": dict(Counter(label(cap.get("risk")) for cap in capabilities)),
+        "reviewStatus": dict(
+            Counter(label(cap.get("reviewStatus"), "unreviewed") for cap in capabilities)
+        ),
         "qualityGates": dict(
-            Counter(
-                gate.get("status", "unknown")
-                for _p, gate in iter_named(manifest, "qualityGates")
-            )
+            Counter(label(gate.get("status")) for _p, gate in iter_named(manifest, "qualityGates"))
         ),
         "gaps": dict(
-            Counter(gap.get("status", "unknown") for _p, gap in iter_named(manifest, "gaps"))
+            Counter(label(gap.get("status")) for _p, gap in iter_named(manifest, "gaps"))
         ),
         "decisions": dict(
-            Counter(item.get("status", "unknown") for _p, item in iter_named(manifest, "decisions"))
+            Counter(label(item.get("status")) for _p, item in iter_named(manifest, "decisions"))
         ),
         "notApplicable": sum(1 for cap in capabilities if cap.get("status") == "not-applicable"),
         "declaredStatic": [
@@ -4346,6 +4642,17 @@ def cmd_coverage(args):
 
 
 def cmd_emit(args):
+    if args.format == "rule-matrix":
+        text = emit_rule_matrix()
+        if args.out:
+            out_path = Path(args.out).resolve()
+            write_text_file(out_path, text)
+            print("Wrote " + str(out_path))
+        else:
+            sys.stdout.write(text)
+        return 0
+    if not args.manifest:
+        raise ManifestError("--manifest is required for --format " + args.format)
     manifest_path = resolve_manifest_path(args.manifest)
     manifest = load_json(manifest_path)
     profile = active_profile(manifest, None)[0]
@@ -4353,14 +4660,18 @@ def cmd_emit(args):
     # hand-wrote the manifest, ran only emit, and shipped a gap report while 83
     # validation errors sat invisible -- emit is where agents actually engage,
     # so emit is where health has to show. Advisory only; exit code unchanged.
+    # A gap report is judged the way a release is, so its health line and its
+    # table use the same severities; the other documents are working notes.
+    health_phase = "release" if args.format == "gap-report" else "plan"
     health = validate_manifest(
-        manifest, "plan", project_root_of(manifest_path, manifest), profile, manifest_path.parent
+        manifest, health_phase, project_root_of(manifest_path, manifest), profile,
+        manifest_path.parent,
     )
     if health.errors:
         stderr(
             "WARN: this manifest has " + str(len(health.errors))
-            + " validation error(s) at plan phase. The report below may rest on "
-            "malformed data. Run `validate --phase plan` for the list."
+            + " validation error(s) at " + health_phase + " phase. The report below may rest on "
+            "malformed data. Run `validate --phase " + health_phase + "` for the list."
         )
     if not as_list(manifest.get("feedback")):
         stderr(
@@ -4369,12 +4680,16 @@ def cmd_emit(args):
         )
     text = EMITTERS[args.format](manifest, profile)
     if args.format == "gap-report" and (health.errors or health.warnings):
+        caveat = (
+            " A gap report from a manifest that does not validate is a sketch, not a record."
+            if health.errors
+            else ""
+        )
         text = text.replace(
             "# Gap report\n",
             "# Gap report\n\nManifest health: " + str(len(health.errors))
             + " error(s), " + str(len(health.warnings))
-            + " warning(s) at plan validation. A gap report from a manifest that "
-            "does not validate is a sketch, not a record.\n",
+            + " warning(s) at release validation." + caveat + "\n",
             1,
         )
     if args.out:
@@ -4427,7 +4742,7 @@ def cmd_add(args):
             entry_id = text_of(entry.get("id"))
             if not entry_id:
                 raise ManifestError("the added " + kind + " needs an id")
-            if not ID_PATTERN.match(entry_id):
+            if not ID_PATTERN.fullmatch(entry_id):
                 raise ManifestError("id '" + entry_id + "' must be lowercase alphanumeric with dots or hyphens")
             if entry_id in existing:
                 raise ManifestError(kind + " '" + entry_id + "' already exists" + duplicate_where)
@@ -4448,7 +4763,7 @@ def cmd_add(args):
             for item in introduced:
                 stderr("  ERROR: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
             return 2
-        write_json(manifest_path, manifest)
+        commit_manifest(manifest_path, manifest)
     for entry in entries:
         print("Added " + kind + " '" + text_of(entry.get("id")) + "' to " + str(manifest_path))
     report_new_warnings(warned)
@@ -4491,22 +4806,26 @@ def cmd_set(args):
         manifest = load_json(manifest_path)
         before = json.loads(json.dumps(manifest))
         container, key = resolve_path_parent(manifest, segments)
-        previous = container.get(key)
+        previous = container[key] if isinstance(container, list) else container.get(key)
         value = coerce_value(args.value, previous)
         if key in PATH_LIST_FIELDS and isinstance(value, list):
             value, changed = normalise_path_list(value)
             if changed:
                 stderr("note: rewrote backslashes as '/' in " + str(changed) + " path(s) of " + args.path)
         container[key] = value
+        renamed = None
+        if key == "id" and isinstance(previous, str) and previous and isinstance(value, str) and previous != value:
+            renamed = (previous, value)
         introduced, warned = new_findings(
-            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent,
+            renamed=renamed,
         )
         if introduced and not args.allow_invalid:
             stderr("Refusing to write: the change introduces validation errors.")
             for item in introduced:
                 stderr("  ERROR: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
             return 2
-        write_json(manifest_path, manifest)
+        commit_manifest(manifest_path, manifest)
     print(args.path + ": " + json.dumps(previous) + " -> " + json.dumps(value))
     report_new_warnings(warned)
     report_overridden(introduced, args.allow_invalid, manifest, manifest_path)
@@ -4528,6 +4847,28 @@ def find_agent(manifest, agent_id):
     return None
 
 
+def manifest_holder(manifest, capability, requester):
+    """Another ACTIVE agent that the manifest says holds this capability, or None.
+
+    The lock files are untracked, so on a fresh clone -- or after `locks/` was
+    cleaned -- a claim decided from them alone let any agent take a capability
+    another agent visibly owned.
+    """
+    cid = text_of(capability.get("id"))
+    for _path, agent in iter_named(manifest, "agents"):
+        agent_id = text_of(agent.get("id"))
+        if agent_id == requester or text_of(agent.get("status")) != "active":
+            continue
+        if cid in as_list(agent.get("ownsCapabilities")):
+            return agent_id
+    owner = text_of(capability.get("owner"))
+    if owner and owner != requester:
+        record = find_agent(manifest, owner)
+        if record is not None and text_of(record.get("status")) == "active":
+            return owner
+    return None
+
+
 def cmd_claim(args):
     manifest_path = resolve_manifest_path(args.manifest)
     if args.force_steal and not text_of(args.reason):
@@ -4539,6 +4880,7 @@ def cmd_claim(args):
     stolen = []
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
+        before = json.loads(json.dumps(manifest))
         caps = capability_index(manifest)
         unknown = [cid for cid in args.capability if cid not in caps]
         if unknown:
@@ -4559,6 +4901,15 @@ def cmd_claim(args):
                 + ". Use a different agent id for the review."
             )
             return 2
+        for cid in args.capability:
+            holder = manifest_holder(manifest, caps[cid][2], args.agent)
+            if holder and not args.force_steal:
+                stderr(
+                    "Capability '" + cid + "' is held by agent '" + holder + "' according to the "
+                    "manifest. Coordinate with it, wait for its release-claim, or re-run with "
+                    "--force-steal --reason '<why>'."
+                )
+                return 3
         for cid in args.capability:
             lock_path = lock_dir / lock_file_name(cid)
             owner = None
@@ -4624,6 +4975,18 @@ def cmd_claim(args):
                 if not recorded or superseded:
                     capability["implementedBy"] = args.agent
         record["ownsCapabilities"] = owned
+        for cid, victim in stolen:
+            # The victim must stop believing it holds the capability, or its own
+            # release-claim can never reach `done`.
+            victim_record = find_agent(manifest, text_of(victim)) if victim else None
+            if victim_record is not None:
+                victim_record["ownsCapabilities"] = [
+                    v for v in as_list(victim_record.get("ownsCapabilities")) if v != cid
+                ]
+                history = [v for v in as_list(victim_record.get("previouslyOwned")) if isinstance(v, str)]
+                if cid not in history:
+                    history.append(cid)
+                victim_record["previouslyOwned"] = history
         if stolen:
             note = text_of(record.get("notes"))
             steal_note = "; ".join(
@@ -4631,7 +4994,28 @@ def cmd_claim(args):
                 for cid, owner in stolen
             )
             record["notes"] = (note + " | " if note else "") + steal_note
-        write_json(manifest_path, manifest)
+            taken = [v for v in as_list(record.get("stolenFrom")) if isinstance(v, str)]
+            taken.extend(
+                cid + " from " + (owner or "unknown") + ": " + text_of(args.reason)
+                for cid, owner in stolen
+            )
+            record["stolenFrom"] = taken
+        # The claim writes the manifest, so it goes through the same guard as add
+        # and set: a claim must not be the way to smuggle in an invalid record.
+        introduced, _warned = new_findings(
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent
+        )
+        if introduced:
+            for path in acquired:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            stderr("Refusing to claim: the claim would introduce validation errors.")
+            for item in introduced:
+                stderr("  ERROR: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
+            return 2
+        commit_manifest(manifest_path, manifest)
     for cid, owner in stolen:
         print("Stole claim on " + cid + " from " + (owner or "unknown"))
     print("Agent " + args.agent + " (" + args.role + ") claims: " + ", ".join(args.capability))
@@ -4643,6 +5027,7 @@ def cmd_release_claim(args):
     lock_dir = manifest_path.parent / "locks"
     released = []
     skipped = []
+    not_held = []
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
         caps = capability_index(manifest)
@@ -4652,6 +5037,10 @@ def cmd_release_claim(args):
         for cid in targets:
             lock_path = lock_dir / lock_file_name(cid)
             owner = ""
+            entry = caps.get(cid)
+            held_in_manifest = cid in owned or (
+                entry is not None and text_of(entry[2].get("owner")) == args.agent
+            )
             if lock_path.exists():
                 try:
                     owner = lock_path.read_text(encoding="utf-8").strip()
@@ -4664,8 +5053,12 @@ def cmd_release_claim(args):
                     lock_path.unlink()
                 except OSError:
                     pass
+            elif not held_in_manifest:
+                # Releasing something this agent never held used to report
+                # "Released: <it>" and exit 0.
+                not_held.append(cid)
+                continue
             released.append(cid)
-            entry = caps.get(cid)
             # `owner` says who holds it now and is blanked; `implementedBy` says who
             # built it and never is. Releasing used to erase the only record of the
             # implementer, after which the same agent could review its own work.
@@ -4681,11 +5074,13 @@ def cmd_release_claim(args):
             record["previouslyOwned"] = history
             if not remaining:
                 record["status"] = "done"
-        write_json(manifest_path, manifest)
+        commit_manifest(manifest_path, manifest)
     for cid, owner in skipped:
         stderr("Skipped " + cid + ": lock is held by '" + owner + "'")
+    for cid in not_held:
+        stderr("Skipped " + cid + ": agent '" + args.agent + "' does not hold it")
     print("Released: " + (", ".join(released) if released else "nothing"))
-    return 3 if skipped else 0
+    return 3 if (skipped or not_held) else 0
 
 
 def feedback_content_hash(item):
@@ -4776,7 +5171,7 @@ def cmd_harvest(args):
             item["status"] = "promoted"
             item["promotedHash"] = chash
         if flipped:
-            write_json(manifest_path, manifest)
+            commit_manifest(manifest_path, manifest)
     print("Harvested " + str(len(harvested)) + " observation(s) from project '" + project + "'")
     print("Store: " + str(store))
     if not text_of(args.date):
@@ -5269,7 +5664,13 @@ class VersionAction(argparse.Action):
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Model, validate, and audit admin-console capability manifests"
+        description="Model, validate, and audit admin-console capability manifests",
+        epilog=(
+            "exit codes: 0 ok; 1 the manifest was read and has findings at error severity; "
+            "2 usage or IO failure, including an add/set/claim refused by the write guard "
+            "(the manifest was left unmodified); 3 capability claim conflict"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--version", action=VersionAction,
@@ -5278,7 +5679,15 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="Create .admin-console/manifest.json")
-    init_parser.add_argument("--project-root", default=".")
+    init_parser.add_argument(
+        "--project-root", default=".",
+        help="the repository the console administers; relative evidence paths resolve against it",
+    )
+    init_parser.add_argument(
+        "--manifest", metavar="PATH",
+        help="where to write the manifest (default <project-root>/.admin-console/manifest.json); "
+             "use one per console in a monorepo",
+    )
     init_parser.add_argument("--name", required=True)
     init_parser.add_argument("--archetype", action="append", default=[])
     init_parser.add_argument("--profile", choices=PROFILES, default=DEFAULT_PROFILE)
@@ -5317,13 +5726,19 @@ def build_parser():
 
     coverage_parser = subparsers.add_parser("coverage", help="Audit structural gaps only")
     coverage_parser.add_argument("--manifest", required=True)
-    coverage_parser.add_argument("--project-root")
+    coverage_parser.add_argument(
+        "--project-root",
+        help="accepted so validate and coverage can share arguments; coverage is structural "
+             "and reads no files, so it is not used",
+    )
     coverage_parser.add_argument("--profile", choices=PROFILES)
     coverage_parser.set_defaults(func=cmd_coverage)
 
     emit_parser = subparsers.add_parser("emit", help="Generate a working document from the manifest")
-    emit_parser.add_argument("--manifest", required=True)
-    emit_parser.add_argument("--format", required=True, choices=sorted(EMITTERS))
+    emit_parser.add_argument(
+        "--manifest", help="the manifest to render (not needed for --format rule-matrix)"
+    )
+    emit_parser.add_argument("--format", required=True, choices=sorted(EMITTERS) + ["rule-matrix"])
     emit_parser.add_argument("--out")
     emit_parser.set_defaults(func=cmd_emit)
 
@@ -5343,25 +5758,45 @@ def build_parser():
     add_parser.set_defaults(func=cmd_add)
 
     set_parser = subparsers.add_parser("set", help="Set one field by path expression")
-    set_parser.add_argument("--manifest", required=True)
-    set_parser.add_argument("--path", required=True)
-    set_parser.add_argument("--value", required=True)
-    set_parser.add_argument("--allow-invalid", action="store_true")
+    set_parser.add_argument("--manifest", required=True, help="path to manifest.json")
+    set_parser.add_argument(
+        "--path", required=True,
+        help="field to set, e.g. 'entities[user].capabilities[user.suspend].status' or a path "
+             "copied from `validate` output (manifest.roles[0].name, ...evidence[0])",
+    )
+    set_parser.add_argument(
+        "--value", required=True,
+        help="new value, typed by the field's current type. Lists take comma-separated text or "
+             "JSON; objects take JSON; strings are stored as written",
+    )
+    set_parser.add_argument(
+        "--allow-invalid", action="store_true",
+        help="write even if the change introduces validation errors (they are listed)",
+    )
     set_parser.set_defaults(func=cmd_set)
 
     claim_parser = subparsers.add_parser("claim", help="Take exclusive ownership of capabilities")
-    claim_parser.add_argument("--manifest", required=True)
-    claim_parser.add_argument("--agent", required=True)
-    claim_parser.add_argument("--role", required=True, choices=AGENT_ROLES)
-    claim_parser.add_argument("--capability", action="append", required=True)
-    claim_parser.add_argument("--force-steal", action="store_true")
-    claim_parser.add_argument("--reason")
+    claim_parser.add_argument("--manifest", required=True, help="path to manifest.json")
+    claim_parser.add_argument("--agent", required=True, help="your agent id (registered on first claim)")
+    claim_parser.add_argument("--role", required=True, choices=AGENT_ROLES, help="the pass you are running")
+    claim_parser.add_argument(
+        "--capability", action="append", required=True,
+        help="capability id to claim; repeat for several",
+    )
+    claim_parser.add_argument(
+        "--force-steal", action="store_true",
+        help="take a capability another agent holds; requires --reason and is recorded on both agents",
+    )
+    claim_parser.add_argument("--reason", help="why the claim is being stolen (required with --force-steal)")
     claim_parser.set_defaults(func=cmd_claim)
 
     release_parser = subparsers.add_parser("release-claim", help="Release capability ownership")
-    release_parser.add_argument("--manifest", required=True)
-    release_parser.add_argument("--agent", required=True)
-    release_parser.add_argument("--capability", action="append", default=[])
+    release_parser.add_argument("--manifest", required=True, help="path to manifest.json")
+    release_parser.add_argument("--agent", required=True, help="the agent releasing its claims")
+    release_parser.add_argument(
+        "--capability", action="append", default=[],
+        help="capability to release; repeat for several; omit to release everything this agent holds",
+    )
     release_parser.set_defaults(func=cmd_release_claim)
 
     lesson_parser = subparsers.add_parser("lesson", help="Record or list skill lessons")
@@ -5471,6 +5906,11 @@ def main():
         return 0
     except KeyboardInterrupt:
         stderr("Interrupted")
+        return 2
+    except OSError as exc:
+        # A read-only file, a full disk, a path that is a file: usage or IO
+        # failures, never a traceback.
+        stderr("ERROR: " + type(exc).__name__ + ": " + str(exc))
         return 2
 
 

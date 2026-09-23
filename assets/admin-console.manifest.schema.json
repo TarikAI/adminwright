@@ -32,6 +32,10 @@
       "$ref": "#/$defs/profile",
       "description": "Scales gate severity. Choosing one is a recorded decision, not a default."
     },
+    "projectRoot": {
+      "type": "string",
+      "description": "Repository root that relative evidence paths resolve against, written relative to the folder holding this manifest ('..' for .admin-console/manifest.json). Absent means '..'. Record it when the manifest lives elsewhere, e.g. one console per app in a monorepo."
+    },
     "platform": {
       "type": "object",
       "required": [
@@ -975,7 +979,26 @@
           },
           "notes": {
             "type": "string"
+          },
+          "stolenFrom": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Written by `claim --force-steal`: each capability this agent took from another, with who held it and the reason given."
           }
+        }
+      }
+    },
+    "validatedWith": {
+      "type": "object",
+      "description": "Written by add, set, claim, release-claim, harvest and migrate: the rule-set hash and skill commit that last touched this manifest, so an auto-updated install can tell which rules judged the edit.",
+      "properties": {
+        "ruleset": {
+          "type": "string"
+        },
+        "skill": {
+          "type": "string"
         }
       }
     }

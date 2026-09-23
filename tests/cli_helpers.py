@@ -154,6 +154,12 @@ class TempProject(unittest.TestCase):
             "volumes": {"entityCounts": "40k users", "peakConcurrentOperators": "6",
                         "retentionHorizon": "7 years"},
         })
+        for decision in data["decisions"]:
+            if decision["id"] == "dec.profile":
+                # init records the profile as an assumed decision; an honest build
+                # confirms it with the owner.
+                decision["status"] = "confirmed"
+                decision["reason"] = "Internal staff only, no regulated data (confirmed by the owner)"
         data["roles"] = [{"id": "ops", "name": "Operations", "responsibilities": ["Admin"],
                           "scopes": ["all accounts"], "mfaRequired": True,
                           "separationOfDuties": []}]

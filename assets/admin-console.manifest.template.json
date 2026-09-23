@@ -2,6 +2,7 @@
   "$schema": "./admin-console.manifest.schema.json",
   "manifestVersion": "2.0",
   "profile": "standard",
+  "projectRoot": "..",
   "platform": {
     "id": "",
     "name": "",
