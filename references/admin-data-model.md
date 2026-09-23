@@ -18,7 +18,6 @@
 14. Immutability rules
 15. Manifest mapping
 16. Profile adaptation
-17. Sources
 
 ## How to use this model
 

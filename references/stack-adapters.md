@@ -73,8 +73,8 @@ Every adapter below resolves the same seven questions. So must any stack not lis
 
 | Seam | Landing point |
 |---|---|
-| Admin gateway | A dedicated `app/admin/` route group with its own layout and middleware matcher |
-| Authorization | In the Server Action or Route Handler body, and in every data-access function. Never in `middleware.ts` alone |
+| Admin gateway | A dedicated `app/admin/` route group with its own layout and `proxy.ts` matcher |
+| Authorization | In the Server Action or Route Handler body, and in every data-access function. Never in `proxy.ts` alone |
 | Commands | Server Actions delegating to a domain service; the action is transport, not logic |
 | Jobs | An external queue (BullMQ, Inngest, QStash). Serverless request timeouts make in-request work unsafe |
 | Audit | Inside the domain service, in the same database transaction as the mutation |
@@ -83,9 +83,14 @@ Every adapter below resolves the same seven questions. So must any stack not lis
 
 Traps:
 
-- `middleware.ts` runs before the request reaches the handler but is easy to bypass through
-  matcher gaps, and it cannot see the row being requested. It is a routing convenience, not
-  the authorization point.
+- `proxy.ts` runs before the request reaches the handler but only where its matcher says, and
+  it cannot see the row being requested. Next.js 16 renamed the `middleware.ts` file
+  convention to `proxy.ts` (the old name is deprecated; a `middleware-to-proxy` codemod
+  migrates it, and Proxy now defaults to the Node.js runtime), so read the pinned `next`
+  version first: below 16 the file is still `middleware.ts`. Server Function calls are POSTs
+  to the route that uses them, so a matcher that excludes a path skips them, and moving an
+  action to another route can silently remove coverage. It is a routing convenience, not the
+  authorization point.
 - Server Actions are public HTTP endpoints. An action that is only rendered for admins is
   still callable by anyone who has the action id. Authorize inside every action body.
 - `"use client"` boundaries silently pull data into the browser bundle. Any field excluded by
@@ -135,12 +140,18 @@ Traps:
 | Seam | Landing point |
 |---|---|
 | Admin gateway | `django.contrib.admin`, or a separate app for custom operator workflows |
-| Authorization | Permission classes and object-level checks; `has_object_permission` for rows |
+| Authorization | Django admin: `ModelAdmin.has_change_permission(request, obj)` and its `view` and `delete` siblings, per row. APIs on Django REST framework: `permission_classes`, whose `has_permission` guards the view and `has_object_permission` the row |
 | Commands | Service functions; keep business rules out of `ModelAdmin` |
 | Jobs | Celery or equivalent |
 | Audit | `LogEntry` for admin actions, plus a domain audit table for business commands |
 | Tenant scope | Explicit queryset filtering in `get_queryset`, per view and per admin class |
 | Lists | `list_display`, `list_filter`, `search_fields`, with `select_related` to avoid N+1 |
+
+Trap: in Django REST framework `has_object_permission` runs only when the view calls
+`get_object()` or `check_object_permissions()`. The generic views do not apply it to each
+instance of a list, so scope the queryset in `get_queryset` as well. It is a DRF method, not
+a Django one; Django admin's per-row hook is `ModelAdmin.has_change_permission(request, obj)`,
+and `has_add_permission(request)` takes no object.
 
 Django admin's real limits, stated plainly: it is a model editor, not a workflow tool. It is
 excellent for internal CRUD by trusted staff and poor at lifecycle commands with
@@ -185,20 +196,22 @@ deny-by-default with explicit opt-in over allow-by-default with opt-out.
 
 | Seam | Landing point |
 |---|---|
-| Admin gateway | A server-side API you control; never the anon client for privileged operations |
+| Admin gateway | A server-side API you control; never the publishable (`anon`) client for privileged operations |
 | Authorization | Row Level Security as the backstop, plus explicit server-side policy for admin actions |
 | Commands | Postgres functions or a server-side service; not client calls |
-| Jobs | Edge functions with an external scheduler, or a separate worker |
+| Jobs | Supabase Cron (`pg_cron`) runs SQL or database functions on a schedule and can call an Edge Function over HTTP; long or retryable work still belongs on a queue or a separate worker, because scheduled jobs are bounded (Supabase advises at most 8 concurrent jobs, each under 10 minutes) |
 | Audit | A trigger or an explicit insert in the same transaction |
 | Tenant scope | RLS predicates on tenant columns, verified by test |
 | Lists | PostgREST filters server-side, with the policy applied by the database |
 
 The critical warning: RLS is a data-layer backstop, not an admin authorization layer. It
 answers "may this JWT read this row", not "may this operator perform this command under
-these conditions with this obligation". Admin operations frequently need the service role
-key, which bypasses RLS entirely — at that moment every guarantee you had is gone and the
-only remaining control is the server-side policy you wrote. Never put the service role key in
-anything the browser can reach.
+these conditions with this obligation". Admin operations frequently need a secret key, which
+bypasses RLS entirely — at that moment every guarantee you had is gone and the only remaining
+control is the server-side policy you wrote. Supabase now issues `sb_publishable_...` keys
+(safe for clients) and `sb_secret_...` keys (backend only), and has said it is deprecating the
+legacy `anon` and `service_role` keys by the end of 2026, so record which generation the
+project uses. Never put a secret or `service_role` key in anything the browser can reach.
 
 ## Go
 

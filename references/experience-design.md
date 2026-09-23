@@ -43,7 +43,7 @@ Consult the canonical sources for the pattern you are building. Read the source;
 | IBM Carbon | The data table contract: toolbar, batch actions, selection, sorting, expansion, skeletons, density |
 | Atlassian Design System | Admin conventions: nav hierarchy, inline edit, drawer versus modal, section messages, transient versus persistent messaging |
 | Shopify Polaris | Admin conventions: index tables, index filters, saved views, bulk actions, page headers with primary and secondary actions |
-| Dashboard Design Patterns | Dashboard information design: eight pattern groups derived from a systematic review of 144 dashboards, plus dashboard genre (analytical, operational, narrative, embedded) |
+| Dashboard Design Patterns | Dashboard information design: eight pattern groups (data information, meta information, visual representations, interactions, screenspace, structure, page layout, color) from a systematic review of 144 dashboards, plus six dashboard genres (static, magazine, infographic, embedded mini, analytic, repository) |
 | WAI-ARIA Authoring Practices Guide (APG) | The keyboard contract for every composite widget you ship |
 
 APG is the source for keyboard behavior. This is not optional detail. "Make it keyboard accessible" without a named pattern contract produces interfaces where arrow keys work in one table and not the next, Escape closes one drawer and submits another, and no operator can build a motor habit. Pick the APG pattern by name, implement its full keyboard interaction table, and name the pattern in the component's own documentation.
@@ -56,7 +56,7 @@ There is a shape that gets produced regardless of domain: left sidebar, four KPI
 
 Also banned unless the scene demands them: a metric card no one can drill into, a chart with no threshold or comparison, "Welcome back" greetings, decorative illustrations in the working area, and a nav reading Dashboard / Users / Settings for a platform that is not about users and settings.
 
-Derive the design from the scene and state the derivation. Record it in `crossCutting.experience` with a matching `decisions[]` entry naming density, landing surface, action placement, and reason.
+Derive the design from the scene and state the derivation. Record it as a `decisions[]` entry naming density, landing surface, action placement, and reason, with the document that holds the derivation in the decision's `evidence`, and cite that document in `crossCutting.experience.evidence` (`crossCutting.experience` holds flags and evidence paths, not prose).
 
 | Scene fact | Consequence |
 |---|---|
@@ -318,7 +318,7 @@ Never leave a frozen view looking live. Block freshness-dependent high-risk comm
 
 ## System states and feedback
 
-Cover states intentionally. Declare the covered set in `screens[].states`.
+Cover states intentionally. Declare the covered set in `screens[].states`. The release gate requires `loading`, `populated`, `error` and `forbidden`, plus `success` when the screen has actions, as [verification.md](verification.md#state-and-data-coverage) states; the rest below are judgment calls per surface.
 
 - Initial loading: structure-preserving skeletons. Empty: what the space represents and the next action. Filtered empty: preserve filters, offer reset.
 - Error: safe next action, correlation ID when useful. Forbidden: distinguish absent permission from missing resource without leaking data.
@@ -340,7 +340,15 @@ Target WCAG 2.2 AA unless a stricter requirement applies. Take keyboard behavior
 - Do not encode status or charts by color alone. Provide sufficient contrast and adequate target size.
 - Announce validation, async progress, and results appropriately — live counts must not announce on every tick.
 - Respect reduced motion and zoom/reflow.
-- Test with keyboard and at least one screen-reader workflow for critical paths; record the result in `screens[].accessibilityStatus`.
+- Test with keyboard and at least one screen-reader workflow for critical paths. Set `screens[].accessibilityStatus` to a status (it is an enum, not a place for results) and put the axe or browser log in `crossCutting.experience.evidence` or `qualityGates[accessibility].evidence`.
+
+WCAG 2.2 added criteria that dense consoles break most often. Check each on the critical flows:
+
+- **2.4.11 Focus Not Obscured (Minimum), AA:** a focused control is not entirely hidden by author content. Sticky headers, sticky filter bars, bottom action bars, banners and open drawers cover the focused row; tab through a long table to prove it.
+- **2.5.7 Dragging Movements, AA:** anything done by dragging (column reorder, board moves, row ordering, file drop) also works with a single pointer or the keyboard, without dragging.
+- **2.5.8 Target Size (Minimum), AA:** pointer targets are at least 24 by 24 CSS pixels unless spacing, an equivalent control, an inline placement, a user-agent control or essentiality applies. Icon buttons and checkboxes in compact density are the usual failures.
+- **3.3.7 Redundant Entry, A:** information entered earlier in a multi-step command is auto-populated or selectable, not asked for again.
+- **3.3.8 Accessible Authentication (Minimum), AA:** no step of sign-in, step-up or recovery depends on a cognitive function test (remembering a password, solving a puzzle) unless an alternative or a mechanism such as a password manager or paste is available.
 
 ## Responsive behavior
 
@@ -408,4 +416,4 @@ For each major role and workflow verify:
 - The result and audit history can be verified afterward.
 - The same component and terminology mean the same thing across modules.
 - Accessibility, responsive behavior, localization, and large datasets are tested with realistic content.
-- The design derivation is recorded in `crossCutting.experience` and traces to a scene fact.
+- The design derivation is a `decisions[]` entry cited from `crossCutting.experience.evidence`, and it traces to a scene fact.

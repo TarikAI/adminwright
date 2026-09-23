@@ -70,22 +70,19 @@ python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <project-ro
 
 Use `py -3` or `python3` if `python` is not on PATH.
 
-The plan is derived from what the manifest already declares:
+The emitter derives these, and only these, from the manifest:
 
-| Manifest source | Fixture requirement produced |
+| Manifest source | Fixture requirement written |
 |---|---|
-| `entities[].lifecycleStates` | One record per state, per tenant scope |
-| `entities[].lifecycleTransitions[].from` | A record sitting in every precondition state a command needs |
-| `entities[].tenantScoped: true` | A second tenant with colliding names and adjacent identifiers |
-| `entities[].sensitivity` | A record carrying each sensitivity class, plus a redacted instance |
-| `roles[]` | One operator account per role, including a role with no access to the surface |
-| `screens[].states` | A fixture that reaches each declared state |
-| `capability.entityStates.from` | A record eligible for the command, and one deliberately ineligible |
-| `capability.risk: high\|critical` | A record reserved for the negative and replay tests |
-| `integrations[]` | A mismatch on each side of the boundary awaiting reconciliation |
-| `workQueues[].sla` | Records inside, near, and past the SLA threshold |
+| `roles[]` | A role-accounts table: one operator account per role, with its scopes, MFA flag and responsibilities |
+| `entities[].lifecycleStates` | One `state:<name>` row per state: at least one record resting in it |
+| every entity | Six fixed cases: `empty`, `large`, `long-text`, `missing-optional`, `conflict`, `partial-failure` |
+| `entities[].tenantScoped: true` | A `cross-tenant` row: records owned by a second tenant that must never be visible |
+| `entities[].sensitivity` of `confidential` or `restricted` | A `sensitive` row: records carrying the fields that must be redacted or access-logged |
+| `integrations[]` | One row per integration: provider timeout, duplicate delivery, and reconciliation mismatch |
+| `workQueues[]` | One row per queue: a backlog past its SLA, an empty queue, and one item claimed by another operator |
 
-The plan names required fixtures. It does not write them. Implement each one in the project's own fixture mechanism, then record the fixture path against the capability so the mapping in section 6 is checkable.
+The plan names required fixtures. It does not write them, and it does not read transitions, screen states, capability `entityStates`, `risk` or queue SLA values. Add those by hand from the manifest: a record in every precondition state a command needs (`entityStates.from`, a transition's `from`) and one deliberately ineligible; a fixture that reaches each state in `screens[].states` (section 6); for `risk: high` or `critical` capabilities, a record reserved for the negative and replay tests; and records inside, near, and past each queue's SLA. Implement each in the project's own fixture mechanism.
 
 ## Generating fixtures
 
@@ -103,13 +100,13 @@ Common mechanisms; see [stack-adapters.md](stack-adapters.md) for the project's 
 |---|---|---|
 | Ruby on Rails | `factory_bot`, plus fixtures for pinned cases | https://github.com/thoughtbot/factory_bot , https://guides.rubyonrails.org/testing.html |
 | Django | `factory_boy`, plus fixture loading in test cases | https://factoryboy.readthedocs.io/en/stable/ , https://docs.djangoproject.com/en/stable/topics/testing/tools/ |
-| Laravel | Model factories and seeder classes | https://laravel.com/docs/seeding |
+| Laravel | Model factories and seeder classes | https://laravel.com/framework/docs/seeding |
 | Prisma | The integrated seed command | https://www.prisma.io/docs/orm/prisma-migrate/workflows/seeding |
 | Other stacks | Use the stack's canonical fixture or seeding mechanism. Research it and record the source in `platform.researchSources[]` rather than inventing one. | |
 
 **The no-mock rule and fixtures do not conflict.** The prohibition on mock, placeholder, and hard-coded values governs the release path. Fixture files, and every file listed under `tests[]` or `policyTests`, are test-path artifacts and legitimately contain fabricated values, so the validator never scans their content for placeholder words (it checks that they look like tests and assert something). The boundary is enforced by where the path appears: a fixture path must never be named in `entities[].sourceOfTruth`, `capability.dataBinding`, `screens[].dataSources`, or `integrations[].sourceOfTruth`. If one is, the placeholder scan is working correctly and the binding is the defect.
 
-Only evidence files (run output listed under `evidence[]`, gate evidence, `crossCutting` evidence) have their content scanned, by word: `mock`, `fake`, `stub`, `dummy`, `placeholder`, `lorem`, `todo`, `tbd`, `fixme`, `wip`, `xxx` and "not implemented". `sample` and `random` are ordinary words in a run log and are not scanned there, and framework idioms (`jest.mock(`, `vi.mock(`, `sinon.stub(`, `unittest.mock`, `getByPlaceholderText`, `NotImplementedError`, a `placeholder=` attribute) are skipped. Manifest implementation fields get the stricter scan, which also matches these words inside identifiers such as `gmockRepositoryImpl`. A captured log that legitimately quotes one is registered in `declaredStatic[]` with the path `<evidence path>#content`. Every `placeholder-scan` finding names the token and, for a file, the line.
+Only evidence files (run output listed under `evidence[]`, gate evidence, `crossCutting` evidence, fixed-gap evidence) have their content scanned, by whole word (after camelCase and `_` or `.` splitting): `mock`, `fake`, `stub`, `dummy`, `placeholder`, `lorem`, `demo-only`, `todo`, `tbd`, `fixme`, `coming-soon`, `wip`, `xxx` and "not implemented", with their plurals and inflections. `sample` and `random` are ordinary words in a run log and are not scanned there, and framework idioms (`jest.mock(`, `vi.mock(`, `sinon.stub(`, `unittest.mock`, `getByPlaceholderText`, `NotImplementedError`, a `placeholder=` attribute) are skipped. Manifest implementation fields get the stricter scan: the same words plus `sample` and `random`, and a second pass that matches `mock`, `fake`, `stub`, `dummy`, `placeholder`, `lorem`, `todo`, `fixme`, `tbd`, `not-implemented` and `coming-soon` inside single tokens such as `gmockRepositoryImpl`, judged one whitespace-delimited word at a time so ordinary prose ("nothing left to do") is not a hit. A captured log that legitimately quotes one is registered in `declaredStatic[]` with the path `<evidence path>#content`. Every `placeholder-scan` finding names the token and, for a file, the line.
 
 ## Seed-data safety
 
@@ -148,7 +145,7 @@ Record this mapping per screen. A screen state with no fixture is unverified.
 | Success | An eligible record in a `capability.entityStates.from` state |
 | Async in progress | A partially completed bulk job with items still queued |
 
-State definitions and required coverage are in [experience-design.md](experience-design.md).
+The validator requires `loading`, `populated`, `error` and `forbidden` (plus `success` when the screen has actions), as [verification.md](verification.md#state-and-data-coverage) states; the rest of the table covers what a screen should also handle. State definitions are in [experience-design.md](experience-design.md).
 
 ## Which fixture enables which negative test
 
@@ -176,7 +173,7 @@ Seed data rots faster than code. A lifecycle state added in a migration and not 
 
 - Regenerate the seed plan whenever `entities[]`, `roles[]`, `screens[].states`, or `integrations[]` change, and diff it against the previous plan. Treat a new line in the plan as a required fixture, not a note.
 - Add the regeneration and diff to the build so drift fails a check rather than waiting to be noticed.
-- When a lifecycle state, role, or sensitivity class is added, the fixture is part of the same change. A state with no fixture cannot satisfy the observability and reachability rules at `standard` and `regulated`.
+- When a lifecycle state, role, or sensitivity class is added, the fixture is part of the same change. A state with no fixture is a state no test can reach, however the manifest lists it.
 - When a state is removed, remove its fixture and its screen state together. Orphan fixtures hide dead code.
 - Verify the fixtures still produce the states they claim after any schema migration; a migration that backfills a default can quietly collapse several dimensions into one.
 - Record fixture gaps found during verification as manifest `feedback[]` entries, and promote recurring ones under [skill-evolution.md](skill-evolution.md).

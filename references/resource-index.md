@@ -10,11 +10,12 @@
 6. Accessibility
 7. Security and authorization
 8. Audit, compliance, and privacy
-9. Money movement and idempotency
-10. Observability
-11. Implementation accelerators
-12. Stack documentation
-13. Recording what you consulted
+9. Access control and log management models
+10. Money movement and idempotency
+11. Observability
+12. Implementation accelerators
+13. Stack documentation
+14. Recording what you consulted
 
 ## How to use this index
 
@@ -30,7 +31,7 @@ Two rules:
   the version the project actually pins. These links change; the project's lockfile does not
   lie. See [stack-adapters.md](stack-adapters.md) for how to identify the stack first.
 
-Verified reachable 2026-08-07. A dead link is a defect worth fixing, not a reason to guess.
+Every URL here was fetched on 2026-09-23. A dead link is a defect worth fixing, not a reason to guess.
 
 ## Discovery and user needs
 
@@ -60,10 +61,12 @@ own design system always wins where one exists.
 |---|---|
 | What belongs on a dashboard, and how should it be laid out? | [Dashboard Design Patterns](https://dashboarddesignpatterns.github.io/) |
 
-A research-backed pattern collection covering data, layout, interaction, drill-down,
-multi-page structure, screen space, and visualization choice. Reach for it when designing
-the landing surface. It is the antidote to the card wall: it forces the question of what
-decision each element supports.
+A research-backed pattern collection (Bach et al., IEEE TVCG 2023): eight groups of design
+patterns (data information, meta information, visual representations, interactions,
+screenspace, structure, page layout, color) and six dashboard genres (static, magazine,
+infographic, embedded mini, analytic, repository). Reach for it when designing the landing
+surface. It is the antidote to the card wall: it forces the question of what decision each
+element supports.
 
 ## Tables and high-density interfaces
 
@@ -73,6 +76,7 @@ decision each element supports.
 | What is the required keyboard behavior for a grid? | [WAI-ARIA APG: grid pattern](https://www.w3.org/WAI/ARIA/apg/patterns/grid/) |
 | Which interaction pattern applies to this component? | [WAI-ARIA Authoring Practices](https://www.w3.org/WAI/ARIA/apg/patterns/) |
 | How do I mark up a complex table? | [W3C tables tutorial](https://www.w3.org/WAI/tutorials/tables/) |
+| Which headless primitives can I build a data grid on? | [TanStack Table](https://tanstack.com/table/latest) |
 
 Carbon covers search, sorting, expansion, filtering, batch actions, pagination, loading, and
 accessibility as one connected contract. The ARIA APG is the source for keyboard behavior:
@@ -86,6 +90,7 @@ Read the pattern before building the component, not after the accessibility audi
 |---|---|
 | What is the conformance target? | [WCAG 2.2](https://www.w3.org/TR/WCAG22/) |
 | What does this success criterion require in practice? | [WCAG 2.2 quick reference](https://www.w3.org/WAI/WCAG22/quickref/) |
+| What is new in 2.2, and at which level? | [What's new in WCAG 2.2](https://www.w3.org/WAI/standards-guidelines/wcag/new-in-22/) |
 
 Target WCAG 2.2 AA unless a stricter requirement applies. The quickref is the working
 document; the specification is the authority when they appear to disagree. Automated
@@ -96,11 +101,14 @@ in [verification.md](verification.md) are not optional extras.
 
 | Question | Source |
 |---|---|
-| What security requirements apply at this assurance level? | [OWASP ASVS](https://owasp.org/www-project-application-security-verification-standard/) |
+| What security requirements apply at this assurance level? | [OWASP ASVS](https://owasp.org/projects/ASVS/) |
 | What are the most common classes of failure? | [OWASP Top 10](https://owasp.org/www-project-top-ten/) |
 | How should authorization be designed and enforced? | [OWASP Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) |
 | What should be logged, and what must never be? | [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) |
 | Which second factor is appropriate for privileged roles? | [OWASP MFA Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Multifactor_Authentication_Cheat_Sheet.html) |
+| How do lockout, throttling, and uniform sign-in responses work? | [OWASP Authentication Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html) |
+| How do I keep the server from fetching operator-supplied URLs unsafely? | [OWASP SSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html) |
+| How do I defend cookie-authenticated routes against CSRF? | [OWASP CSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html) |
 
 ASVS is the checklist to select a level against and verify. The Authorization cheat sheet is
 the one to read before designing the policy layer: least privilege, deny by default,
@@ -118,6 +126,7 @@ replace it.
 | What must a subject access request return? | [GDPR Article 15](https://gdpr-info.eu/art-15-gdpr/) |
 | What does erasure actually require? | [GDPR Article 17](https://gdpr-info.eu/art-17-gdpr/) |
 | What processing records must exist? | [GDPR Article 30](https://gdpr-info.eu/art-30-gdpr/) |
+| What do SCIM `active` and `DELETE` mean for a deprovisioned user? | [RFC 7643 (schema)](https://www.rfc-editor.org/rfc/rfc7643.html), [RFC 7644 (protocol)](https://www.rfc-editor.org/rfc/rfc7644.html) |
 
 In NIST SP 800-53, the AC (access control) and AU (audit and accountability) families are the
 two that map directly onto this skill's authorization and audit requirements. Use them to
@@ -168,19 +177,11 @@ and integration calls. Consistent naming is what makes the correlation IDs requi
 
 ## Implementation accelerators
 
-Read these as prior art and as candidates in the buy-versus-build decision. A framework may
-satisfy a requirement; it may never waive one. See [buy-vs-build.md](buy-vs-build.md).
-
-| Tool | Reach for it when |
-|---|---|
-| [Refine](https://refine.dev/docs/) | React CRUD with routing, auth, access control, audit-log and realtime hooks already modeled |
-| [react-admin](https://marmelab.com/react-admin/documentation.html) | React admin with a mature data-provider abstraction over an existing API |
-| [AdminJS](https://adminjs.co/) | Node/TypeScript autogenerated admin over existing ORM models |
-| [Filament](https://filamentphp.com/docs) | Laravel; the most complete first-party-feeling admin in any PHP stack |
-| [Django admin](https://docs.djangoproject.com/en/stable/ref/contrib/admin/) | Django; excellent for internal CRUD, weak for custom lifecycle workflows |
-| [Directus](https://directus.com/docs) | A database-first admin and API over an existing schema |
-| [Payload](https://payloadcms.com/docs) | Content-shaped domains where the admin is part of the product |
-| [TanStack Table](https://tanstack.com/table/latest) | You are hand-building the data grid and need the headless table primitives |
+Refine, react-admin, AdminJS, Filament, Directus, Payload, Django admin, the low-code tools and
+their ceilings, authorization models and licences are compared in
+[buy-vs-build.md](buy-vs-build.md), which is the one home for that table. A framework may
+satisfy a requirement; it may never waive one. TanStack Table, the headless grid primitive, is
+under Tables and high-density interfaces above.
 
 ## Stack documentation
 
@@ -188,13 +189,15 @@ Always read the version the project pins. These are the entry points, not the an
 
 | Stack | Entry point |
 |---|---|
-| Next.js App Router | [nextjs.org/docs/app](https://nextjs.org/docs/app) |
-| Laravel | [laravel.com/docs](https://laravel.com/docs) |
+| Next.js App Router | [nextjs.org/docs/app](https://nextjs.org/docs/app); [Proxy](https://nextjs.org/docs/app/api-reference/file-conventions/proxy) (`middleware.ts` before v16) |
+| Laravel | [laravel.com/framework/docs](https://laravel.com/framework/docs) |
 | Django admin | [docs.djangoproject.com](https://docs.djangoproject.com/en/stable/ref/contrib/admin/) |
 | Ruby on Rails | [guides.rubyonrails.org](https://guides.rubyonrails.org/) |
 | NestJS | [docs.nestjs.com](https://docs.nestjs.com/) |
 | ASP.NET Core authorization | [learn.microsoft.com](https://learn.microsoft.com/en-us/aspnet/core/security/authorization/introduction) |
 | Supabase row level security | [supabase.com/docs](https://supabase.com/docs/guides/database/postgres/row-level-security) |
+| Supabase API keys | [supabase.com/docs](https://supabase.com/docs/guides/getting-started/api-keys) |
+| Supabase Cron | [supabase.com/docs](https://supabase.com/docs/guides/cron) |
 
 ## Recording what you consulted
 

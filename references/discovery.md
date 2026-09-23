@@ -47,7 +47,7 @@ A complete admin specification needs these ten inputs. Most are recoverable from
 
 Record every inferred answer as `decisions[]` with `status: assumed`. Record every genuinely human input you did not get as `gaps[]` with a severity and a working default. Continue building around an open gap; do not stall the whole build on one unanswered question.
 
-At the `regulated` profile an `assumed` decision is a release error. Convert assumptions to `confirmed` before claiming release, or the profile gate will stop you.
+At the `regulated` profile an `assumed` decision is a release error (`decision-assumed`; `init` records the profile choice itself as one, `dec.profile`). Convert assumptions to `confirmed` through the batched questions in Autonomy boundaries below: `set --path 'decisions[<id>].status' --value confirmed`, with who confirmed it, and when, in the decision's `reason` (decisions have no separate confirmer field).
 
 ## Evidence hierarchy
 
@@ -106,12 +106,12 @@ Step 2 — read the adapter for that stack in [stack-adapters.md](stack-adapters
 
 Step 3 — consult the authoritative documentation for each stack element you will implement against. Entry points are curated in [resource-index.md](resource-index.md). Authoritative means the maintainer's own documentation for the version in the lockfile, not a blog post and not recall.
 
-Step 4 — record every source consulted in `platform.researchSources[]`:
+Step 4 — record every source consulted in `platform.researchSources[]`. `appliedTo` holds bare ids (capability, screen, entity or decision ids, or a manifest section), the same notation as `decisions[].appliesTo`; the validator only checks that it is not empty:
 
 ```text
 { "topic": "row-level authorization",
   "url":   "<canonical docs URL you actually opened>",
-  "appliedTo": ["capability:payout.approve", "crossCutting.authorization"],
+  "appliedTo": ["payout.approve", "crossCutting.authorization"],
   "checkedOn": "YYYY-MM-DD" }
 ```
 
@@ -145,7 +145,7 @@ auth strength: SSO + MFA; step-up above 1000 USD
 separated from: payout-approver (may not approve a payout it requested)
 ```
 
-A declared role that no screen and no capability uses is a modeling error, and a profile gate at `standard` and above. Delete it or find its work.
+A declared role that is granted to no screen, or is the actor on no capability, is a modeling error (`role-unused`, reported once per missing link): a warning at `internal`, an error at `standard` and `regulated` once the model is released. Delete it or find its work.
 
 ### 2. Entity map
 
@@ -200,7 +200,7 @@ notifications: recipient on paid; finance channel on failed and on escalation
 audit: actor, payout, amount, reason, provider reference, result
 ```
 
-Two rules the validator enforces at `standard` and above: every lifecycle state must be observable through a query capability, and every non-initial state must be reachable through a command capability. A state you can enter but cannot see is an operational blind spot.
+Two rules the validator enforces at `standard` and above (warnings until `--phase release`): every lifecycle state must appear in some capability's `entityStates` (`from` or `to`; the check does not require that capability to be a query, so model one), and every state after the first must be the `to` of a command or job capability, or the `to` of a `lifecycleTransitions[]` entry whose `command` is a declared capability. The first entry of `lifecycleStates` is the initial state and is exempt from the reachability rule, so list the state a new record starts in first. A state entered only by an external system (a payment webhook, a device callback) is excused by one open or accepted `gaps[]` entry that names the state and either the entity or carries an `entity` field; text in an OCR-sourced gap never counts. A state you can enter but cannot see is an operational blind spot.
 
 ### 4. Permission matrix
 
@@ -349,6 +349,7 @@ entities[]                      {id,name,sourceOfTruth,sensitivity,tenantScoped,
                                  lifecycleStates,retention}
 entities[].lifecycleTransitions[] {from,to,command,actorRoles}
 entities[].capabilities[]       {id,outcome,kind,roles,risk,rationale,entityStates,
+                                 surface (ui|api|cli|job|chat, default ui),
                                  status:"discovered"}
 workQueues[]                    {id,purpose,roles,source,priorityRule,sla,actions}
 integrations[]                  {id,direction,sourceOfTruth,credentialBoundary,operations,
@@ -364,7 +365,7 @@ Discovery is complete when all of the following hold:
 
 - All six maps are recorded in the manifest.
 - Every declared role is used by at least one screen and at least one capability.
-- Every lifecycle state is observable by a query capability; every non-initial state is reachable by a command capability.
+- Every lifecycle state appears in a capability's `entityStates` and has a query capability to see it; every non-initial state is reachable by a command capability or a declared transition.
 - Every queue has a source, a priority rule, an SLA, and at least one action.
 - Every dashboard metric has an owner, a threshold, and a drill-down target.
 - `platform.stack` is filled and `platform.researchSources[]` has an entry for every stack element you will implement against.
@@ -376,7 +377,7 @@ Record entries as you go and verify before handing off to build sequencing in [b
 python <skill-dir>/scripts/admin_console_manifest.py add --manifest <path> --kind decision --json '<obj>'
 python <skill-dir>/scripts/admin_console_manifest.py add --manifest <path> --kind gap --json '<obj>'
 python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <path> --phase plan
-python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <path> --project-root <root>
+python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <path>
 ```
 
 Use `py -3` or `python3` if `python` is not on PATH.
