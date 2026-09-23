@@ -214,7 +214,7 @@ tools, incident automation, and data fixes will use it whether or not you design
 
 - Same policies, same audit events, same obligations as the interface. "The UI enforces it"
   is not an answer, because the UI is one client.
-- Its own credentials, rate limits, and pagination contract. Do not reuse customer API keys.
+- Its own credentials, rate limits (see Rate limiting and lockout in [security-governance.md](security-governance.md)), and pagination contract. Do not reuse customer API keys.
 - Versioned and documented, because scripts written against it outlive the screens.
 - Included in the authorization test matrix. An endpoint reachable only by an undocumented
   path is still reachable.
