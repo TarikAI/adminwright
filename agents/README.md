@@ -48,16 +48,23 @@ skill path, bakes it into the prompts, and writes them where that harness discov
 python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <project-root>
 ```
 
-| `--harness` | Writes to | Notes |
-|---|---|---|
-| `claude-code` | `.claude/agents/` | For non-plugin installs; the plugin needs no installer |
-| `opencode` | `.opencode/agents/` | Adds `mode: subagent` to each file's frontmatter |
-| `codex` | `.adminwright/agents/` | Prints a pointer block for `AGENTS.md`; add `--append-pointer` to write it |
-| `antigravity` | `.adminwright/agents/` | Pointer block for `AGENTS.md`, same flag |
-| `gemini` | `.adminwright/agents/` | Pointer block for `GEMINI.md`, same flag |
-| `cursor` | `.adminwright/agents/` | Writes `.cursor/rules/adminwright.mdc` (a project rule, always applied) |
-| `pi` | `.adminwright/agents/` | Pointer block for `AGENTS.md`, same flag |
-| `generic` | `.adminwright/agents/` | Any other harness: point it at the files, in the printed order |
+| `--harness` | Native agent files | Also writes | Notes |
+|---|---|---|---|
+| `claude-code` | `.claude/agents/<name>.md` | — | For non-plugin installs; the plugin needs no installer |
+| `opencode` | `.opencode/agents/<name>.md` | — | Frontmatter is rebuilt as `description` + `mode: subagent` |
+| `codex` | `.codex/agents/<name>.toml` | `.adminwright/agents/` | TOML with `name`, `description`, `developer_instructions`. Prints a pointer block for `AGENTS.md`; add `--append-pointer` to write it |
+| `antigravity` | `.agents/agents/<name>/agent.md` | `.adminwright/agents/` | Frontmatter `name` + `description`. Pointer block for `AGENTS.md`, same flag |
+| `gemini` | `.gemini/agents/<name>.md` | `.adminwright/agents/` | Frontmatter `name` + `description`. Pointer block for `GEMINI.md`, same flag |
+| `cursor` | `.cursor/agents/<name>.md` | `.adminwright/agents/`, `.cursor/rules/adminwright.mdc` | The `.mdc` is a project rule, always applied |
+| `pi` | none — Pi has no built-in subagents | `.adminwright/agents/` | Pointer block for `AGENTS.md`, same flag |
+| `generic` | none | `.adminwright/agents/` | Any other harness: point it at the files, in the printed order |
+
+Native files carry only the fields that harness documents (`tools` and `model` from the
+Claude Code files are not carried over); `.adminwright/agents/` is the harness-neutral copy
+of the source files. The pointer block names the skill relative to the project root when
+the skill lives inside the project, and as `${CLAUDE_PLUGIN_ROOT}` otherwise, with the
+absolute path only in an HTML comment. It is delimited by marker comments, so rerunning
+with `--append-pointer` after the skill moves replaces it in place.
 
 In harnesses that spawn subagents, dispatch each file as one. In harnesses that cannot, the
 pointer block instructs the main agent to adopt the files one at a time, sequentially, with
