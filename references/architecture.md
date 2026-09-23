@@ -218,6 +218,9 @@ tools, incident automation, and data fixes will use it whether or not you design
 - Versioned and documented, because scripts written against it outlive the screens.
 - Included in the authorization test matrix. An endpoint reachable only by an undocumented
   path is still reachable.
+- Modelled as capabilities like any other: set `surface: ["api"]` (or `cli`, `job`, `chat`),
+  name the route or command in `entrypoints`, and list the tests that prove who may call it
+  in `policyTests`. No screen or `uiRoutes` is required for a capability with no `ui` surface.
 
 ## Agent- and automation-initiated actions
 

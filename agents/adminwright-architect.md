@@ -103,7 +103,8 @@ README docs from the project; confirm the read locations in that checkout's ARCH
 — default `docs/design/admin-capabilities.md`), run its pipeline for the admin area, and
 accept closure only when `.design-architect/holes.json` reports nothing unresolved and
 `handoff/coverage.md` reports `holes_remaining: 0`. Record `graph.json`, `holes.json`, and
-`coverage.md` as `evidence[]` on the screens they cover, and the outcome as a decision. The
+`coverage.md` as `evidence` on the `decisions[]` entry that records the outcome (screens have
+no evidence field) and list them under `crossCutting.experience.evidence`. The
 contract you hand implementers is affordance coverage — every control resolves to a real
 destination, every enumerated state exists — never the prototype's visual design, which the
 project's design system overrides. If it is not available, design per experience-design.md

@@ -759,7 +759,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Capability, screen, entity, or role ids this decision governs."
+            "description": "Capability, screen, entity, or role ids this decision governs. '*' means the whole manifest (a profile or scope decision)."
           }
         }
       }
@@ -1066,11 +1066,31 @@
             }
           }
         },
+        "surface": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "ui",
+              "api",
+              "cli",
+              "job",
+              "chat"
+            ]
+          },
+          "description": "Where operators reach this capability. Absent or empty means the admin UI. 'ui' requires uiRoutes and a route-anchored screen; every other surface requires entrypoints and policyTests instead, because no screen exists to carry them."
+        },
         "uiRoutes": {
           "type": "array",
           "items": {
             "type": "string"
           }
+        },
+        "entrypoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "For a non-UI surface: the route, command name or handler an operator invokes, e.g. 'POST /admin/api/tenants/{id}/suspend', 'admin tenants suspend', 'jobs/expire-trials'."
         },
         "serverOperations": {
           "type": "array",
@@ -1115,6 +1135,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "policyTests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Test files proving who may invoke a non-UI capability and that everyone else is refused. Checked like tests: shaped like a test, containing assertions."
         },
         "evidence": {
           "type": "array",

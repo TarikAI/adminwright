@@ -56,6 +56,12 @@ recover safely, and produce evidence of who changed what.
 State the mode in your worklog. If the request includes implementation, continue through
 verification without stopping after planning.
 
+The skill covers operator surfaces reached through the admin UI, an admin API, a CLI, a
+scheduled job, or a chat/ops bot. Each capability declares `surface` (default `["ui"]`): a
+`ui` capability needs `uiRoutes` and a screen that lists it; every other surface needs
+`entrypoints` and `policyTests` instead, because no screen carries them. It does not build
+customer-facing product features.
+
 Every mode ends the same way: `harvest` the manifest's `feedback[]` into the store. The
 first field tests of this skill ran two audits and a build across seven projects and
 harvested nothing — the learning loop cannot start from observations nobody recorded.
@@ -125,6 +131,10 @@ warnings rather than blocking — a role is unused until its first capability ex
 edits still block: bad ids, unknown references, and placeholder values are refused at write
 time. `--allow-invalid` overrides that and prints exactly what it wrote through; anything it
 waves past still fails the release gate.
+
+The fields the validator requires on each capability, and when, are in the table in
+[verification.md](references/verification.md#capability-fields-the-validator-requires) —
+read it before the first `add --kind capability`.
 
 Populate from evidence, not guesses: archetypes, tenancy, regulated data, stack, research
 sources, volumes, roles and scopes, entities with lifecycle states and transitions, commands
@@ -245,6 +255,10 @@ alongside these gates.
 
 `emit` also produces the working documents the verification pass needs: `authz-matrix`,
 `test-plan`, `seed-plan`, `nav-map`, and `operator-handbook`.
+
+The reviewing agent records who it is before it signs off: `set reviewedBy <its agent id>`,
+then `set reviewStatus reviewed`. At `regulated` a review with no `reviewedBy`, or one that
+names the implementer, fails the gate; at `standard` it warns.
 
 Then run the adversarial pass, by an agent that did not implement the work: compare
 customer-facing capabilities against administrative obligations; compare schemas, services,

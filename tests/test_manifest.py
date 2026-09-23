@@ -308,10 +308,8 @@ class TestPlaceholderScanner(unittest.TestCase):
 
     def hit(self, text):
         folded = acm.fold_confusables(text)
-        squashed = folded.replace(" ", "").replace("-", "").replace("_", "")
         return bool(
-            acm.PLACEHOLDER_PATTERN.search(acm.split_identifiers(folded))
-            or acm.substring_hit(squashed)
+            acm.placeholder_match(text)
             or acm.HARDCODE_PATTERN.search(acm.split_identifiers(folded))
         )
 

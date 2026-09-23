@@ -86,7 +86,7 @@ Commands, and exactly what each writes:
 | Read the queue | `lesson list --status proposed` | nothing |
 | Adopt | edit of the one reference named in `scope` | the guidance change |
 | Close the lesson | edit of the lesson frontmatter and its index row to `status: adopted` | the lesson and the index |
-| Close the project entry | `set --manifest <path> --path 'feedback[FB-003].status' --value promoted` | the manifest entry |
+| Close the project entry | `set --manifest <path> --path 'feedback[fb-003].status' --value promoted` | the manifest entry |
 
 Invocation form:
 
@@ -320,7 +320,8 @@ skill later learned something.
 - The **guidance level** is the highest adopted lesson id, recorded on the
   `Guidance level` line at the top of [../lessons/index.md](../lessons/index.md).
 - Every build records the level it was built under as a manifest decision:
-  `add --manifest <path> --kind decision --json '{"id":"D-guidance-level","decision":"built under guidance level 0007","reason":"skill version pin for audit","status":"confirmed","appliesTo":["*"]}'`
+  `add --manifest <path> --kind decision --json '{"id":"d-guidance-level","decision":"built under guidance level 0007","reason":"skill version pin for audit","status":"confirmed","appliesTo":["*"]}'`
+  `"*"` in `appliesTo` means the whole manifest; it is the one value that is not an id.
 - When auditing an older console, read that decision first. A finding that exists only
   because of a lesson adopted after that level is reported as a `gaps[]` entry naming the
   lesson id, with severity taken from the rule's real risk. Report it as a delta against

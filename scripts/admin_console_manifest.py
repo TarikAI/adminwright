@@ -131,10 +131,23 @@ COLLECTION_KEYS = (
 )
 
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
+_PLACEHOLDER_WORDS = (
+    r"mock(?:s|ed|ing)?|fake(?:s|d)?|stub(?:s|bed|bing)?|dumm(?:y|ies)"
+    r"|placeholder(?:s)?|lorem|demo-only|todo(?:s)?|tbd|fixme|coming-soon|wip|xxx+"
+    r"|not[\s_-]?implemented"
+)
+# Manifest fields are scanned for every word above plus 'sample' and 'random'.
+# Evidence FILES are scanned without those two: "1200 samples" and "random seed"
+# are ordinary words in a real run log, and dropping them costs nothing in a
+# field that names an implementation.
 PLACEHOLDER_PATTERN = re.compile(
-    r"\b(?:mock(?:s|ed|ing)?|fake(?:s|d)?|stub(?:s|bed|bing)?|dumm(?:y|ies)"
-    r"|placeholder(?:s)?|sample(?:s)?|lorem|random(?:ly)?|demo-only"
-    r"|todo(?:s)?|tbd|fixme|coming-soon|wip|xxx+)\b",
+    r"\b(?:" + _PLACEHOLDER_WORDS + r"|sample(?:s)?|random(?:ly)?)\b", re.I
+)
+FILE_PLACEHOLDER_PATTERN = re.compile(r"\b(?:" + _PLACEHOLDER_WORDS + r")\b", re.I)
+# Framework idioms that contain a banned word and mean nothing by it.
+FRAMEWORK_CALLS = re.compile(
+    r"jest\.mock\(|vi\.mock\(|sinon\.stub\(|unittest\.mock|getByPlaceholderText"
+    r"|NotImplementedError|\bplaceholder\s*=",
     re.I,
 )
 HARDCODE_PATTERN = re.compile(r"\bhard[- ]?cod(?:e|ed|ing|es)\b", re.I)
@@ -165,19 +178,29 @@ CONFUSABLES = str.maketrans(
 # A false positive is renamed or registered in declaredStatic[] in seconds; a
 # false negative ships mock data to production.
 SUBSTRING_TOKENS = (
-    "mock", "fake", "stub", "dummy", "placeholder", "lorem",
-    "todo", "fixme", "tbd", "notimplemented", "comingsoon",
+    "mock", "fake", "stub", "dummy", r"place[-_]?holder", "lorem",
+    "todo", "fixme", "tbd", r"not[-_]?implemented", r"coming[-_]?soon",
 )
 SUBSTRING_PATTERN = re.compile("|".join(SUBSTRING_TOKENS), re.I)
 
 # Ordinary English words that happen to contain a banned token. Stripped before
 # the substring pass so 'stubbornRetry' and 'hammock' stay legal identifiers.
 # Keep this list short: every entry is a hole someone could name a shim after.
-SUBSTRING_EXCEPTIONS = re.compile(r"stubborn|hammock|smock|mockingbird", re.I)
+SUBSTRING_EXCEPTIONS = re.compile(
+    r"stubborn|stubble|stubby|hammock|smock|mockingbird|mastodon|autodoc|photodoc|fakir", re.I
+)
 
 
-def substring_hit(squashed):
-    return SUBSTRING_PATTERN.search(SUBSTRING_EXCEPTIONS.sub("", squashed))
+def substring_hit(token):
+    """Search ONE whitespace-delimited token, never text joined across spaces.
+
+    Squashing the spaces out of a sentence before matching made ordinary prose a
+    placeholder error at every profile: "Rotation of a key" contains `fake`,
+    "nothing left to do" contains `todo`, "scenarios that BDD covers" contains
+    `tbd`. Words are judged one at a time; within a token a hyphen or underscore
+    may sit inside a compound ('not_implemented', 'coming-soon').
+    """
+    return SUBSTRING_PATTERN.search(SUBSTRING_EXCEPTIONS.sub("", token))
 
 
 def fold_confusables(text):
@@ -228,6 +251,7 @@ RULES = {
     "rationale-required": E3,
     "release-status-unresolved": E3,
     "screen-state-missing": E3,
+    "screen-incomplete": E3,
     "screen-responsive": E3,
     "screen-accessibility": E3,
     "gate-missing": E3,
@@ -308,6 +332,7 @@ COMPLETENESS_RULES = frozenset(
         "capability-no-role",
         "capability-screen-link",
         "capability-route-unknown",
+        "screen-incomplete",
         "lifecycle-observable",
         "lifecycle-reachable",
         "transition-command-unknown",
@@ -453,6 +478,15 @@ def check_archetype_coverage(manifest, findings):
                 "of its expected domains (" + ", ".join(missing[:6]) + "); either model them "
                 "or record why they do not apply in gaps[]",
             )
+
+
+SURFACES = ("ui", "api", "cli", "job", "chat")
+
+
+def surface_of(capability):
+    """Where operators reach a capability. Absent or empty means the admin UI."""
+    values = [v for v in as_list(capability.get("surface")) if isinstance(v, str) and v]
+    return values or ["ui"]
 
 
 SCANNED_CAPABILITY_FIELDS = (
@@ -1261,15 +1295,30 @@ def flatten_strings(prefix, value):
                 yield pair
 
 
+def placeholder_match(text):
+    """Return the placeholder token found in a manifest string, or None."""
+    folded = fold_confusables(text)
+    hit = PLACEHOLDER_PATTERN.search(split_identifiers(folded))
+    if hit:
+        return hit.group(0)
+    for token in folded.split():
+        hit = substring_hit(token)
+        if hit:
+            return hit.group(0)
+    return None
+
+
 def scan_file_placeholder(body):
-    """Return (token, line_number) for the first placeholder in an evidence file, else None."""
+    """Return (token, line_number) for the first placeholder in an evidence file, else None.
+
+    Word-boundary matching only, and framework idioms are skipped: a captured log
+    that says `jest.mock('nodemailer')` or `1200 samples` is not a placeholder.
+    """
     for number, line in enumerate(body.splitlines(), 1):
-        folded = fold_confusables(line)
-        match = PLACEHOLDER_PATTERN.search(split_identifiers(folded)) or substring_hit(
-            folded.replace(" ", "").replace("-", "").replace("_", "")
-        )
-        if match:
-            return match.group(0), number
+        cleaned = FRAMEWORK_CALLS.sub(" ", fold_confusables(line))
+        hit = FILE_PLACEHOLDER_PATTERN.search(split_identifiers(cleaned))
+        if hit:
+            return hit.group(0), number
     return None
 
 
@@ -1304,15 +1353,13 @@ def run_placeholder_scan(manifest, findings, release):
                     + text
                     + "'; register it in declaredStatic[] with a reason and approver or replace it",
                 )
-            match = PLACEHOLDER_PATTERN.search(scannable) or substring_hit(
-                folded.replace(" ", "").replace("-", "").replace("_", "")
-            )
-            if match:
+            token = placeholder_match(text)
+            if token:
                 findings.add(
                     "placeholder-scan",
                     entry_path,
                     "placeholder token '"
-                    + match.group(0)
+                    + token
                     + "' in '"
                     + text
                     + "'; replace it with the real value or register it in declaredStatic[]",
@@ -1552,6 +1599,10 @@ def structural_findings(manifest, findings, release):
     # capabilities -> screens, roles, routes
     for path, _entity, capability in iter_capabilities(manifest):
         cid = text_of(capability.get("id"))
+        if capability.get("status") == "not-applicable":
+            # A rejected catalog candidate has no actor, screen or route by
+            # definition; only its rationale matters (rationale-required).
+            continue
         if not as_list(capability.get("roles")):
             findings.add(
                 "capability-no-role",
@@ -1567,6 +1618,8 @@ def structural_findings(manifest, findings, release):
                     "route '" + route + "' has no matching screen",
                 )
         if capability.get("status") != "implemented":
+            continue
+        if "ui" not in surface_of(capability):
             continue
         anchored = False
         listed_anywhere = False
@@ -1850,7 +1903,11 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
             findings.add("required-field-empty", "roles", "release requires at least one modeled role")
         if not as_list(manifest.get("entities")):
             findings.add("required-field-empty", "entities", "release requires at least one managed entity")
-        if not as_list(manifest.get("screens")):
+        ui_capabilities = [
+            cap for _p, _e, cap in iter_capabilities(manifest) if "ui" in surface_of(cap)
+        ]
+        has_capabilities = any(True for _ in iter_capabilities(manifest))
+        if not as_list(manifest.get("screens")) and (ui_capabilities or not has_capabilities):
             findings.add("required-field-empty", "screens", "release requires at least one connected screen")
     else:
         for key in ("roles", "entities", "screens"):
@@ -2022,17 +2079,21 @@ def validate_entities(manifest, findings, release, role_ids):
                 path + ".status",
                 "is '" + str(status) + "'; release requires implemented or not-applicable",
             )
+        for value in as_list(capability.get("surface")):
+            check_enum(value, SURFACES, path + ".surface", findings, "surface")
         if status == "implemented":
-            for key in (
-                "outcome",
-                "roles",
-                "uiRoutes",
-                "serverOperations",
-                "authorizationPolicies",
-                "dataBinding",
-                "tests",
-                "evidence",
-            ):
+            surface = surface_of(capability)
+            required_keys = [
+                "outcome", "roles", "serverOperations", "authorizationPolicies",
+                "dataBinding", "tests", "evidence",
+            ]
+            if "ui" in surface:
+                required_keys.insert(2, "uiRoutes")
+            if any(value != "ui" for value in surface):
+                # No screen exists to carry the capability, so the way in and the
+                # proof of who may use it have to be named on the capability itself.
+                required_keys.extend(["entrypoints", "policyTests"])
+            for key in required_keys:
                 if not nonempty(capability.get(key)):
                     findings.add("required-field-empty", path + "." + key, "must not be empty for an implemented capability")
             if release and capability.get("reviewStatus") != "reviewed":
@@ -2085,7 +2146,17 @@ def validate_screens(manifest, findings, release, role_ids):
             path,
             findings,
         )
-        check_nonempty(screen, ("route", "purpose", "roles", "dataSources", "states"), path, findings)
+        check_nonempty(screen, ("route", "purpose", "roles"), path, findings)
+        # An architect adds the screen; the ux-reviewer adds its states; a screen
+        # is legitimately without either until then. Blocking the add refused the
+        # documented split of work, so these warn until release.
+        for key in ("dataSources", "states"):
+            if not nonempty(screen.get(key)):
+                findings.add(
+                    "screen-incomplete",
+                    path + "." + key,
+                    "screen has no " + key + " yet; release requires it",
+                )
         check_roles(screen.get("roles"), role_ids, path, findings)
         status = screen.get("status")
         check_enum(status, STATUSES, path + ".status", findings, "status")
@@ -2312,7 +2383,7 @@ def validate_decisions(manifest, findings, release):
         unknown = sorted(
             value
             for value in as_list(decision.get("appliesTo"))
-            if isinstance(value, str) and value not in known
+            if isinstance(value, str) and value != "*" and value not in known
         )
         if unknown:
             findings.add(
@@ -2418,6 +2489,10 @@ def validate_evidence(manifest, findings, project_root):
         if capability.get("status") != "implemented":
             continue
         cid = text_of(capability.get("id"))
+        check_evidence_list(
+            capability.get("policyTests"), path + ".policyTests", findings, project_root, True,
+            expect_assertions=True, role="policy-test", owner=cid,
+        )
         test_paths = check_evidence_list(
             capability.get("tests"), path + ".tests", findings, project_root, True,
             expect_assertions=True, role="capability-test", owner=cid,
@@ -3015,6 +3090,9 @@ def migrate_manifest(manifest):
             ):
                 ensure_key(capability, key, "", cap_path, changes)
             ensure_key(capability, "reviewStatus", "unreviewed", cap_path, changes)
+            ensure_key(capability, "surface", ["ui"], cap_path, changes)
+            ensure_key(capability, "entrypoints", [], cap_path, changes)
+            ensure_key(capability, "policyTests", [], cap_path, changes)
 
     for index, queue in enumerate(as_list(manifest.get("workQueues"))):
         if isinstance(queue, dict):
@@ -3122,6 +3200,9 @@ DEFAULTS = {
         "owner": "",
         "implementedBy": "",
         "reviewStatus": "unreviewed",
+        "surface": ["ui"],
+        "entrypoints": [],
+        "policyTests": [],
     },
     "screen": {
         "id": "",
@@ -3245,21 +3326,38 @@ def parse_json_entries(raw):
     raise ManifestError("--json must be a JSON object or a non-empty array of objects")
 
 
-def new_error_signatures(before, after):
-    """Return errors introduced by an edit, so partial writes cannot corrupt the manifest."""
+def new_findings(before, after, project_root, manifest_dir):
+    """Errors and warnings an edit introduced, judged at plan phase.
+
+    The guard MUST validate with the project root: without it a relative evidence
+    path resolves to nothing, every passed gate raised `evidence-not-resolvable`,
+    and a gate could never be `set` to `passed` from anywhere.
+    """
     profile = active_profile(after, None)[0]
-    before_errors = {
-        (item["rule"], item["path"], item["message"])
-        for item in validate_manifest(before, "plan", None, profile).errors
-    }
-    after_errors = [
-        item for item in validate_manifest(after, "plan", None, profile).errors
-    ]
-    return [
-        item
-        for item in after_errors
-        if (item["rule"], item["path"], item["message"]) not in before_errors
-    ]
+    seen = validate_manifest(before, "plan", project_root, profile, manifest_dir)
+    now = validate_manifest(after, "plan", project_root, profile, manifest_dir)
+    known = {(i["rule"], i["path"], i["message"]) for i in seen.items}
+    fresh = [i for i in now.items if (i["rule"], i["path"], i["message"]) not in known]
+    return (
+        [i for i in fresh if i["severity"] == ERROR],
+        [i for i in fresh if i["severity"] == WARN and i["rule"] != "plan-note"],
+    )
+
+
+def new_error_signatures(before, after, project_root=None, manifest_dir=None):
+    """Return errors introduced by an edit, so partial writes cannot corrupt the manifest."""
+    return new_findings(before, after, project_root, manifest_dir)[0]
+
+
+MAX_WARNINGS_PRINTED = 8
+
+
+def report_new_warnings(warnings):
+    """Show what a successful write introduced, so a warning-tier problem is not silent."""
+    for item in warnings[:MAX_WARNINGS_PRINTED]:
+        stderr("WARN: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
+    if len(warnings) > MAX_WARNINGS_PRINTED:
+        stderr("WARN: ... and " + str(len(warnings) - MAX_WARNINGS_PRINTED) + " more; run `validate`")
 
 
 def parse_path_expression(expression):
@@ -3979,7 +4077,9 @@ def cmd_emit(args):
     # hand-wrote the manifest, ran only emit, and shipped a gap report while 83
     # validation errors sat invisible -- emit is where agents actually engage,
     # so emit is where health has to show. Advisory only; exit code unchanged.
-    health = validate_manifest(manifest, "plan", manifest_path.parent.parent, profile)
+    health = validate_manifest(
+        manifest, "plan", project_root_of(manifest_path, manifest), profile, manifest_path.parent
+    )
     if health.errors:
         stderr(
             "WARN: this manifest has " + str(len(health.errors))
@@ -4056,7 +4156,9 @@ def cmd_add(args):
                 raise ManifestError(kind + " '" + entry_id + "' appears twice in this batch")
             batch_ids.add(entry_id)
         collection.extend(entries)
-        introduced = new_error_signatures(before, manifest)
+        introduced, warned = new_findings(
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent
+        )
         if introduced and not args.allow_invalid:
             stderr("Refusing to write: the new " + kind + " introduces validation errors.")
             for item in introduced:
@@ -4065,22 +4167,37 @@ def cmd_add(args):
         write_json(manifest_path, manifest)
     for entry in entries:
         print("Added " + kind + " '" + text_of(entry.get("id")) + "' to " + str(manifest_path))
-    report_overridden(introduced, args.allow_invalid)
+    report_new_warnings(warned)
+    report_overridden(introduced, args.allow_invalid, manifest, manifest_path)
     return 0
 
 
-def report_overridden(introduced, allow_invalid):
+def report_overridden(introduced, allow_invalid, manifest, manifest_path):
     """Never let --allow-invalid hide what it waved through.
 
     A silent override turns the escape hatch into a way to smuggle mock data past
-    the scanner, which is the one thing this tool exists to prevent.
+    the scanner, which is the one thing this tool exists to prevent. The closing
+    line states what release will actually do, by asking the release phase.
     """
     if not (introduced and allow_invalid):
         return
     stderr("WARNING: --allow-invalid wrote " + str(len(introduced)) + " unresolved error(s):")
     for item in introduced:
         stderr("  [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
-    stderr("These still fail `validate --phase release`. Resolve them before any release claim.")
+    profile = active_profile(manifest, None)[0]
+    release = validate_manifest(
+        manifest, "release", project_root_of(manifest_path, manifest), profile,
+        manifest_path.parent,
+    )
+    still = {(i["rule"], i["path"]) for i in release.errors}
+    persisting = [i for i in introduced if (i["rule"], i["path"]) in still]
+    if persisting:
+        stderr(
+            str(len(persisting)) + " of them still fail `validate --phase release`. "
+            "Resolve them before any release claim."
+        )
+    else:
+        stderr("None of them fail `validate --phase release`; they were plan-phase findings.")
 
 
 def cmd_set(args):
@@ -4093,7 +4210,9 @@ def cmd_set(args):
         previous = container.get(key)
         value = coerce_value(args.value, previous)
         container[key] = value
-        introduced = new_error_signatures(before, manifest)
+        introduced, warned = new_findings(
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent
+        )
         if introduced and not args.allow_invalid:
             stderr("Refusing to write: the change introduces validation errors.")
             for item in introduced:
@@ -4101,7 +4220,8 @@ def cmd_set(args):
             return 2
         write_json(manifest_path, manifest)
     print(args.path + ": " + json.dumps(previous) + " -> " + json.dumps(value))
-    report_overridden(introduced, args.allow_invalid)
+    report_new_warnings(warned)
+    report_overridden(introduced, args.allow_invalid, manifest, manifest_path)
     return 0
 
 

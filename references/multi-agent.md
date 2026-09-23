@@ -74,20 +74,22 @@ Five roles. Each is a distinct pass, whether five agents run them or one agent r
 ### ux-reviewer
 
 - **Entry:** at least one screen is at `status: implemented` and the application runs.
-- **Exit:** every reviewed screen covers the required states, `accessibilityStatus` is set with an evidence path, `responsive` reflects an actual viewport check, findings are filed as `gaps[]`, and no server code changed. See [experience-design.md](experience-design.md).
-- **Writes:** `screens[].states`, `screens[].accessibilityStatus`, `screens[].responsive`, `gaps[]`, `feedback[]`, `reviewStatus` on capabilities it did not implement.
+- **Exit:** every reviewed screen covers the required states, `accessibilityStatus` is set and `crossCutting.experience.evidence` names what was exercised, `responsive` reflects an actual viewport check, findings are filed as `gaps[]`, and no server code changed. See [experience-design.md](experience-design.md).
+- **Writes:** `screens[].states`, `screens[].accessibilityStatus` (a status, not a path), `screens[].responsive`, `crossCutting.experience` (flags and `evidence`), `qualityGates[accessibility]`, `gaps[]`, `feedback[]`, `reviewedBy` then `reviewStatus` on capabilities it did not implement.
 
 ### qa
 
 - **Entry:** the target domain's capabilities are `implemented` and the build passes.
 - **Exit:** `coverage` has been run and its findings filed; role-matrix and negative tests exist and were executed against the built system; `qualityGates[]` are `passed` or `failed` with evidence paths; `reviewStatus` is `reviewed` or `contested`. See [verification.md](verification.md) and [test-data.md](test-data.md).
-- **Writes:** `qualityGates[]`, `gaps[]`, `reviewStatus`, `tests[]` and `evidence[]` entries for tests it wrote, `feedback[]`.
+- **Writes:** `qualityGates[]`, `crossCutting.observability` and `crossCutting.data`, `gaps[]`, `reviewedBy` then `reviewStatus`, `tests[]` and `evidence[]` entries for tests it wrote, `feedback[]`.
 
 ### security
 
 - **Entry:** the authentication, authorization, tenancy, and audit spine is `implemented` and `emit --format authz-matrix` produces output.
-- **Exit:** `crossCutting.authentication`, `.authorization`, `.audit`, and `.data` carry evidence; every `risk: high` or `risk: critical` capability has safeguards, audit events, and a negative test; accepted risks are `decisions[]` with `status: confirmed` and a named human approver. See [security-governance.md](security-governance.md).
-- **Writes:** `crossCutting.*`, `roles[].separationOfDuties`, critical and high `gaps[]`, accepted-risk `decisions[]`, `reviewStatus` on privileged commands.
+- **Exit:** `crossCutting.authentication`, `.authorization`, `.audit`, and `.safety` carry evidence; every `risk: high` or `risk: critical` capability has safeguards, audit events, and a negative test; accepted risks are `decisions[]` with `status: confirmed` and a named human approver. See [security-governance.md](security-governance.md).
+- **Writes:** `crossCutting.authentication`, `.authorization`, `.audit`, `.safety`, `roles[].separationOfDuties`, critical and high `gaps[]`, accepted-risk `decisions[]`, `reviewStatus` on privileged commands.
+
+Each `crossCutting` section has one owner, so two agents never overwrite each other's evidence: `security` owns `authentication`, `authorization`, `audit` and `safety`; `ux-reviewer` owns `experience`; `qa` owns `observability` and `data`. The architect creates the empty structure; implementers do not edit it.
 
 The security pass is required at every profile for the authorization matrix and audit completeness. The formal data-exposure review is required at `regulated`, and at `standard` when `platform.regulatedData` is non-empty.
 
@@ -164,7 +166,7 @@ Mutate the manifest only through `add` and `set`:
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py set \
   --manifest <project-root>/.admin-console/manifest.json \
-  --path 'entities[user].capabilities[user.suspend].status' --value implemented
+  --path 'entities[user].capabilities[user.suspend].status' --value in-progress
 ```
 
 Never rewrite the manifest as a whole file. A whole-file write serializes the copy you read minutes ago, and every `add` and `set` another agent made since then disappears. Nothing reports the loss: the result is still well-formed, so validation passes and the deleted work reappears only as a missing capability at release. This is the most damaging failure mode in concurrent operation, and it is silent.

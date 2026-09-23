@@ -24,9 +24,9 @@ Order of use:
 5. Selection test. Include, defer, or exclude.
 6. Completeness test. The question that decides whether the console is finished.
 
-Confirm or reject each candidate against the evidence hierarchy in [discovery.md](discovery.md). Record every candidate in the manifest with a `status` of `discovered`, `planned`, `implemented`, `blocked`, `deferred`, or `not-applicable`, plus a `rationale`. A rejected candidate with a written reason is a result. An unexamined candidate is a gap.
+Confirm or reject each candidate against the evidence hierarchy in [discovery.md](discovery.md). Record every candidate in the manifest with a `status` of `discovered`, `planned`, `in-progress`, `implemented`, `blocked`, `deferred`, or `not-applicable`, plus a `rationale`. A rejected candidate with a written reason is a result. An unexamined candidate is a gap.
 
-Capabilities carry `kind`, `risk`, `entityStates`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `safeguards`, `dataBinding`, `idempotency`, `concurrency`, `recovery`, `tests`, and `evidence`. If a catalog entry cannot be expressed with those fields filled from real code, it is not yet a capability.
+A `not-applicable` candidate needs only its `id`, `outcome`, `kind`, `status` and `rationale`; the implementation checks skip it (a command, job or export must also be named by a confirmed decision, so it cannot be a deferred capability relabelled). An `implemented` capability must fill the fields in the table in [verification.md](verification.md#capability-fields-the-validator-requires) from real code: `kind`, `risk`, `entityStates`, `surface`, `uiRoutes` or `entrypoints`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `safeguards`, `dataBinding`, `idempotency`, `concurrency`, `recovery`, `tests`, `policyTests`, `evidence`. If a catalog entry cannot be expressed with those fields filled from real code, it is not yet a capability.
 
 ## Common feature families
 
@@ -247,7 +247,7 @@ Rules for this archetype:
   display → test connection → rotate → revoke → audit trail. A form that renders but stores
   nothing is the canonical placeholder defect of this archetype.
 - Key material never appears in `dataBinding` samples, seeds, logs, or evidence files. Test
-  with dedicated dummy credentials and record that in the manifest.
+  with dedicated test credentials and record that in the manifest.
 - Revocation is a server-enforced kill, verified by a negative test that replays the revoked
   credential and observes rejection — not a status flag.
 - Every mutation of a provider, credential, routing policy, or platform key is a named

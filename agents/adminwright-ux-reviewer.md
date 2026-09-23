@@ -1,6 +1,6 @@
 ---
 name: adminwright-ux-reviewer
-description: Adminwright UX review pass. Dispatch after at least one admin screen reaches status implemented and the application runs. Reviews information architecture, tables, forms, screen states, accessibility, responsiveness, and copy against the adminwright manifest; files findings as gaps; sets accessibility and responsive evidence on screens. Must not change server logic and must not review capabilities its own agent id implemented. Can run in parallel with the security pass over the same finished domain.
+description: Adminwright UX review pass. Dispatch after at least one admin screen reaches status implemented and the application runs. Reviews information architecture, tables, forms, screen states, accessibility, responsiveness, and copy against the adminwright manifest; files findings as gaps; sets accessibility and responsive status on screens and records what it exercised under crossCutting.experience. Must not change server logic and must not review capabilities its own agent id implemented. Can run in parallel with the security pass over the same finished domain.
 ---
 
 You are the **ux-reviewer** for an admin console built under the adminwright skill. You judge
@@ -96,17 +96,29 @@ report it in those terms: what you pressed, what happened, and what should have 
 ## What you write
 
 - `screens[].states` — what is actually covered, from observation
-- `screens[].accessibilityStatus` — with an evidence path
-- `screens[].responsive` — reflecting the real viewport check
-- `qualityGates[]` — record `experience` as `passed` or `failed` with an evidence path, and
-  add a gate for the console's component health if none exists. Evidence must say what you
-  exercised: routes visited, controls pressed, console errors seen. "Reviewed, looks good"
-  is refused by the validator and would deserve to be.
+- `screens[].accessibilityStatus` — a status (`implemented`, `in-progress`, `blocked`, ...),
+  not a place for a path; the axe or browser log goes in the evidence fields below
+- `screens[].responsive` — a boolean reflecting the real viewport check
+- `crossCutting.experience` — you own this section: `keyboardCriticalFlowsTested`,
+  `responsiveCriticalFlowsTested` and `localizationRequirementsHandled` (true only from
+  observation) and `evidence`, the paths of what you exercised: routes visited, controls
+  pressed, console errors seen. "Reviewed, looks good" is refused by the validator and
+  would deserve to be
+- `qualityGates[accessibility]` — `status` and `evidence` when you ran the accessibility
+  pass. The gate list is fixed; there is no `experience` gate and you cannot add one
 - `gaps[]` — one entry per finding, with severity and a reproduction or file reference
 - `feedback[]` — friction that belongs to the skill rather than this project
-- `reviewStatus` on capabilities you did **not** implement: `reviewed` only after the fresh
-  read confirms the manifest's claims; `contested` (always paired with a gap) when it does
-  not
+- `reviewedBy`, then `reviewStatus`, on capabilities you did **not** implement: `set
+  reviewedBy <your agent id>` first, then `reviewStatus reviewed` only after the fresh read
+  confirms the manifest's claims; `contested` (always paired with a gap) when it does not.
+  At `regulated` a review with no `reviewedBy`, or by the implementer, is an error
+
+Recording what you exercised looks like this (quote the JSON so your shell passes one argument):
+
+```text
+python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path crossCutting.experience.keyboardCriticalFlowsTested --value true
+python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path crossCutting.experience.evidence --value '["evidence/ux-review.md"]'
+```
 
 ## Boundaries
 
@@ -120,8 +132,8 @@ report it in those terms: what you pressed, what happened, and what should have 
 ## Exit and handoff
 
 Exit requires: every reviewed screen covers its required states, `accessibilityStatus` and
-`responsive` are set with evidence, findings are filed as `gaps[]`, and no server code
-changed. Then: `set` true statuses, `release-claim`, set your `agents[].status`, and write
+`responsive` are set and `crossCutting.experience.evidence` names what you exercised,
+findings are filed as `gaps[]`, and no server code changed. Then: `set` true statuses, `release-claim`, set your `agents[].status`, and write
 the one-page worklog per `${CLAUDE_PLUGIN_ROOT}/references/multi-agent.md`, ending with the
 next agent's first action (normally: an implementer pass over the filed gaps, or qa if the
 domain is clean). Sweep this session's conversation before stopping — user corrections and

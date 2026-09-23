@@ -98,14 +98,14 @@ floor, not a proof.
 
 ## What you write
 
-- `crossCutting.authentication`, `.authorization`, `.audit`, `.data` — evidence entries
-  (yours to own; implementers must not edit these)
+- `crossCutting.authentication`, `.authorization`, `.audit`, `.safety` — flags and evidence
+  entries (yours to own; implementers must not edit these)
 - `roles[].separationOfDuties`
 - `gaps[]` at critical and high severity, each with a reproduction or file reference
 - Accepted-risk `decisions[]` with `status: confirmed` and a **named human approver** — you
   may propose an exception, only a human accepts it
-- `reviewStatus` on privileged commands you did not implement (`contested` always paired
-  with a gap)
+- `reviewedBy` (your agent id, set first) and then `reviewStatus` on privileged commands you
+  did not implement (`contested` always paired with a gap)
 - `feedback[]` — friction that belongs to the skill
 
 ## Boundaries
@@ -120,7 +120,7 @@ floor, not a proof.
 
 ## Exit and handoff
 
-Exit requires: `crossCutting.authentication/.authorization/.audit/.data` carry evidence;
+Exit requires: `crossCutting.authentication/.authorization/.audit/.safety` carry evidence;
 every high/critical capability has safeguards, audit events, and a negative test; accepted
 risks are confirmed decisions with a named human approver. Then `set` true statuses,
 `release-claim`, set your `agents[].status`, and write the one-page worklog per

@@ -38,7 +38,26 @@ operator need
 
 Mark a capability `implemented` only when every required link exists.
 
-Evidence is a repository path that exists, is non-empty, and contains the assertion it claims. A boolean set to `true` is not evidence. A status string is not evidence. An `manual:` entry records a human observation rather than a checkable artifact: it warns at `internal` and `standard`, and fails at `regulated`.
+Evidence is a repository path that exists, is non-empty, and contains the assertion it claims. A boolean set to `true` is not evidence. A status string is not evidence. A `manual:` entry records a human observation rather than a checkable artifact: `manual-evidence` warns at `internal` and `standard` and is an error at `regulated`, and because a `manual:` entry never resolves to a file, a list made only of them also fails `evidence-not-resolvable` (an error at `standard` and `regulated`).
+
+What is content-scanned, and with which words: test files (`tests[]`, `policyTests`) are checked for shape and assertions but never scanned for placeholder words; evidence files are scanned by whole word for `mock`, `fake`, `stub`, `dummy`, `placeholder`, `lorem`, `todo`, `tbd`, `fixme`, `wip`, `xxx` and "not implemented", with framework idioms skipped; manifest implementation fields are scanned harder, including inside identifiers, and additionally for `sample` and `random`. Details in [test-data.md](test-data.md).
+
+### Capability fields the validator requires
+
+| Field | Required when | Notes |
+|---|---|---|
+| `outcome`, `roles`, `serverOperations`, `authorizationPolicies`, `dataBinding`, `tests`, `evidence` | `status: implemented` | non-empty; `dataBinding` and the operation lists are placeholder-scanned |
+| `surface` | always optional | any of `ui`, `api`, `cli`, `job`, `chat`; absent means `["ui"]` |
+| `uiRoutes` | `"ui"` in `surface` | each route must match a screen whose `capabilities` list this capability |
+| `entrypoints`, `policyTests` | any non-`ui` surface | the route, command or handler operators invoke, and the test files that prove who may invoke it |
+| `idempotency` | release, `kind` is `command`, `job` or `export` | a mechanism, or `not-required: <reason>` (the colon and reason are required) |
+| `auditEvents` | `kind` is `command`, `job` or `export` | at least one event |
+| `safeguards`, `recovery` | `risk` is `high` or `critical` | non-empty |
+| `implementedBy` | `status: implemented` | who built it; stamped by `claim --role implementer`, never cleared by `release-claim` |
+| `reviewStatus`, `reviewedBy` | release | `reviewed` needs a `reviewedBy` that is not the implementer (an error at `regulated`, a warning at `standard`) |
+| `rationale` | `status` is `blocked`, `deferred` or `not-applicable` | a `not-applicable` capability needs nothing else; a command, job or export also needs a confirmed decision that names it |
+
+Evidence entries are repository paths, or one of `url:` (an `http(s)` address), `command:` (a command line to re-run) or `manual:` (a human observation, see above). Only paths are opened and checked.
 
 ## The completeness test
 
@@ -77,6 +96,8 @@ Record the failing step in `gaps[]` with the workflow name. A workflow that fail
 | every declared role used by ≥1 screen and ≥1 capability | warn | error | error |
 | `decisions[]` still `assumed` at release | allow | warn | error |
 | separation of duties declared for critical commands | warn | warn | error |
+| `reviewedBy` present and not the implementer | warn | warn | error |
+| `implementedBy` recorded on an implemented capability | warn | warn | error |
 | accessibility + performance gates | may be `not-applicable` w/ rationale | required | required |
 | privileged-read audit | n/a | required if `regulatedData` | required |
 
@@ -310,7 +331,7 @@ A green `validate` means the structure is sound and nothing is obviously fake. I
 Verification is where the skill learns. Every friction, wrong instruction, missing pattern, and tooling failure encountered during the passes above is recorded before it is forgotten:
 
 ```text
-python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-root>/.admin-console/manifest.json --kind feedback --json "{\"observation\":\"...\",\"category\":\"gap\",\"proposedChange\":\"...\",\"evidence\":[\"...\"]}"
+python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-root>/.admin-console/manifest.json --kind feedback --json '{"id":"fb-001","observation":"the release gate never checked idempotency","category":"gap","scope":"references/verification.md","proposedChange":"state the idempotency rule in the capability table","evidence":["evidence/tests.log"]}'
 ```
 
 Categories: `gap`, `friction`, `incorrect-guidance`, `new-pattern`, `tooling`.

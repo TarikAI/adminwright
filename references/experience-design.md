@@ -166,7 +166,7 @@ Clear or explicitly restate the selection when the filter changes, when sort cha
 
 ### Bulk actions
 
-Before execution, preview: command name, exact count, scope in words, a sample of affected records, irreversible effects, and what will be skipped and why — ineligible state, out of scope, claimed by another operator.
+Before execution, preview: command name, exact count, scope in words, a preview of affected records, irreversible effects, and what will be skipped and why — ineligible state, out of scope, claimed by another operator.
 
 - Above a project-defined size, a bulk action becomes a job. Return a job id and a place to watch it. Mechanism is in [architecture.md](architecture.md).
 - Report per item: succeeded, skipped, failed, each with a reason. Make the failure list exportable or copyable.

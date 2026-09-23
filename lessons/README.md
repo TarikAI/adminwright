@@ -118,7 +118,7 @@ arguments and creates the last two empty.
 7. Set `status: adopted`, append a dated review note, and update the row in
    [index.md](index.md) in the same edit.
 8. Close the originating manifest entry with
-   `set --manifest <path> --path 'feedback[FB-003].status' --value promoted`.
+   `set --manifest <path> --path 'feedback[fb-003].status' --value promoted`.
 
 The agent that opened a lesson does not adopt it. In single-agent operation, adoption is a
 separate declared pass with the reference file re-read rather than recalled.

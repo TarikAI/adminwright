@@ -98,8 +98,9 @@ replacement for the adversarial pass, the permission matrix, or `validate` and `
 - `qualityGates[]` — `passed` or `failed`, each with an evidence path; `not-applicable` only
   with a recorded rationale and only where the profile permits
 - `gaps[]` — every finding, with severity and reproduction
-- `reviewStatus` — `reviewed` or `contested` (contested always paired with a gap) on
-  capabilities you did not implement
+- `crossCutting.observability` and `crossCutting.data` — flags and evidence you verified
+- `reviewedBy` (your agent id, set first) and then `reviewStatus` — `reviewed` or
+  `contested` (contested always paired with a gap) on capabilities you did not implement
 - `tests[]` and `evidence[]` for tests you wrote
 - `feedback[]` — friction that belongs to the skill
 
