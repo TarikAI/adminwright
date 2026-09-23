@@ -7,6 +7,16 @@ name: OCR advisory review
 # CONTRIBUTING.md "Advisory OCR review". The secrets are mapped into job env
 # because a job-level `if` cannot see the secrets context (only github, needs,
 # vars, inputs); a step-level `if` can see env.
+#
+# Supply chain: the action is pinned to a release SHA, and its ocr_version input
+# pins the npm package it installs (the action defaults to `latest`, which would
+# fetch whatever was published last on every run). Keep the two on the same
+# release and bump them together. OCR_NO_UPDATE=1 (job env, inherited by the
+# action's steps) stops the ocr launcher's background self-update, which would
+# otherwise run `npm i -g` for the newest version even after the pin. Residual
+# exposure is documented in INTEGRATIONS.md "Advisory OCR review": the version
+# is pinned, not an integrity hash, and the package's native binary comes from a
+# per-platform optional package or the release's GitHub assets.
 
 on:
   pull_request:
@@ -22,6 +32,7 @@ jobs:
     env:
       OCR_LLM_URL: ${{ secrets.OCR_LLM_URL }}
       OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_TOKEN }}
+      OCR_NO_UPDATE: '1'
     steps:
       - name: Notice when secrets are absent
         if: ${{ env.OCR_LLM_URL == '' || env.OCR_LLM_TOKEN == '' }}
@@ -33,6 +44,7 @@ jobs:
         if: ${{ env.OCR_LLM_URL != '' && env.OCR_LLM_TOKEN != '' }}
         uses: alibaba/open-code-review@24c2dd0cde63f56b19079ccf128cf88ab523cadf # v1.9.6
         with:
+          ocr_version: '1.9.6' # npm package version; same release as the action pin above
           llm_url: ${{ env.OCR_LLM_URL }}
           llm_auth_token: ${{ env.OCR_LLM_TOKEN }}
           llm_model: ${{ vars.OCR_LLM_MODEL || 'agnes-2.0-flash' }}
