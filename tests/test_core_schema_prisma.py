@@ -2,12 +2,12 @@
 # Copyright 2026 TarikAI
 """Runs prisma.schema through the real Prisma 7 CLI and applies the result to PostgreSQL.
 
-Skipped unless the PostgreSQL environment of _core_schema_pg.py is available, `npm` and `npx`
-are on PATH, and ADMINWRIGHT_PRISMA_TEST=1 (it downloads prisma@7 from the npm registry, so it
-is opt-in locally; CI's "core schema on PostgreSQL" job sets it). It checks what the audit
-checked by hand: `prisma validate` passes on Prisma 7 (no datasource `url`), the DDL Prisma
-emits has no ON DELETE SET NULL, and the emitted DDL plus prisma_raw.sql produces a database
-that passes the schema README's verification SQL.
+Skipped unless the PostgreSQL environment of _core_schema_pg.py is available and
+ADMINWRIGHT_NPM_TEST=1 with npm/npx on PATH (it downloads prisma@7 from the npm registry, so it is
+opt-in locally; CI's "core schema on PostgreSQL" job sets it). It checks what the audit checked by
+hand: `prisma validate` passes on Prisma 7 (no datasource `url`), the DDL Prisma emits has no
+ON DELETE SET NULL, and the emitted DDL plus prisma_raw.sql produces a database that passes the
+schema README's verification SQL.
 
 Standard library only (Python 3.9+).
 """
@@ -16,23 +16,20 @@ import os
 import shutil
 import subprocess
 import unittest
+from urllib.parse import quote_plus
 
-from _core_schema_pg import ENABLED, SCHEMA, SKIP_REASON, PgCase, readme_verification_sql
-
-NPM = shutil.which("npm")
-NPX = shutil.which("npx")
-OPTED_IN = os.environ.get("ADMINWRIGHT_PRISMA_TEST") == "1" and bool(NPM and NPX)
+from _core_schema_pg import NPM, NPM_ENABLED, NPM_SKIP_REASON, NPX, SCHEMA, PgCase, readme_verification_sql
 
 CONFIG = """\
 import { defineConfig } from "prisma/config";
 export default defineConfig({
   schema: "schema.prisma",
-  datasource: { url: "postgresql://%(user)s@%(host)s:%(port)s/%(db)s" },
+  datasource: { url: "postgresql://%(user)s:%(password)s@%(host)s:%(port)s/%(db)s" },
 });
 """
 
 
-@unittest.skipUnless(ENABLED and OPTED_IN, SKIP_REASON + "; plus ADMINWRIGHT_PRISMA_TEST=1 with npm/npx on PATH")
+@unittest.skipUnless(NPM_ENABLED, NPM_SKIP_REASON)
 class TestPrismaTranslationOnPostgres(PgCase):
     def run_cmd(self, cwd, *cmd):
         result = subprocess.run(
@@ -47,8 +44,9 @@ class TestPrismaTranslationOnPostgres(PgCase):
         project.mkdir()
         shutil.copy(str(SCHEMA / "prisma.schema"), str(project / "schema.prisma"))
         (project / "prisma.config.ts").write_text(
-            CONFIG % {"user": os.environ["PGUSER"], "host": os.environ.get("PGHOST", "localhost"),
-                      "port": os.environ.get("PGPORT", "5432"), "db": db},
+            CONFIG % {"user": quote_plus(os.environ["PGUSER"]), "password": quote_plus(os.environ.get("PGPASSWORD", "")),
+                      "host": os.environ.get("PGHOST", "localhost"), "port": os.environ.get("PGPORT", "5432"),
+                      "db": db},
             encoding="utf-8",
         )
         self.run_cmd(project, NPM, "init", "-y")
@@ -66,6 +64,13 @@ class TestPrismaTranslationOnPostgres(PgCase):
         self.psql(db, "-f", str(SCHEMA / "prisma_raw.sql"))
         verified = self.psql(db, "-f", self.sql_file("verify.sql", readme_verification_sql("public")))
         self.assertIn("all admin_core checks passed", verified.stderr + verified.stdout)
+
+        # Prisma does not try to drop what it cannot model (raw indexes, CHECKs, triggers)
+        self.run_cmd(project, NPX, "prisma", "migrate", "diff", "--from-config-datasource",
+                     "--to-schema", "schema.prisma", "--script", "-o", "back.sql")
+        back = (project / "back.sql").read_text(encoding="utf-8-sig")
+        self.assertNotIn("DROP INDEX", back)
+        self.assertNotIn("DROP CONSTRAINT", back)
 
 
 if __name__ == "__main__":

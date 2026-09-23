@@ -533,8 +533,11 @@ class TestCanonicalIsSelfConsistent(unittest.TestCase):
         sql = read("postgres.sql")
         self.assertRegex(sql, r"request_id\s+bigint\s+NOT NULL REFERENCES approval_request\(id\) ON DELETE RESTRICT")
         for op in ("update", "delete", "truncate"):
-            self.assertRegex(sql, r"CREATE TRIGGER approval_decision_no_%s\s+BEFORE %s ON approval_decision" % (op, op.upper()))
-            self.assertRegex(sql, r"CREATE TRIGGER audit_event_no_%s\s+BEFORE %s ON audit_event" % (op, op.upper()))
+            for table in ("approval_decision", "audit_event"):
+                self.assertRegex(
+                    sql,
+                    r"CREATE TRIGGER %s_no_%s\s+BEFORE %s ON admin_core\.%s" % (table, op, op.upper(), table),
+                )
 
     def test_configuration_keys_are_unique_per_environment(self):
         # audit finding 5.10: UNIQUE (key) made "same key in production and staging" impossible.

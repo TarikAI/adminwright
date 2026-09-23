@@ -122,7 +122,7 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
       ADMINWRIGHT_PG_TEST: "1"
-      ADMINWRIGHT_PRISMA_TEST: "1"
+      ADMINWRIGHT_NPM_TEST: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -154,5 +154,6 @@ jobs:
       # test_core_schema_db.py     postgres.sql: verification is not vacuous, grants.sql, concurrent chain writers
       # test_core_schema_django.py django_models.py: check, sqlmigrate, migrate, django_triggers.sql, verification
       # test_core_schema_prisma.py prisma.schema on Prisma 7: validate, no SET NULL, DDL + prisma_raw.sql, verification
+      # test_core_schema_drizzle.py drizzle.ts via drizzle-kit: generate, append the Integrity section, verification
       - name: Core schema tests against the service container
         run: python -m unittest discover -s tests -p "test_core_schema_*.py" -v

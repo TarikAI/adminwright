@@ -317,25 +317,8 @@ CREATE TABLE approval_decision (
     CONSTRAINT approval_decision_one_per_approver UNIQUE (request_id, approver_id)
 );
 
--- Separation of duties: the requester may not approve their own request. Enforced
--- here rather than in application code because it is the whole point of the control.
-CREATE OR REPLACE FUNCTION admin_core.enforce_separation_of_duties()
-RETURNS trigger AS $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM admin_core.approval_request r
-        WHERE r.id = NEW.request_id AND r.requested_by = NEW.approver_id
-    ) THEN
-        RAISE EXCEPTION 'separation of duties: requester % may not approve request %',
-            NEW.approver_id, NEW.request_id;
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER approval_decision_sod
-    BEFORE INSERT ON approval_decision
-    FOR EACH ROW EXECUTE FUNCTION admin_core.enforce_separation_of_duties();
+-- The separation-of-duties trigger and the append-only triggers for this table are in
+-- the Integrity section at the end.
 
 -- ---------------------------------------------------------------------------
 -- Jobs
@@ -601,7 +584,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER audit_event_chain_link
-    BEFORE INSERT ON audit_event
+    BEFORE INSERT ON admin_core.audit_event
     FOR EACH ROW EXECUTE FUNCTION admin_core.audit_event_chain_link();
 
 -- Re-computes every row of the chain and returns one row per problem found; an
@@ -699,6 +682,26 @@ $$;
 
 REVOKE ALL ON FUNCTION admin_core.scrub_audit_payload(bigint, text, text, bigint) FROM PUBLIC;
 
+-- Separation of duties: the requester may not approve their own request. Enforced
+-- here rather than in application code because it is the whole point of the control.
+CREATE OR REPLACE FUNCTION admin_core.enforce_separation_of_duties()
+RETURNS trigger AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM admin_core.approval_request r
+        WHERE r.id = NEW.request_id AND r.requested_by = NEW.approver_id
+    ) THEN
+        RAISE EXCEPTION 'separation of duties: requester % may not approve request %',
+            NEW.approver_id, NEW.request_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER approval_decision_sod
+    BEFORE INSERT ON admin_core.approval_decision
+    FOR EACH ROW EXECUTE FUNCTION admin_core.enforce_separation_of_duties();
+
 -- Append-only enforcement.
 CREATE OR REPLACE FUNCTION admin_core.deny_audit_mutation()
 RETURNS trigger AS $$
@@ -725,27 +728,27 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER audit_event_no_update
-    BEFORE UPDATE ON audit_event
+    BEFORE UPDATE ON admin_core.audit_event
     FOR EACH ROW EXECUTE FUNCTION admin_core.audit_event_guard_update();
 
 CREATE TRIGGER audit_event_no_delete
-    BEFORE DELETE ON audit_event
+    BEFORE DELETE ON admin_core.audit_event
     FOR EACH ROW EXECUTE FUNCTION admin_core.deny_audit_mutation();
 
 CREATE TRIGGER audit_event_no_truncate
-    BEFORE TRUNCATE ON audit_event
+    BEFORE TRUNCATE ON admin_core.audit_event
     FOR EACH STATEMENT EXECUTE FUNCTION admin_core.deny_audit_mutation();
 
 CREATE TRIGGER approval_decision_no_update
-    BEFORE UPDATE ON approval_decision
+    BEFORE UPDATE ON admin_core.approval_decision
     FOR EACH ROW EXECUTE FUNCTION admin_core.deny_audit_mutation();
 
 CREATE TRIGGER approval_decision_no_delete
-    BEFORE DELETE ON approval_decision
+    BEFORE DELETE ON admin_core.approval_decision
     FOR EACH ROW EXECUTE FUNCTION admin_core.deny_audit_mutation();
 
 CREATE TRIGGER approval_decision_no_truncate
-    BEFORE TRUNCATE ON approval_decision
+    BEFORE TRUNCATE ON admin_core.approval_decision
     FOR EACH STATEMENT EXECUTE FUNCTION admin_core.deny_audit_mutation();
 
 -- Grant shape for the application role: see grants.sql.

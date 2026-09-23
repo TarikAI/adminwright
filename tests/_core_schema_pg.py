@@ -30,6 +30,13 @@ PSQL = os.environ.get("ADMINWRIGHT_PSQL") or shutil.which("psql")
 ENABLED = os.environ.get("ADMINWRIGHT_PG_TEST") == "1" and bool(PSQL)
 SKIP_REASON = "set ADMINWRIGHT_PG_TEST=1 and provide psql + a PostgreSQL superuser to run"
 
+# The Prisma and Drizzle translations are checked with their real CLIs, which are downloaded
+# from the npm registry, so those tests are opt-in: ADMINWRIGHT_NPM_TEST=1 with npm/npx on PATH.
+NPM = shutil.which("npm")
+NPX = shutil.which("npx")
+NPM_ENABLED = ENABLED and os.environ.get("ADMINWRIGHT_NPM_TEST") == "1" and bool(NPM and NPX)
+NPM_SKIP_REASON = SKIP_REASON + "; plus ADMINWRIGHT_NPM_TEST=1 with npm and npx on PATH"
+
 
 def readme_verification_sql(schema="admin_core"):
     """The SQL block under "Verifying the install" in the schema README, aimed at `schema`."""
@@ -39,6 +46,14 @@ def readme_verification_sql(schema="admin_core"):
     if schema != "admin_core":
         sql = sql.replace("SET LOCAL search_path = admin_core, public;", "SET LOCAL search_path = %s;" % schema)
     return sql
+
+
+def integrity_section():
+    """postgres.sql from the "Integrity" heading to COMMIT: every function and trigger. This is
+    what the Drizzle header tells a user to append to the migration drizzle-kit generates."""
+    sql = (SCHEMA / "postgres.sql").read_text(encoding="utf-8")
+    start = sql.index("-- Integrity: hash chain")
+    return sql[start: sql.index("\nCOMMIT;", start)] + "\n"
 
 
 def canonical_check_names():
