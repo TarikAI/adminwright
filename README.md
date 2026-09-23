@@ -75,7 +75,7 @@ Structural completeness, not vibes:
 - Every non-initial lifecycle state is reachable by a command
 - Every capability links to a screen whose route it actually declares
 - Every high-risk command has safeguards, recovery, and idempotency
-- Every evidence path exists, is non-empty, and — at `regulated` — mentions the capability
+- Every evidence path exists and is non-empty; at `regulated` the capability's test files must mention it
 - No placeholder anywhere in the release path
 
 The placeholder scanner is deliberately hard to slip past. It folds Unicode homoglyphs

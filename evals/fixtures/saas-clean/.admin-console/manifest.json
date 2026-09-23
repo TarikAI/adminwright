@@ -120,6 +120,7 @@
             "evidence/tests.log"
           ],
           "owner": "impl",
+          "implementedBy": "impl",
           "reviewStatus": "reviewed",
           "reviewedBy": "qa"
         },
@@ -166,6 +167,7 @@
             "evidence/tests.log"
           ],
           "owner": "impl",
+          "implementedBy": "impl",
           "reviewStatus": "reviewed",
           "reviewedBy": "qa",
           "idempotency": "state-conditional; repeat on suspended tenant is a no-op",
@@ -242,6 +244,7 @@
             "evidence/tests.log"
           ],
           "owner": "impl",
+          "implementedBy": "impl",
           "reviewStatus": "reviewed",
           "reviewedBy": "qa"
         },
@@ -289,6 +292,7 @@
             "evidence/tests.log"
           ],
           "owner": "impl",
+          "implementedBy": "impl",
           "reviewStatus": "reviewed",
           "reviewedBy": "qa",
           "idempotency": "provider idempotency key per cancellation request",
@@ -463,7 +467,8 @@
       "evidence": [
         "evidence/build.log"
       ],
-      "rationale": ""
+      "rationale": "",
+      "command": "next build"
     },
     {
       "id": "typecheck",
@@ -472,7 +477,8 @@
       "evidence": [
         "evidence/typecheck.log"
       ],
-      "rationale": ""
+      "rationale": "",
+      "command": "tsc --noEmit"
     },
     {
       "id": "lint",
@@ -481,7 +487,8 @@
       "evidence": [
         "evidence/lint.log"
       ],
-      "rationale": ""
+      "rationale": "",
+      "command": "eslint ."
     },
     {
       "id": "tests",
@@ -490,7 +497,8 @@
       "evidence": [
         "evidence/tests.log"
       ],
-      "rationale": ""
+      "rationale": "",
+      "command": "vitest run"
     },
     {
       "id": "browser",
@@ -499,7 +507,8 @@
       "evidence": [
         "evidence/browser.log"
       ],
-      "rationale": ""
+      "rationale": "",
+      "command": "playwright test"
     },
     {
       "id": "accessibility",
@@ -508,7 +517,8 @@
       "evidence": [
         "evidence/accessibility.log"
       ],
-      "rationale": ""
+      "rationale": "",
+      "command": "axe-core scan"
     },
     {
       "id": "security",
@@ -517,7 +527,8 @@
       "evidence": [
         "evidence/security.log"
       ],
-      "rationale": ""
+      "rationale": "",
+      "command": "npm audit --omit=dev"
     },
     {
       "id": "performance",
@@ -526,7 +537,8 @@
       "evidence": [
         "evidence/performance.log"
       ],
-      "rationale": ""
+      "rationale": "",
+      "command": "k6 run admin-list.js"
     }
   ],
   "decisions": [

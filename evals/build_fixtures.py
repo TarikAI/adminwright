@@ -122,7 +122,8 @@ def capability(**overrides):
         "entityStates": {"from": [], "to": []}, "uiRoutes": [],
         "serverOperations": [], "authorizationPolicies": [], "auditEvents": [],
         "safeguards": [], "dataBinding": "", "tests": [], "evidence": [],
-        "owner": "impl", "reviewStatus": "reviewed", "reviewedBy": "qa",
+        "owner": "impl", "implementedBy": "impl", "reviewStatus": "reviewed",
+        "reviewedBy": "qa",
     }
     base.update(overrides)
     return base
@@ -143,6 +144,9 @@ def pass_gates(manifest):
         gate["status"] = "passed"
         gate["evidence"] = ["evidence/" + gate["id"] + ".log"]
         gate["threshold"] = "command exits zero"
+        # The command that produced the log; the regulated profile checks the
+        # evidence file actually mentions what ran (gate-evidence-unrelated).
+        gate["command"] = EVIDENCE_LOGS[gate["id"]].splitlines()[0]
 
 
 def build_saas():
@@ -338,6 +342,9 @@ def build_logistics():
     write(root, "tests/job.spec.ts",
           "test('job.list via /admin/jobs', async () => {\n"
           "  expect((await listJobs({region: 'north'})).length).toBeGreaterThan(0);\n"
+          "});\n"
+          "test('job.dispatch moves a queued job to dispatched', async () => {\n"
+          "  expect((await dispatchJob('j-1')).status).toBe('dispatched');\n"
           "});\n")
     # Deliberately empty: proves the non-empty evidence rule still fires.
     write(root, "evidence/empty.log", "")

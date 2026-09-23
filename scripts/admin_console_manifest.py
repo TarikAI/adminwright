@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -145,12 +146,15 @@ CONFUSABLES = str.maketrans(
     {
         "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c",
         "\u0445": "x", "\u0443": "y", "\u0456": "i", "\u0458": "j", "\u04bb": "h",
+        "\u043a": "k", "\u0455": "s", "\u0501": "d", "\u051b": "q", "\u051d": "w",
+        "\u0261": "g", "\u0131": "i", "\u03bd": "v", "\u03c1": "p",
         "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H",
         "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
-        "\u03a1": "P", "\u03a4": "T", "\u03a7": "X", "\u03bf": "o", "\u03b1": "a",
+        "\u03a1": "P", "\u03a4": "T", "\u03a5": "Y", "\u03a7": "X", "\u03bf": "o",
+        "\u03b1": "a",
         "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041a": "K", "\u041c": "M",
         "\u041d": "H", "\u041e": "O", "\u0420": "P", "\u0421": "C", "\u0422": "T",
-        "\u0425": "X", "\u0406": "I", "\uff4f": "o", "\uff41": "a",
+        "\u0425": "X", "\u0406": "I", "\u0405": "S", "\uff4f": "o", "\uff41": "a",
     }
 )
 
@@ -177,7 +181,18 @@ def substring_hit(squashed):
 
 
 def fold_confusables(text):
-    return text.translate(CONFUSABLES)
+    """Reduce a string to what a human reads, so 'mo<ZWSP>ck' cannot hide a mock.
+
+    Format characters (zero-width space and joiner, BOM, soft hyphen, bidi marks)
+    are invisible; NFKD folds fullwidth and mathematical letters to ASCII and
+    splits accents off; the table then maps the Cyrillic and Greek look-alikes.
+    """
+    kept = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    decomposed = unicodedata.normalize("NFKD", kept)
+    plain = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return plain.translate(CONFUSABLES)
+
+
 URL_PREFIXES = ("http://", "https://")
 NOT_REQUIRED_PATTERN = re.compile(r"^not-required:\s*\S+", re.I)
 
@@ -263,6 +278,17 @@ RULES = {
     "research-source-incomplete": QUALITY,
     "reviewer-identity": LATE,
     "archetype-coverage": W3,
+    # evidence integrity: what a gate is allowed to point at
+    "declared-static-forbidden-path": E3,
+    "declared-static-self-approved": STRICT_ONLY,
+    "evidence-inside-manifest-dir": E3,
+    "evidence-is-test-file": QUALITY,
+    "evidence-shared": STRICT_ONLY,
+    "gate-evidence-unrelated": STRICT_ONLY,
+    "test-file-shape": QUALITY,
+    "test-file-shared": STRICT_ONLY,
+    "implementer-unrecorded": LATE,
+    "not-applicable-undecided": STRICT_ONLY,
 }
 
 # Rules that describe an UNFINISHED model rather than a malformed one.
@@ -293,6 +319,8 @@ COMPLETENESS_RULES = frozenset(
         "research-sources-missing",
         "separation-of-duties",
         "capability-unreviewed",
+        "implementer-unrecorded",
+        "not-applicable-undecided",
     }
 )
 
@@ -459,6 +487,12 @@ class Findings:
         self.phase = phase
         self._index = PROFILES.index(profile)
         self.items = []
+        self._seen = set()
+        # Every resolved evidence file, tagged with what cited it, so the
+        # sharing rules can ask "is one README standing in for every gate?"
+        self.evidence_index = []
+        self.manifest_dir = None
+        self.static_allowed = frozenset()
 
     def severity_for(self, rule):
         severity = RULES.get(rule, E3)[self._index]
@@ -472,6 +506,12 @@ class Findings:
         severity = self.severity_for(rule)
         if severity == OFF:
             return
+        key = (rule, path, message)
+        # The schema walker and the field checks can legitimately notice the
+        # same wrong type; say it once.
+        if key in self._seen:
+            return
+        self._seen.add(key)
         self.items.append(
             {"rule": rule, "severity": severity, "path": path, "message": message}
         )
@@ -723,7 +763,7 @@ def evidence_kind(raw):
 
 
 def evidence_path(raw, project_root):
-    file_part = str(raw).split("#", 1)[0].strip()
+    file_part = str(raw).split("#", 1)[0].strip().replace("\\", "/")
     if not file_part:
         return None
     candidate = Path(file_part)
@@ -751,14 +791,35 @@ def escapes_root(candidate, project_root):
     return root != resolved and root not in resolved.parents
 
 
+def inside_manifest_dir(candidate, manifest_dir):
+    """True when evidence lives in the manifest's own working directory.
+
+    `.admin-console/manifest.json` is real, non-empty JSON. Citing it as a test
+    or as gate evidence proves nothing but that the manifest exists, and the
+    manifest is exactly what the evidence is supposed to be checked against.
+    """
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return False
+    if ".admin-console" in resolved.parts:
+        return True
+    if manifest_dir is not None:
+        try:
+            base = Path(manifest_dir).resolve()
+        except OSError:
+            return False
+        return resolved == base or base in resolved.parents
+    return False
+
+
 def path_state(candidate):
-    """Return 'missing', 'directory', 'empty', 'placeholder', or 'ok'.
+    """Return 'missing', 'directory', 'empty', or 'ok'.
 
     A directory is never evidence: any folder holding one unrelated file used to
     satisfy the gate. Whitespace-only files have nonzero size, so byte count
-    alone is not an emptiness test. And the file's CONTENT is scanned, because
-    an evidence file reading "TODO: replace with real results" passed every
-    check when only its path string was examined.
+    alone is not an emptiness test. Content is judged separately, by role:
+    a test file is checked for assertions, an evidence file for placeholder text.
     """
     try:
         if candidate.is_dir():
@@ -767,13 +828,8 @@ def path_state(candidate):
             return "missing"
         if candidate.stat().st_size == 0:
             return "empty"
-        body = read_head(candidate)
-        if not body.strip():
+        if not read_head(candidate).strip():
             return "empty"
-        folded = fold_confusables(body)
-        squashed = folded.replace(" ", "").replace("-", "").replace("_", "")
-        if PLACEHOLDER_PATTERN.search(split_identifiers(folded)) or substring_hit(squashed):
-            return "placeholder"
         return "ok"
     except OSError:
         return "missing"
@@ -799,10 +855,41 @@ def read_head(candidate):
 # An assertion in any of the languages this skill targets. A test file listed
 # as proof of a capability must actually claim something about it: `test('...',
 # () => {})` compiles, runs, passes, and proves nothing.
+#
+# Every alternative is anchored: an unanchored `assert` matched
+# `import { assert } from 'chai'`, a comment reading "add assertions later", and
+# `jwt.verify(...)`, so a file with no test in it satisfied the check.
 ASSERTION_PATTERN = re.compile(
-    r"assert|expect\s*\(|\.should\b|should\s*\(|\.to(?:be|equal|match|contain|have|throw)"
-    r"|verify\s*\(|xctassert|require\.(?:no)?error|\bok\s*\(|check\s*\(",
-    re.I,
+    r"\bassert\w*\s*[(!]"                       # assert(x), assertEqual(..), assert_eq!(..)
+    r"|\bassert\.\w+"                           # assert.equal, testify assert.Equal, xUnit
+    r"|^\s*assert\s+\S"                         # Python: assert x == y
+    r"|\bexpect\s*\("
+    r"|\.should\b|\bshould\s*\("
+    r"|\.to(?:be|equal|match|contain|have|throw)\w*"
+    r"|(?<![\w.])verify\s*\("                   # Mockito verify(..), never jwt.verify
+    r"|\bxctassert\w*\s*\("
+    r"|\brequire\.(?:no)?error\s*\("
+    r"|(?<![\w.])ok\s*\("
+    r"|(?<![\w.])check\s*\(",
+    re.I | re.M,
+)
+
+# Comments are stripped before assertion matching so a TODO that mentions
+# assertions is not counted as one.
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_LINE_COMMENT = re.compile(
+    r"(?m)(?:^[ \t]*(?://|#(?!\[))|(?<![:\w\"'/])//|[ \t]#[ \t]).*$"
+)
+
+# Something a test runner would actually run. A file named like a test passes on
+# its name alone; anything else has to contain a runner call.
+TEST_NAME_PATTERN = re.compile(
+    r"(?:\.(?:spec|test)\.[A-Za-z0-9]+$|_test\.(?:py|go|rb|exs?)$|(?:^|/)test_[^/]*\.py$"
+    r"|\.cs$|\.kt$|\.swift$|\.java$)"
+)
+TEST_RUNNER_PATTERN = re.compile(
+    r"(?<![\w.])(?:test|it|describe|suite)\s*(?:\.\w+\s*)?\(|\bdef\s+test_|\bfunc\s+Test"
+    r"|#\[test\]|\[(?:Fact|Theory|Test|TestMethod)\]|@Test\b|@pytest\.|\bRSpec\.describe\b"
 )
 
 # Evidence that says a thing happened without saying what. A real run leaves
@@ -815,8 +902,25 @@ VAGUE_EVIDENCE_WORDS = re.compile(
 )
 
 
+def strip_comments(body):
+    return _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", body))
+
+
+def assertion_count(body):
+    return len(ASSERTION_PATTERN.findall(strip_comments(body)))
+
+
 def has_assertion(body):
-    return bool(ASSERTION_PATTERN.search(body))
+    return assertion_count(body) > 0
+
+
+def looks_like_test_file(candidate, body):
+    name = str(candidate).replace("\\", "/")
+    if TEST_NAME_PATTERN.search(name):
+        return True
+    if name.endswith(".rs"):
+        return "#[test]" in body
+    return bool(TEST_RUNNER_PATTERN.search(strip_comments(body)))
 
 
 def is_uninformative(body):
@@ -835,17 +939,43 @@ def check_evidence_list(
     required,
     missing_rule="evidence-path-missing",
     expect_assertions=False,
+    role="evidence",
+    owner="",
 ):
     """Validate one evidence/test list. Returns the resolvable local paths.
 
     `expect_assertions` marks a list of test files rather than run output: the
-    file must contain an assertion, because an empty test body satisfies every
-    path-and-content check while proving nothing about the capability it is
-    listed under.
+    file must be shaped like a test and contain an assertion, because an empty
+    test body satisfies every path-and-content check while proving nothing about
+    the capability it is listed under.
+
+    `role` and `owner` say what is citing the file, so the sharing rules can
+    later ask whether one file is standing in for many claims.
     """
     resolved = []
-    entries = [value for value in as_list(values) if isinstance(value, str)]
-    for index, raw in enumerate(entries):
+    if values is None:
+        return resolved
+    if not isinstance(values, list):
+        # `"evidence": true` and `"tests": "tests/user.spec.ts"` are non-empty,
+        # so every caller's nonempty() gate let them through with no path, size,
+        # assertion or token check at all.
+        findings.add(
+            "manifest-type",
+            field_path,
+            "must be an array of strings, not " + type(values).__name__,
+        )
+        return resolved
+    entries = []
+    for index, raw in enumerate(values):
+        if isinstance(raw, str):
+            entries.append((index, raw))
+        else:
+            findings.add(
+                "manifest-type",
+                field_path + "[" + str(index) + "]",
+                "must be a string path, not " + type(raw).__name__,
+            )
+    for index, raw in entries:
         entry_path = field_path + "[" + str(index) + "]"
         kind = evidence_kind(raw)
         if kind == "manual":
@@ -865,6 +995,14 @@ def check_evidence_list(
                 missing_rule,
                 entry_path,
                 "evidence path resolves outside the project: " + raw.strip(),
+            )
+            continue
+        if inside_manifest_dir(candidate, findings.manifest_dir):
+            findings.add(
+                "evidence-inside-manifest-dir",
+                entry_path,
+                "'" + raw.strip() + "' is inside .admin-console/; the manifest and its "
+                "working files are the claim, not evidence for it",
             )
             continue
         state = path_state(candidate)
@@ -887,15 +1025,19 @@ def check_evidence_list(
                 "evidence path is empty or whitespace only: " + raw.strip(),
             )
             continue
-        if state == "placeholder":
-            findings.add(
-                "placeholder-scan",
-                entry_path,
-                "evidence file contains placeholder text: " + raw.strip(),
-            )
-            continue
         body = read_head(candidate)
         if expect_assertions:
+            # A test file is not placeholder-scanned: fabricated fixtures, mocks
+            # and stubs are what tests are made of. The boundary is enforced by
+            # where the path appears (references/test-data.md), not by content.
+            if not looks_like_test_file(candidate, body):
+                findings.add(
+                    "test-file-shape",
+                    entry_path,
+                    "'" + raw.strip() + "' does not look like a test: it has no test-file "
+                    "name (*.spec.*, *.test.*, test_*.py, *_test.go ...) and no test-runner call",
+                )
+                continue
             if not has_assertion(body):
                 findings.add(
                     "test-asserts-nothing",
@@ -904,15 +1046,37 @@ def check_evidence_list(
                     + " — an empty or assertion-free test passes without proving anything",
                 )
                 continue
-        elif is_uninformative(body):
-            findings.add(
-                "evidence-uninformative",
-                entry_path,
-                "evidence states success without stating what ran: " + raw.strip()
-                + " — record the command's real output, with counts, names, or routes",
-            )
-            continue
+        else:
+            hit = scan_file_placeholder(body)
+            if hit and (entry_path + "#content") not in findings.static_allowed:
+                token, line = hit
+                findings.add(
+                    "placeholder-scan",
+                    entry_path,
+                    "evidence file " + raw.strip() + " contains placeholder token '"
+                    + token + "' at line " + str(line)
+                    + "; replace it with real output, or register the file's content in "
+                    "declaredStatic[] with path '" + entry_path + "#content'",
+                )
+                continue
+            if is_uninformative(body):
+                findings.add(
+                    "evidence-uninformative",
+                    entry_path,
+                    "evidence states success without stating what ran: " + raw.strip()
+                    + " — record the command's real output, with counts, names, or routes",
+                )
+                continue
         resolved.append(candidate)
+        findings.evidence_index.append(
+            {
+                "role": role,
+                "owner": owner,
+                "field": entry_path,
+                "path": str(candidate.resolve()),
+                "raw": raw.strip(),
+            }
+        )
     if required and entries and not resolved:
         findings.add(
             "evidence-not-resolvable",
@@ -924,16 +1088,20 @@ def check_evidence_list(
 
 
 def capability_tokens(capability):
+    """Words a test for this capability must be able to mention.
+
+    UI routes are deliberately absent: every capability on a screen shares the
+    screen's route, so one route-smoke loop token-matched all of them.
+    """
     tokens = set()
     cid = text_of(capability.get("id"))
     if cid:
         tokens.add(cid)
         for separator in ("-", "_", " ", "/"):
             tokens.add(cid.replace(".", separator))
-    for key in ("serverOperations", "uiRoutes"):
-        for value in as_list(capability.get(key)):
-            if isinstance(value, str) and value.strip():
-                tokens.add(value.strip())
+    for value in as_list(capability.get("serverOperations")):
+        if isinstance(value, str) and value.strip():
+            tokens.add(value.strip())
     long_tokens = {token for token in tokens if len(token) >= 4}
     # Falling back rather than returning an empty set: a short id like 'a.b'
     # produced no tokens at all, which silently skipped the whole
@@ -978,9 +1146,46 @@ def scan_targets(manifest, release):
     return targets
 
 
+# Fields that hold a claim about the implementation, not a value. A declaredStatic
+# entry may exempt a value (a fixed tax rate, a hard-coded support address) but
+# never the place a capability says where its data comes from or how it is proven:
+# registering `dataBinding` as "static" turned the sanctioned exception into a
+# way to ship a mock.
+FORBIDDEN_STATIC_FIELDS = frozenset(
+    (
+        "dataBinding", "sourceOfTruth", "serverOperations", "authorizationPolicies",
+        "auditEvents", "tests", "evidence", "dataSources", "policyTests", "uiRoutes",
+    )
+)
+
+
+def final_field(path):
+    """Last field name in a manifest path: 'a[x.y].tests[0]' -> 'tests'."""
+    depth = 0
+    segments = [""]
+    for char in path:
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+        if char == "." and depth == 0:
+            segments.append("")
+        else:
+            segments[-1] += char
+    return re.sub(r"(?:\[[^\]]*\])+$", "", segments[-1])
+
+
 def static_index(manifest, findings):
-    """Map declaredStatic paths that are allowed to escape the placeholder scan."""
+    """Map declaredStatic paths that are allowed to escape the placeholder scan.
+
+    A path ending `#content` exempts the CONTENT of an evidence file (a captured
+    log that legitimately quotes a mock), never the manifest string that names it.
+    """
     allowed = set()
+    caps = capability_index(manifest)
+    agent_ids = {
+        text_of(agent.get("id")).lower() for _p, agent in iter_named(manifest, "agents")
+    }
     for path, entry in iter_named(manifest, "declaredStatic"):
         target = text_of(entry.get("path"))
         if not target:
@@ -1002,6 +1207,29 @@ def static_index(manifest, findings):
                 + "; an incomplete registration is not a valid escape",
             )
             continue
+        if not target.endswith("#content") and final_field(target) in FORBIDDEN_STATIC_FIELDS:
+            findings.add(
+                "declared-static-forbidden-path",
+                path + ".path",
+                "'" + target + "' names a " + final_field(target) + " field; that field states "
+                "where data comes from or how it is proven, so it can never be declared static",
+            )
+            continue
+        approver = text_of(entry.get("approvedBy")).lower()
+        interested = set(agent_ids)
+        covered = re.search(r"capabilities\[([^\]]+)\]", target)
+        if covered and covered.group(1) in caps:
+            capability = caps[covered.group(1)][2]
+            for key in ("owner", "implementedBy", "reviewedBy"):
+                interested.add(text_of(capability.get(key)).lower())
+        interested.discard("")
+        if approver in interested:
+            findings.add(
+                "declared-static-self-approved",
+                path + ".approvedBy",
+                "'" + text_of(entry.get("approvedBy")) + "' is an agent or the capability's own "
+                "implementer or reviewer; a static exemption needs an approver outside the build",
+            )
         allowed.add(target)
     return allowed
 
@@ -1033,9 +1261,21 @@ def flatten_strings(prefix, value):
                 yield pair
 
 
+def scan_file_placeholder(body):
+    """Return (token, line_number) for the first placeholder in an evidence file, else None."""
+    for number, line in enumerate(body.splitlines(), 1):
+        folded = fold_confusables(line)
+        match = PLACEHOLDER_PATTERN.search(split_identifiers(folded)) or substring_hit(
+            folded.replace(" ", "").replace("-", "").replace("_", "")
+        )
+        if match:
+            return match.group(0), number
+    return None
+
+
 def run_placeholder_scan(manifest, findings, release):
     targets = scan_targets(manifest, release)
-    allowed = static_index(manifest, findings)
+    allowed = findings.static_allowed
     known_paths = set()
     for field_path, value in targets:
         known_paths.add(field_path)
@@ -1078,7 +1318,8 @@ def run_placeholder_scan(manifest, findings, release):
                     + "'; replace it with the real value or register it in declaredStatic[]",
                 )
     for target in sorted(allowed):
-        if target not in known_paths:
+        base = target[: -len("#content")] if target.endswith("#content") else target
+        if base not in known_paths:
             findings.add(
                 "declared-static-unused",
                 "declaredStatic",
@@ -1155,6 +1396,99 @@ def check_roles(values, role_ids, path, findings):
             "unknown-role-reference",
             path + ".roles",
             "references undeclared roles: " + ", ".join(unknown),
+        )
+
+
+# --------------------------------------------------------------------------
+# schema-driven type checks
+# --------------------------------------------------------------------------
+
+_SCHEMA_CACHE = []
+
+
+def load_schema():
+    if not _SCHEMA_CACHE:
+        try:
+            _SCHEMA_CACHE.append(json.loads(SCHEMA_PATH.read_text(encoding="utf-8-sig")))
+        except (OSError, ValueError) as exc:
+            raise ManifestError(
+                "Cannot read the manifest schema at " + str(SCHEMA_PATH) + ": " + str(exc)
+            )
+    return _SCHEMA_CACHE[0]
+
+
+def resolve_schema(schema, root):
+    """Follow a local `$ref` (the only kind this schema uses)."""
+    seen = 0
+    while isinstance(schema, dict) and isinstance(schema.get("$ref"), str) and seen < 10:
+        seen += 1
+        ref = schema["$ref"]
+        if not ref.startswith("#/"):
+            break
+        node = root
+        for part in ref[2:].split("/"):
+            node = as_dict(node).get(part, {})
+        merged = dict(as_dict(node))
+        merged.update({key: val for key, val in schema.items() if key != "$ref"})
+        schema = merged
+    return schema if isinstance(schema, dict) else {}
+
+
+def schema_item_key(item, index, item_schema):
+    """Name an array element the way every other finding path does: by id."""
+    if isinstance(item, dict) and "id" in as_dict(item_schema.get("properties")):
+        return text_of(item.get("id")) or "#" + str(index)
+    return str(index)
+
+
+def check_schema_types(value, schema, root, path, findings, unknown_field=False):
+    """Type-check the manifest against the schema's `type`, `items` and `properties`.
+
+    The schema types `tests`, `evidence`, `policyTests` and every other list of
+    strings, and until this walker existed nothing enforced it: `"tests":
+    "tests/user.spec.ts"` and `"evidence": true` are non-empty, so every check
+    that began `if nonempty(...)` waved them through with no path, size, assertion
+    or token check. Types are E3 at every profile; enums, patterns and required
+    keys stay with the rule-specific checks.
+    """
+    schema = resolve_schema(schema, root)
+    expected = schema.get("type")
+    if expected == "object":
+        if not isinstance(value, dict):
+            findings.add("manifest-type", path, "must be an object")
+            return
+        properties = as_dict(schema.get("properties"))
+        for key, sub in properties.items():
+            if key in value:
+                child = key if not path else path + "." + key
+                check_schema_types(value[key], sub, root, child, findings, unknown_field)
+        if unknown_field and properties:
+            for key in value:
+                if key not in properties:
+                    findings.add(
+                        "unknown-field",
+                        (key if not path else path + "." + key),
+                        "is not a field the manifest schema declares; check the spelling, or "
+                        "record the extra information in a field that exists",
+                    )
+        return
+    if expected == "array":
+        if not isinstance(value, list):
+            findings.add("manifest-type", path, "must be an array")
+            return
+        items = resolve_schema(schema.get("items"), root)
+        for index, item in enumerate(value):
+            child = path + "[" + schema_item_key(item, index, items) + "]"
+            if items:
+                check_schema_types(item, items, root, child, findings, unknown_field)
+        return
+    if expected == "string" and not isinstance(value, str):
+        findings.add("manifest-type", path, "must be a string, not " + type(value).__name__)
+    elif expected == "boolean" and not isinstance(value, bool):
+        findings.add("manifest-type", path, "must be a boolean")
+    elif "enum" in schema and isinstance(value, (list, dict)):
+        findings.add(
+            "manifest-type", path, "must be a single string, not " + type(value).__name__
         )
 
 
@@ -1254,13 +1588,12 @@ def structural_findings(manifest, findings, release):
             findings.add("capability-screen-link", path, "implemented capability " + detail)
 
     # entity observability and lifecycle reachability
-    escape_text = collect_escape_text(manifest)
     for eid, entity in iter_entities(manifest):
         path = "entities[" + eid + "]"
         entity_caps = [
             cap for cap in as_list(entity.get("capabilities")) if isinstance(cap, dict)
         ]
-        kinds = {cap.get("kind") for cap in entity_caps}
+        kinds = {cap.get("kind") for cap in entity_caps if isinstance(cap.get("kind"), str)}
         if "query" not in kinds:
             findings.add(
                 "entity-query-missing",
@@ -1317,7 +1650,7 @@ def structural_findings(manifest, findings, release):
                         "'" + value + "' is not one of the declared lifecycleStates",
                     )
         for position, state in enumerate(states):
-            if state not in observed and state.lower() not in escape_text:
+            if state not in observed and not lifecycle_escaped(manifest, entity, state):
                 findings.add(
                     "lifecycle-observable",
                     path + ".lifecycleStates",
@@ -1332,7 +1665,7 @@ def structural_findings(manifest, findings, release):
             if (
                 state not in reached
                 and state not in transition_targets
-                and state.lower() not in escape_text
+                and not lifecycle_escaped(manifest, entity, state)
             ):
                 findings.add(
                     "lifecycle-reachable",
@@ -1403,10 +1736,50 @@ def structural_findings(manifest, findings, release):
                 )
 
 
+def lifecycle_escaped(manifest, entity, state):
+    """Whether a recorded gap explains why a lifecycle state has no operator path.
+
+    A state entered only by an external system (a payment webhook, a device
+    callback) is legitimately unreachable by any operator command, and recording
+    why in gaps[] is the honest answer. But the escape used to be a substring
+    match over ALL gap text, so any gap that happened to mention 'quarantined' --
+    including findings the OCR bridge files automatically -- silenced the check for
+    every entity. It now takes an open or accepted gap, not filed by the OCR
+    bridge, that names the state AND either names this entity or carries an
+    explicit `entity` (or `capability`) field pointing at it.
+    """
+    entity_id = text_of(entity.get("id")).lower()
+    capability_ids = {
+        text_of(cap.get("id"))
+        for cap in as_list(entity.get("capabilities"))
+        if isinstance(cap, dict)
+    }
+    wanted = re.compile(r"(?<![a-z0-9])" + re.escape(state.lower()) + r"(?![a-z0-9])")
+    for _path, gap in iter_named(manifest, "gaps"):
+        if gap.get("status") not in ("open", "accepted"):
+            continue
+        if text_of(gap.get("source")).lower() == "ocr":
+            continue
+        text = (text_of(gap.get("description")) + " " + text_of(gap.get("rationale"))).lower()
+        if not wanted.search(text):
+            continue
+        gap_entity = text_of(gap.get("entity")).lower()
+        gap_capability = text_of(gap.get("capability"))
+        explicit = bool(
+            (gap_entity and gap_entity == entity_id)
+            or (gap_capability and gap_capability in capability_ids)
+        )
+        if explicit or (entity_id and entity_id in text):
+            return True
+    return False
+
+
 def collect_escape_text(manifest):
-    """Lowercased text of gap and declaredStatic rationales, used as the observability escape."""
+    """Lowercased text of gap and declaredStatic rationales, used as the archetype-coverage escape."""
     chunks = []
     for _path, gap in iter_named(manifest, "gaps"):
+        if text_of(gap.get("source")).lower() == "ocr":
+            continue
         chunks.append(text_of(gap.get("description")))
         chunks.append(text_of(gap.get("rationale")))
     for _path, entry in iter_named(manifest, "declaredStatic"):
@@ -1420,10 +1793,15 @@ def collect_escape_text(manifest):
 # --------------------------------------------------------------------------
 
 
-def validate_manifest(manifest, phase, project_root, profile):
+def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None):
     findings = Findings(profile, phase)
+    findings.manifest_dir = manifest_dir
     release = phase == "release"
     check_required(manifest, TOP_LEVEL_KEYS, "manifest", findings)
+    if isinstance(manifest, dict):
+        schema = load_schema()
+        check_schema_types(manifest, schema, schema, "", findings)
+        findings.static_allowed = frozenset(static_index(manifest, findings))
 
     version = manifest.get("manifestVersion")
     if version != MANIFEST_VERSION:
@@ -1467,6 +1845,7 @@ def validate_manifest(manifest, phase, project_root, profile):
     structural_findings(manifest, findings, release)
     if release:
         validate_evidence(manifest, findings, project_root)
+        check_evidence_sharing(manifest, findings)
         if not roles:
             findings.add("required-field-empty", "roles", "release requires at least one modeled role")
         if not as_list(manifest.get("entities")):
@@ -1556,6 +1935,12 @@ def validate_roles(manifest, findings):
 
 def validate_entities(manifest, findings, release, role_ids):
     seen_capability_ids = set()
+    confirmed_targets = set()
+    for _dpath, decision in iter_named(manifest, "decisions"):
+        if decision.get("status") == "confirmed":
+            confirmed_targets.update(
+                value for value in as_list(decision.get("appliesTo")) if isinstance(value, str)
+            )
     for eid, entity in iter_entities(manifest):
         path = "entities[" + eid + "]"
         check_required(
@@ -1656,7 +2041,26 @@ def validate_entities(manifest, findings, release, role_ids):
                     path + ".reviewStatus",
                     "an implemented capability must be reviewed by an agent other than its implementer",
                 )
-            check_reviewer_identity(capability, path, findings)
+            check_reviewer_identity(manifest, capability, path, findings)
+            if not text_of(capability.get("implementedBy")):
+                findings.add(
+                    "implementer-unrecorded",
+                    path + ".implementedBy",
+                    "an implemented capability must record who implemented it "
+                    "(`claim --role implementer` stamps it), or review independence cannot be checked",
+                )
+        if (
+            status == "not-applicable"
+            and capability.get("kind") in ("command", "job", "export")
+            and cid not in confirmed_targets
+        ):
+            findings.add(
+                "not-applicable-undecided",
+                path + ".status",
+                "a not-applicable " + str(capability.get("kind")) + " needs a confirmed decision "
+                "whose appliesTo names '" + cid + "'; without one it is a deferred capability "
+                "relabelled so that release accepts it",
+            )
 
 
 def validate_screens(manifest, findings, release, role_ids):
@@ -1819,7 +2223,10 @@ def validate_cross_cutting(manifest, findings, release, project_root):
                 "a boolean is not evidence; record at least one artifact that proves this section",
             )
         else:
-            check_evidence_list(values.get("evidence"), path, findings, project_root, True)
+            check_evidence_list(
+                values.get("evidence"), path, findings, project_root, True,
+                role="cross", owner=section,
+            )
 
     authorization = as_dict(cross.get("authorization"))
     policy_path = "crossCutting.authorization.policyTests"
@@ -1830,8 +2237,10 @@ def validate_cross_cutting(manifest, findings, release, project_root):
             "record the authorization test files that prove default-deny and scope checks",
         )
     else:
-        check_evidence_list(authorization.get("policyTests"), policy_path, findings, project_root, True,
-                            expect_assertions=True)
+        check_evidence_list(
+            authorization.get("policyTests"), policy_path, findings, project_root, True,
+            expect_assertions=True, role="policy-test", owner="crossCutting.authorization",
+        )
 
     audit = as_dict(cross.get("audit"))
     regulated = bool(as_list(platform.get("regulatedData")))
@@ -1864,6 +2273,8 @@ def validate_gates(manifest, findings, release, project_root):
                     project_root,
                     True,
                     missing_rule="gate-evidence-path",
+                    role="gate",
+                    owner=gid,
                 )
             if not nonempty(gate.get("threshold")):
                 findings.add("required-field-empty", path + ".threshold", "a passed gate needs a measurable threshold")
@@ -1955,7 +2366,25 @@ def validate_agents(manifest, findings):
             findings.add("unknown-capability-reference", path + ".ownsScreens", "unknown screens: " + ", ".join(unknown_screens))
 
 
-def check_reviewer_identity(capability, path, findings):
+def implementer_ids(manifest, capability):
+    """Every id that built or held this capability, lowercased.
+
+    `owner` alone is not enough: release-claim (step 5 of every implementer's
+    exit protocol) blanks it, after which "who implemented this" was recorded
+    nowhere and the implementer could review its own work.
+    """
+    cid = text_of(capability.get("id"))
+    names = {text_of(capability.get("owner")), text_of(capability.get("implementedBy"))}
+    for _path, agent in iter_named(manifest, "agents"):
+        if text_of(agent.get("role")) != "implementer":
+            continue
+        held = as_list(agent.get("ownsCapabilities")) + as_list(agent.get("previouslyOwned"))
+        if cid and cid in held:
+            names.add(text_of(agent.get("id")))
+    return {name.lower() for name in names if name}
+
+
+def check_reviewer_identity(manifest, capability, path, findings):
     """Verify the reviewer is not the implementer.
 
     `capability-unreviewed` claimed review was done "by an agent other than its
@@ -1965,7 +2394,6 @@ def check_reviewer_identity(capability, path, findings):
     if capability.get("reviewStatus") != "reviewed":
         return
     reviewer = text_of(capability.get("reviewedBy"))
-    owner = text_of(capability.get("owner"))
     if not reviewer:
         findings.add(
             "reviewer-identity",
@@ -1974,12 +2402,13 @@ def check_reviewer_identity(capability, path, findings):
             "an unattributed review cannot be distinguished from self-review",
         )
         return
-    if owner and reviewer == owner:
+    if reviewer.lower() in implementer_ids(manifest, capability):
         findings.add(
             "reviewer-identity",
             path + ".reviewedBy",
-            "reviewer '" + reviewer + "' is the implementer; review must be a separate pass "
-            "by a different agent, or an explicitly declared pass that re-reads the code",
+            "reviewer '" + reviewer + "' is the implementer (owner, implementedBy, or an "
+            "implementer that held this capability); review must be a separate pass "
+            "by a different agent",
         )
 
 
@@ -1988,12 +2417,14 @@ def validate_evidence(manifest, findings, project_root):
     for path, _entity, capability in iter_capabilities(manifest):
         if capability.get("status") != "implemented":
             continue
+        cid = text_of(capability.get("id"))
         test_paths = check_evidence_list(
             capability.get("tests"), path + ".tests", findings, project_root, True,
-            expect_assertions=True,
+            expect_assertions=True, role="capability-test", owner=cid,
         )
         check_evidence_list(
-            capability.get("evidence"), path + ".evidence", findings, project_root, True
+            capability.get("evidence"), path + ".evidence", findings, project_root, True,
+            role="capability-evidence", owner=cid,
         )
         if findings.severity_for("evidence-token-match") == OFF:
             continue
@@ -2018,7 +2449,7 @@ def validate_evidence(manifest, findings, project_root):
             continue
         screen_tests = check_evidence_list(
             screen.get("tests"), path + ".tests", findings, project_root, True,
-            expect_assertions=True,
+            expect_assertions=True, role="screen-test", owner=text_of(screen.get("id")),
         )
         # Same asymmetry the capability check closes: a screen could cite a real
         # but unrelated test file forever.
@@ -2045,11 +2476,109 @@ def validate_evidence(manifest, findings, project_root):
     for key in ("workQueues", "integrations"):
         for path, item in iter_named(manifest, key):
             if item.get("status") == "implemented":
-                check_evidence_list(item.get("tests"), path + ".tests", findings, project_root, True,
-                                    expect_assertions=True)
+                check_evidence_list(
+                    item.get("tests"), path + ".tests", findings, project_root, True,
+                    expect_assertions=True, role="item-test", owner=text_of(item.get("id")),
+                )
     for path, gap in iter_named(manifest, "gaps"):
         if gap.get("status") == "fixed":
-            check_evidence_list(gap.get("evidence"), path + ".evidence", findings, project_root, True)
+            check_evidence_list(
+                gap.get("evidence"), path + ".evidence", findings, project_root, True,
+                role="gap-evidence", owner=text_of(gap.get("id")),
+            )
+
+
+GENERIC_COMMAND_WORDS = frozenset(
+    "npm npx run yarn pnpm exec node python python3 py bun sh bash make the and".split()
+)
+
+
+def gate_tokens(gate):
+    tokens = {text_of(gate.get("id")).lower()}
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9_.-]{2,}", text_of(gate.get("command"))):
+        if word.lower() not in GENERIC_COMMAND_WORDS:
+            tokens.add(word.lower())
+    tokens.discard("")
+    return tokens
+
+
+def check_evidence_sharing(manifest, findings):
+    """One file standing in for many claims.
+
+    A six-line package.json cited for six quality gates, a README.md for every
+    crossCutting section, or one route-smoke spec cited by every capability all
+    satisfied the per-file checks: each file exists, is non-empty, and asserts
+    something. Whether a file is being asked to prove too much is a property of
+    the whole manifest, so it is judged here, after every list has been resolved.
+    """
+    by_path = {}
+    for entry in findings.evidence_index:
+        by_path.setdefault(entry["path"], []).append(entry)
+    test_roles = ("capability-test", "screen-test", "item-test", "policy-test")
+    for _path, uses in sorted(by_path.items()):
+        roles = {use["role"] for use in uses}
+        label = uses[0]["raw"]
+        evidence_uses = [use for use in uses if use["role"] in ("gate", "cross")]
+        if evidence_uses and roles.intersection(test_roles):
+            findings.add(
+                "evidence-is-test-file",
+                evidence_uses[0]["field"],
+                "'" + label + "' is cited as gate or crossCutting evidence and as a test; "
+                "evidence is the recorded output of running something, not the test's source",
+            )
+        gate_owners = sorted({use["owner"] for use in uses if use["role"] == "gate"})
+        cross_owners = sorted({use["owner"] for use in uses if use["role"] == "cross"})
+        if len(gate_owners) > 2 or (gate_owners and cross_owners):
+            first = evidence_uses[0]
+            findings.add(
+                "evidence-shared",
+                first["field"],
+                "'" + label + "' is the evidence for " + ", ".join(gate_owners + cross_owners)
+                + "; one file cannot prove that many independent claims",
+            )
+        cap_uses = [use for use in uses if use["role"] == "capability-test"]
+        cap_owners = sorted({use["owner"] for use in cap_uses})
+        screen_owners = {use["owner"] for use in uses if use["role"] == "screen-test"}
+        if len(cap_owners) > 3 or (cap_owners and screen_owners and "policy-test" in roles):
+            findings.add(
+                "test-file-shared",
+                cap_uses[0]["field"],
+                "'" + label + "' is the test for " + str(len(cap_owners)) + " capabilities"
+                + (", screens and authorization policy" if screen_owners and "policy-test" in roles else "")
+                + "; a route-smoke loop is not a test of each of them",
+            )
+        if cap_owners and findings.profile == "regulated":
+            asserted = assertion_count(read_head(Path(uses[0]["path"])))
+            if asserted < len(cap_owners):
+                findings.add(
+                    "test-asserts-nothing",
+                    cap_uses[0]["field"],
+                    "'" + label + "' holds " + str(asserted) + " assertion(s) for "
+                    + str(len(cap_owners)) + " capabilities; each needs at least one",
+                )
+    for path, gate in iter_named(manifest, "qualityGates"):
+        gid = text_of(gate.get("id"))
+        owned = [
+            entry for entry in findings.evidence_index
+            if entry["role"] == "gate" and entry["owner"] == gid
+        ]
+        if not owned:
+            continue
+        tokens = gate_tokens(gate)
+        related = False
+        for entry in owned:
+            body = read_head(Path(entry["path"])).lower()
+            if any(token in body for token in tokens):
+                related = True
+                break
+        if not related:
+            findings.add(
+                "gate-evidence-unrelated",
+                path + ".evidence",
+                "no evidence file for gate '" + gid + "' mentions '" + gid + "'"
+                + (" or its command" if text_of(gate.get("command")) else "")
+                + "; record the gate's own output (the `command` field names what ran)",
+            )
 
 
 # --------------------------------------------------------------------------
@@ -2369,6 +2898,25 @@ def emit_gap_report(manifest, profile):
                 )
                 + " |"
             )
+    lines.extend(["", "## Declared static", ""])
+    entries = list(iter_named(manifest, "declaredStatic"))
+    if not entries:
+        lines.append("- none declared")
+    else:
+        lines.extend(["| Path | Value | Reason | Approved by |", "|---|---|---|---|"])
+        for _path, entry in entries:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        cell(entry.get("path")),
+                        cell(entry.get("value")),
+                        cell(entry.get("reason")),
+                        cell(entry.get("approvedBy")),
+                    ]
+                )
+                + " |"
+            )
     findings = coverage_findings(manifest, profile)
     lines.extend(["", "## Structural findings", ""])
     if not findings.items:
@@ -2462,7 +3010,9 @@ def migrate_manifest(manifest):
                 continue
             cap_path = path + ".capabilities[" + str(cap_index) + "]"
             ensure_key(capability, "entityStates", {"from": [], "to": []}, cap_path, changes)
-            for key in ("dataBinding", "idempotency", "concurrency", "recovery", "owner"):
+            for key in (
+                "dataBinding", "idempotency", "concurrency", "recovery", "owner", "implementedBy",
+            ):
                 ensure_key(capability, key, "", cap_path, changes)
             ensure_key(capability, "reviewStatus", "unreviewed", cap_path, changes)
 
@@ -2570,6 +3120,7 @@ DEFAULTS = {
         "tests": [],
         "evidence": [],
         "owner": "",
+        "implementedBy": "",
         "reviewStatus": "unreviewed",
     },
     "screen": {
@@ -2643,6 +3194,7 @@ DEFAULTS = {
         "role": "implementer",
         "ownsCapabilities": [],
         "ownsScreens": [],
+        "previouslyOwned": [],
         "status": "active",
         "notes": "",
     },
@@ -3127,6 +3679,22 @@ def resolve_manifest_path(value):
     return path
 
 
+def project_root_of(manifest_path, manifest=None):
+    """The repository root a manifest's relative evidence paths resolve against.
+
+    Every command that reads evidence must agree on this, or `validate` from the
+    project root and `set` from anywhere else judge the same manifest differently.
+    A manifest may record `projectRoot` (relative to the folder holding the
+    manifest file); otherwise it is the parent of that folder, which is where
+    `init` puts `.admin-console/manifest.json`.
+    """
+    base = Path(manifest_path).resolve().parent
+    declared = text_of(as_dict(manifest).get("projectRoot")) if manifest else ""
+    if declared:
+        return (base / declared).resolve()
+    return base.parent
+
+
 def cmd_init(args):
     project_root = Path(args.project_root).resolve()
     target_dir = project_root / ".admin-console"
@@ -3210,29 +3778,59 @@ def print_findings(findings, phase, profile_source):
         + str(len(findings.errors))
         + " error(s), "
         + str(len(findings.warnings))
-        + " warning(s)"
+        + " warning(s) [profile "
+        + findings.profile
+        + ", phase "
+        + phase
+        + "]"
     )
+
+
+def profile_rank(name):
+    return PROFILES.index(name) if name in PROFILES else PROFILES.index(DEFAULT_PROFILE)
 
 
 def cmd_validate(args):
     manifest_path = resolve_manifest_path(args.manifest)
     manifest = load_json(manifest_path)
     profile, source = active_profile(manifest, args.profile)
+    declared = active_profile(manifest, None)[0]
+    lowered = bool(args.profile) and profile_rank(profile) < profile_rank(declared)
+    warning = None
+    if lowered and args.phase == "release":
+        # `--profile` exists to preview a stricter tier, or to inspect a manifest
+        # as another profile would judge it. At release it must never be a way to
+        # certify below the profile the manifest itself declares.
+        if not args.allow_lower_profile:
+            stderr(
+                "ERROR: --profile " + profile + " is below this manifest's declared profile '"
+                + declared + "'. A release is judged at the declared profile; pass "
+                "--allow-lower-profile to evaluate it lower anyway (the result will say so)."
+            )
+            return 2
+        warning = "evaluated at " + profile + "; manifest profile is " + declared
+        stderr("WARNING: " + warning)
     project_root = (
-        Path(args.project_root).resolve() if args.project_root else manifest_path.parent.parent
+        Path(args.project_root).resolve() if args.project_root else project_root_of(manifest_path, manifest)
     )
-    findings = validate_manifest(manifest, args.phase, project_root, profile)
+    findings = validate_manifest(
+        manifest, args.phase, project_root, profile, manifest_dir=manifest_path.parent
+    )
     if args.json:
         print(
             json.dumps(
                 {
                     "profile": profile,
                     "profileSource": source,
+                    "manifestProfile": declared,
+                    "allowLowerProfile": bool(args.allow_lower_profile),
+                    "warning": warning,
                     "phase": args.phase,
                     "manifest": str(manifest_path),
                     "projectRoot": str(project_root),
                     "errors": len(findings.errors),
                     "warnings": len(findings.warnings),
+                    "notApplicable": summarize(manifest)["notApplicable"],
                     "findings": findings.sorted_items(),
                 },
                 indent=2,
@@ -3241,6 +3839,8 @@ def cmd_validate(args):
         )
     else:
         print_findings(findings, args.phase, source)
+        if args.phase == "release":
+            print("not-applicable: " + str(summarize(manifest)["notApplicable"]) + " capability(ies)")
     return 1 if findings.errors else 0
 
 
@@ -3279,6 +3879,15 @@ def summarize(manifest):
         "decisions": dict(
             Counter(item.get("status", "unknown") for _p, item in iter_named(manifest, "decisions"))
         ),
+        "notApplicable": sum(1 for cap in capabilities if cap.get("status") == "not-applicable"),
+        "declaredStatic": [
+            {
+                "path": text_of(entry.get("path")),
+                "reason": text_of(entry.get("reason")),
+                "approvedBy": text_of(entry.get("approvedBy")),
+            }
+            for _p, entry in iter_named(manifest, "declaredStatic")
+        ],
     }
 
 
@@ -3314,6 +3923,12 @@ def cmd_report(args):
             continue
         for name in sorted(values):
             print("- " + str(name) + ": " + str(values[name]))
+    print()
+    print("## Declared static")
+    if not data["declaredStatic"]:
+        print("- none declared")
+    for entry in data["declaredStatic"]:
+        print("- " + entry["path"] + ": " + entry["reason"] + " (approved by " + entry["approvedBy"] + ")")
     return 0
 
 
@@ -3494,6 +4109,17 @@ def lock_file_name(capability_id):
     return re.sub(r"[^A-Za-z0-9._-]", "_", capability_id) + ".lock"
 
 
+IMPLEMENTER_ROLES = ("implementer", "architect")
+REVIEWER_ROLES = ("ux-reviewer", "qa", "security")
+
+
+def find_agent(manifest, agent_id):
+    for item in as_list(manifest.get("agents")):
+        if isinstance(item, dict) and text_of(item.get("id")) == agent_id:
+            return item
+    return None
+
+
 def cmd_claim(args):
     manifest_path = resolve_manifest_path(args.manifest)
     if args.force_steal and not text_of(args.reason):
@@ -3509,6 +4135,21 @@ def cmd_claim(args):
         unknown = [cid for cid in args.capability if cid not in caps]
         if unknown:
             stderr("Unknown capability id(s): " + ", ".join(unknown))
+            return 2
+        existing = find_agent(manifest, args.agent)
+        if (
+            existing is not None
+            and args.role in REVIEWER_ROLES
+            and text_of(existing.get("role")) in IMPLEMENTER_ROLES
+            and (as_list(existing.get("ownsCapabilities")) or as_list(existing.get("previouslyOwned")))
+        ):
+            # Re-registering under a reviewer role would erase the only record that
+            # this id built something, and let it sign off its own work.
+            stderr(
+                "Agent '" + args.agent + "' is registered as " + text_of(existing.get("role"))
+                + " and has held capabilities; it cannot claim as " + args.role
+                + ". Use a different agent id for the review."
+            )
             return 2
         for cid in args.capability:
             lock_path = lock_dir / lock_file_name(cid)
@@ -3548,11 +4189,7 @@ def cmd_claim(args):
             return 3
 
         agents = manifest.setdefault("agents", [])
-        record = None
-        for item in agents:
-            if isinstance(item, dict) and text_of(item.get("id")) == args.agent:
-                record = item
-                break
+        record = existing
         if record is None:
             record = merge_defaults("agent", {"id": args.agent, "role": args.role})
             agents.append(record)
@@ -3562,7 +4199,22 @@ def cmd_claim(args):
         for cid in args.capability:
             if cid not in owned:
                 owned.append(cid)
-            caps[cid][2]["owner"] = args.agent
+            capability = caps[cid][2]
+            # Only the roles that BUILD a capability become its owner and
+            # implementer. A reviewer takes the lock and is recorded as holding
+            # the capability, but overwriting `owner` made the honest reviewer
+            # look like the implementer and blocked their own sign-off.
+            if args.role in IMPLEMENTER_ROLES:
+                capability["owner"] = args.agent
+                recorded = text_of(capability.get("implementedBy"))
+                recorded_agent = find_agent(manifest, recorded) if recorded else None
+                superseded = (
+                    args.role == "implementer"
+                    and recorded_agent is not None
+                    and text_of(recorded_agent.get("role")) == "architect"
+                )
+                if not recorded or superseded:
+                    capability["implementedBy"] = args.agent
         record["ownsCapabilities"] = owned
         if stolen:
             note = text_of(record.get("notes"))
@@ -3586,12 +4238,7 @@ def cmd_release_claim(args):
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
         caps = capability_index(manifest)
-        agents = as_list(manifest.get("agents"))
-        record = None
-        for item in agents:
-            if isinstance(item, dict) and text_of(item.get("id")) == args.agent:
-                record = item
-                break
+        record = find_agent(manifest, args.agent)
         owned = as_list(record.get("ownsCapabilities")) if record else []
         targets = args.capability if args.capability else list(owned)
         for cid in targets:
@@ -3611,11 +4258,19 @@ def cmd_release_claim(args):
                     pass
             released.append(cid)
             entry = caps.get(cid)
+            # `owner` says who holds it now and is blanked; `implementedBy` says who
+            # built it and never is. Releasing used to erase the only record of the
+            # implementer, after which the same agent could review its own work.
             if entry and text_of(entry[2].get("owner")) == args.agent:
                 entry[2]["owner"] = ""
         if record is not None:
             remaining = [cid for cid in owned if cid not in released]
             record["ownsCapabilities"] = remaining
+            history = [v for v in as_list(record.get("previouslyOwned")) if isinstance(v, str)]
+            for cid in released:
+                if cid not in history:
+                    history.append(cid)
+            record["previouslyOwned"] = history
             if not remaining:
                 record["status"] = "done"
         write_json(manifest_path, manifest)
@@ -4097,6 +4752,10 @@ def build_parser():
     validate_parser.add_argument("--project-root")
     validate_parser.add_argument("--phase", choices=("plan", "release"), default="plan")
     validate_parser.add_argument("--profile", choices=PROFILES)
+    validate_parser.add_argument(
+        "--allow-lower-profile", action="store_true",
+        help="at --phase release, permit --profile below the manifest's declared profile",
+    )
     validate_parser.add_argument("--json", action="store_true")
     validate_parser.set_defaults(func=cmd_validate)
 

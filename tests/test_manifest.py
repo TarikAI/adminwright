@@ -23,67 +23,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-SKILL_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = SKILL_ROOT / "scripts" / "admin_console_manifest.py"
-
-
-def load_module():
-    spec = importlib.util.spec_from_file_location("acm", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-acm = load_module()
-
-
-def run(*args, **kwargs):
-    """Invoke the CLI the way a user would, returning (exit_code, stdout, stderr)."""
-    env = dict(os.environ)
-    env.update(kwargs.pop("env", {}))
-    env["PYTHONIOENCODING"] = "utf-8"
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPT)] + [str(a) for a in args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
-    return proc.returncode, proc.stdout, proc.stderr
-
-
-class TempProject(unittest.TestCase):
-    """Base class giving each test an isolated project directory."""
-
-    profile = "standard"
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="adminwright-test-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.root = self.tmp / "project"
-        self.root.mkdir()
-        code, _out, err = run(
-            "init",
-            "--project-root", self.root,
-            "--name", "TestPlatform",
-            "--archetype", "b2b-saas",
-            "--profile", self.profile,
-        )
-        self.assertEqual(code, 0, err)
-        self.manifest = self.root / ".admin-console" / "manifest.json"
-
-    def read(self):
-        return json.loads(self.manifest.read_text(encoding="utf-8"))
-
-    def write(self, data):
-        self.manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-    def validate(self, phase="release", profile=None):
-        args = ["validate", "--manifest", self.manifest, "--project-root", self.root, "--phase", phase]
-        if profile:
-            args += ["--profile", profile]
-        return run(*args)
+from cli_helpers import SCRIPT, SKILL_ROOT, TempProject, acm, load_module, run  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -629,9 +569,9 @@ class TestEvidenceIntegrity(TempProject):
         self.assertEqual(acm.path_state(target), "empty")
 
     def test_evidence_file_content_is_scanned(self):
-        target = self.root / "signoff.txt"
-        target.write_text("TODO: replace with real results. Fake mock data for now.", encoding="utf-8")
-        self.assertEqual(acm.path_state(target), "placeholder")
+        body = "TODO: replace with real results. Fake mock data for now."
+        token, line = acm.scan_file_placeholder(body)
+        self.assertEqual((token.lower(), line), ("todo", 1))
 
     def test_genuine_evidence_is_ok(self):
         target = self.root / "real.txt"
@@ -864,78 +804,6 @@ class TestGlobalLearning(unittest.TestCase):
 
 class TestHonestTiering(TempProject):
     """A truthful build must be able to pass, or teams will falsify the manifest."""
-
-    def build_honest_manifest(self):
-        (self.root / "tests").mkdir(exist_ok=True)
-        (self.root / "evidence").mkdir(exist_ok=True)
-        (self.root / "tests" / "user.spec.ts").write_text(
-            "test('user.list via /admin/users', async () => {\n"
-            "  expect((await listUsers({tenantId: 't-1'})).length).toBe(3);\n"
-            "});\n", encoding="utf-8")
-        for name in ("authentication", "authorization", "audit", "safety", "data",
-                     "experience", "observability"):
-            (self.root / "evidence" / (name + ".md")).write_text(
-                name + " review 2026-08-20\n"
-                "- 12 operations exercised, 12 enforced server-side\n"
-                "- 0 findings outstanding\n", encoding="utf-8")
-        for name in ("build", "typecheck", "lint", "tests", "browser", "security",
-                     "accessibility", "performance"):
-            (self.root / "evidence" / (name + ".log")).write_text(
-                name + " run\n  0 errors across 118 files\n", encoding="utf-8")
-
-        data = self.read()
-        data["platform"].update({
-            "summary": "Internal operations console.",
-            "operationalObjectives": ["Suspend abusive accounts without engineering"],
-            "tenancy": "single-tenant", "sourceSystems": ["PostgreSQL primary"],
-            "regulatedData": [],
-            "stack": {"frontend": "React 18", "backend": "Node 20", "database": "PostgreSQL 16",
-                      "auth": "OIDC", "jobs": "BullMQ", "hosting": "Fly.io",
-                      "designSystem": "in-house", "adminFramework": "none"},
-            "researchSources": [{"topic": "Express middleware",
-                                 "url": "https://expressjs.com/en/guide/using-middleware.html",
-                                 "appliedTo": ["user.list"], "checkedOn": "2026-08-07"}],
-            "volumes": {"entityCounts": "40k users", "peakConcurrentOperators": "6",
-                        "retentionHorizon": "7 years"},
-        })
-        data["roles"] = [{"id": "ops", "name": "Operations", "responsibilities": ["Admin"],
-                          "scopes": ["all accounts"], "mfaRequired": True,
-                          "separationOfDuties": []}]
-        data["entities"] = [{
-            "id": "user", "name": "User", "sourceOfTruth": "postgres:users",
-            "sensitivity": "confidential", "tenantScoped": False,
-            "lifecycleStates": ["active"], "lifecycleTransitions": [],
-            "retention": "7 years", "capabilities": [{
-                "id": "user.list", "outcome": "Find an account", "kind": "query",
-                "roles": ["ops"], "risk": "low", "status": "implemented", "rationale": "",
-                "entityStates": {"from": ["active"], "to": []},
-                "uiRoutes": ["/admin/users"], "serverOperations": ["UserRepository.findForAdmin"],
-                "authorizationPolicies": ["policy/user.admin"], "auditEvents": [],
-                "safeguards": [], "dataBinding": "postgres:users via UserRepository.findForAdmin",
-                "tests": ["tests/user.spec.ts"], "evidence": ["evidence/tests.log"],
-                "owner": "impl", "reviewStatus": "reviewed", "reviewedBy": "qa",
-            }],
-        }]
-        data["screens"] = [{
-            "id": "users", "route": "/admin/users", "purpose": "Search accounts",
-            "roles": ["ops"], "dataSources": ["postgres:users via UserRepository.findForAdmin"],
-            "capabilities": ["user.list"], "actions": [],
-            "states": ["loading", "populated", "error", "forbidden"],
-            "responsive": True, "accessibilityStatus": "implemented",
-            "status": "implemented", "rationale": "", "tests": ["tests/user.spec.ts"],
-        }]
-        for section, values in data["crossCutting"].items():
-            for key, value in list(values.items()):
-                if isinstance(value, bool):
-                    values[key] = True
-            if "evidence" in values:
-                values["evidence"] = ["evidence/" + section + ".md"]
-        data["crossCutting"]["authorization"]["policyTests"] = ["tests/user.spec.ts"]
-        for gate in data["qualityGates"]:
-            gate["status"] = "passed"
-            gate["evidence"] = ["evidence/" + gate["id"] + ".log"]
-            gate["threshold"] = "command exits zero"
-        self.write(data)
 
     def test_truthful_build_passes_at_every_profile(self):
         self.build_honest_manifest()

@@ -109,7 +109,7 @@ What makes review honest is a fresh read of the artifact from disk, checked agai
 | Value | Set by |
 |---|---|
 | `unreviewed` | the implementer, and only this value |
-| `reviewed` | an agent id different from the implementer, after re-reading the files the manifest names |
+| `reviewed` | an agent id different from the implementer, after re-reading the files the manifest names; set `reviewedBy` to your agent id first, because the validator compares it with `owner`, `implementedBy` and every implementer that ever held the capability |
 | `contested` | a reviewer that disputes the work; must be paired with a `gaps[]` entry |
 
 An implementer may never move `contested` to `reviewed`. It fixes the gap, sets `status` to `in-progress` and back to `implemented`, and returns `reviewStatus` to `unreviewed`.
@@ -123,6 +123,8 @@ python <skill-dir>/scripts/admin_console_manifest.py claim \
 ```
 
 The claim takes an exclusive lock, refuses capabilities another agent holds, and records ownership in `agents[].ownsCapabilities`. Claim before reading the code you intend to change, not after writing it.
+
+What a claim stamps depends on the role. `--role implementer` (and `architect`) sets `owner` and, when it is empty, `implementedBy`; `implementedBy` is the record of who built the capability and `release-claim` never clears it, so a reviewer-identity check still works after the handoff. A reviewer role (`ux-reviewer`, `qa`, `security`) takes the lock and is listed in `ownsCapabilities` but leaves `owner` and `implementedBy` alone, so claiming a capability to review it does not make you its implementer. An agent id that has held capabilities as an implementer or architect cannot claim as a reviewer; use a different id.
 
 Release on finish or on stop. Omitting `--capability` releases everything the agent holds:
 

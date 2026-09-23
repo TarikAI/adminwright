@@ -91,7 +91,21 @@ Two rules keep lower tiers honest:
 
 Escalate the profile when any of these becomes true: `regulatedData` is non-empty, tenancy is multi-tenant with external customers, a command moves money or grants access, or an external audit obligation applies.
 
-`validate --profile OVERRIDE` previews a stricter tier before committing to it. Never use it at release to evaluate a profile lower than `manifest.profile`.
+`validate --profile OVERRIDE` previews a stricter tier before committing to it. At `--phase release` an override lower than `manifest.profile` is refused (exit 2) unless `--allow-lower-profile` is passed, in which case the output says `evaluated at <x>; manifest profile is <y>`. Every summary line names the effective profile.
+
+### What evidence may point at
+
+A gate is only as strong as the file it cites, so the validator judges the whole set of citations, not each file alone:
+
+- `tests`, `evidence` and `policyTests` are arrays of strings. Any other shape is `manifest-type`, an error at every profile.
+- Nothing under `.admin-console/` counts as evidence (`evidence-inside-manifest-dir`): the manifest is the claim, not proof of it.
+- A file cited as a test must be shaped like one (a `*.spec.*`, `*.test.*`, `test_*.py`, `*_test.go` name, or a test-runner call) and contain a real assertion. Comments and `import { assert }` do not count. At `regulated` a spec cited by N capabilities needs at least N assertions.
+- Test files are not placeholder-scanned; the boundary is where a path appears, not what the file contains.
+- A test file is not gate evidence (`evidence-is-test-file`), one file may not be the evidence for more than two gates or for a gate and a `crossCutting` section (`evidence-shared`), and one spec may not be the test for more than three capabilities, or for capabilities, screens and `policyTests` at once (`test-file-shared`).
+- Capability tokens are the capability id and its `serverOperations`, never its `uiRoutes` (every capability on a screen shares the route).
+- At `regulated` a gate's evidence must mention the gate id or a word from the gate's optional `command` field (`gate-evidence-unrelated`): record `command: "tsc --noEmit"` and the log of that command qualifies.
+- `declaredStatic[].path` may name a value, never a claim about the implementation: `dataBinding`, `sourceOfTruth`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `tests`, `evidence`, `dataSources`, `policyTests` and `uiRoutes` are refused (`declared-static-forbidden-path`). An `approvedBy` that names an agent, or the capability's own implementer or reviewer, is `declared-static-self-approved`. `emit --format gap-report` and `report` list every exemption with its reason and approver.
+- A `not-applicable` command, job or export must be named by a confirmed `decisions[].appliesTo` (`not-applicable-undecided`); the validate summary prints `not-applicable: N`.
 
 ## Test layers
 

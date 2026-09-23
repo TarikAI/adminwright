@@ -704,6 +704,10 @@
             "type": "string",
             "description": "A measurable threshold or a named review artifact. 'reasonable', 'fast' and 'secure' are not thresholds."
           },
+          "command": {
+            "type": "string",
+            "description": "The command that produced the evidence, e.g. 'tsc --noEmit'. At the regulated profile the gate's evidence file must mention the gate id or a word from this command."
+          },
           "evidence": {
             "type": "array",
             "items": {
@@ -803,6 +807,18 @@
             "items": {
               "type": "string"
             }
+          },
+          "source": {
+            "type": "string",
+            "description": "Who filed the gap, e.g. 'ocr' for the code-review bridge. Gaps with source 'ocr' never count as a lifecycle escape."
+          },
+          "entity": {
+            "type": "string",
+            "description": "Entity id the gap is about. With a state name in the text, an open or accepted gap carrying this field explains why that lifecycle state has no operator path."
+          },
+          "capability": {
+            "type": "string",
+            "description": "Capability id the gap is about; same role as entity."
           }
         }
       }
@@ -930,6 +946,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "previouslyOwned": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Capabilities this agent has released. Kept so a released implementer is still recognised as one when its own work is reviewed."
           },
           "status": {
             "enum": [
@@ -1100,7 +1123,12 @@
           }
         },
         "owner": {
-          "type": "string"
+          "type": "string",
+          "description": "Who holds the capability right now. Set by `claim`, cleared by `release-claim`; use implementedBy for who built it."
+        },
+        "implementedBy": {
+          "type": "string",
+          "description": "Who implemented the capability. Stamped by `claim --role implementer` and never cleared by `release-claim`, so reviewer-identity can still tell the implementer from the reviewer after the claim is released."
         },
         "reviewStatus": {
           "enum": [
@@ -1111,7 +1139,7 @@
         },
         "reviewedBy": {
           "type": "string",
-          "description": "Who performed the review. At the regulated profile this must be present and must differ from owner, so 'reviewed by someone other than the implementer' is verifiable rather than asserted."
+          "description": "Who performed the review. Must be present when reviewStatus is 'reviewed' and must differ from owner, implementedBy and any implementer that held the capability, so 'reviewed by someone other than the implementer' is verifiable rather than asserted (an error at the regulated profile, a warning at standard)."
         }
       }
     }

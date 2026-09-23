@@ -43,7 +43,7 @@ def validate(project_root, profile):
             "--manifest", str(manifest),
             "--project-root", str(project_root),
             "--phase", "release",
-            "--profile", profile,
+            "--profile", profile, "--allow-lower-profile",
             "--json",
         ],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
