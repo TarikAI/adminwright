@@ -34,13 +34,14 @@ acm = load_module()
 def run(*args, **kwargs):
     """Invoke the CLI the way a user would, returning (exit_code, stdout, stderr).
 
-    `encoding` sets PYTHONIOENCODING for the child; the default is utf-8 so most
-    tests can assert on text, and a test that cares about the Windows console
-    passes "cp1252" explicitly.
+    The child's console is cp1252 unless a test says otherwise. That is what a
+    Windows agent harness gives a script whose stdout is a pipe, and it is what
+    hid every encoding crash for as long as the suite forced utf-8. The script
+    reconfigures itself to UTF-8, so output is always decodable here.
     """
     env = dict(os.environ)
     env.update(kwargs.pop("env", {}))
-    env["PYTHONIOENCODING"] = kwargs.pop("encoding", "utf-8")
+    env["PYTHONIOENCODING"] = kwargs.pop("encoding", "cp1252")
     cwd = kwargs.pop("cwd", None)
     proc = subprocess.run(
         [sys.executable, str(SCRIPT)] + [str(a) for a in args],

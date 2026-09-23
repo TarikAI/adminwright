@@ -27,6 +27,7 @@ persists several objects in one call can never end up half-written.
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
@@ -574,17 +575,34 @@ class Findings:
 # --------------------------------------------------------------------------
 
 
+def decode_text_bytes(data, source, allow_utf16=False):
+    """Decode a JSON file the way Windows tools actually write it.
+
+    PowerShell 5.1's `Set-Content -Encoding utf8` and most editors prefix a UTF-8
+    byte-order mark, which strict `utf-8` decoding rejects as "Unexpected UTF-8
+    BOM"; `Out-File` and `>` can produce UTF-16. A BOM is accepted silently here
+    and never written back (write_text_file emits none).
+    """
+    if data.startswith(codecs.BOM_UTF8):
+        return data[len(codecs.BOM_UTF8):].decode("utf-8")
+    if allow_utf16 and data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        # A UTF-16 file saved by a Windows editor is a realistic accident, not an
+        # exotic attack. Fail as a usage error, not a traceback.
+        raise ManifestError(
+            str(source) + " is not valid UTF-8 (a UTF-16 or legacy code-page file?). "
+            "Re-save it as UTF-8; a byte-order mark is fine."
+        )
+
+
 def load_json(path):
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = decode_text_bytes(path.read_bytes(), path)
     except FileNotFoundError:
         raise ManifestError("File not found: " + str(path))
-    except UnicodeDecodeError:
-        # A UTF-16 manifest saved by a Windows editor is a realistic accident,
-        # not an exotic attack. Fail as a usage error, not a traceback.
-        raise ManifestError(
-            str(path) + " is not valid UTF-8. Re-save it as UTF-8 without a BOM."
-        )
     except OSError as exc:
         raise ManifestError("Cannot read " + str(path) + ": " + str(exc))
     try:
@@ -3293,20 +3311,65 @@ def merge_defaults(kind, obj):
     return merged
 
 
+POWERSHELL_HINT = (
+    "In PowerShell, double quotes inside single-quoted JSON are stripped before Python "
+    "sees them. Write the JSON to a file and pass --json-file <path> (a UTF-8 byte-order "
+    "mark is accepted), or --json '@<path>' with the @ argument quoted."
+)
+
+
+PATH_LIST_FIELDS = frozenset(("tests", "evidence", "policyTests"))
+
+
+def normalise_path_list(values):
+    """Rewrite `\\` as `/` in repository-path entries; return (new_values, changed)."""
+    fixed = []
+    changed = 0
+    for value in values:
+        if isinstance(value, str) and "\\" in value and evidence_kind(value) == "path":
+            value = value.replace("\\", "/")
+            changed += 1
+        fixed.append(value)
+    return fixed, changed
+
+
+def normalise_paths(node, label):
+    """Store evidence paths with forward slashes, so a manifest written on Windows
+    validates the same on every machine. Prints one note when it changes anything."""
+    total = 0
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in list(current.items()):
+                if key in PATH_LIST_FIELDS and isinstance(value, list):
+                    current[key], changed = normalise_path_list(value)
+                    total += changed
+                elif isinstance(value, (dict, list)):
+                    stack.append(value)
+        elif isinstance(current, list):
+            stack.extend(item for item in current if isinstance(item, (dict, list)))
+    if total:
+        stderr(
+            "note: rewrote backslashes as '/' in " + str(total) + " evidence path(s) of "
+            + label + "; manifests store forward slashes"
+        )
+
+
 def parse_json_value(raw):
     text = raw
     if raw.startswith("@"):
         path = Path(raw[1:])
         try:
-            text = path.read_text(encoding="utf-8")
+            text = decode_text_bytes(path.read_bytes(), path, allow_utf16=True)
         except OSError as exc:
             raise ManifestError("Cannot read --json file: " + str(exc))
     elif raw.strip() == "-":
-        text = sys.stdin.read()
+        text = decode_text_bytes(sys.stdin.buffer.read(), "standard input", allow_utf16=True)
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ManifestError("--json is not valid JSON: " + str(exc))
+        raise ManifestError("--json is not valid JSON: " + str(exc) + ". " + POWERSHELL_HINT)
 
 
 def parse_json_argument(raw):
@@ -4112,7 +4175,10 @@ def cmd_emit(args):
 
 def cmd_add(args):
     manifest_path = resolve_manifest_path(args.manifest)
-    entries = [merge_defaults(args.kind, item) for item in parse_json_entries(args.json)]
+    raw_json = args.json if args.json is not None else "@" + args.json_file
+    entries = [merge_defaults(args.kind, item) for item in parse_json_entries(raw_json)]
+    for entry in entries:
+        normalise_paths(entry, args.kind + " '" + text_of(entry.get("id")) + "'")
     kind = args.kind
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
@@ -4209,6 +4275,10 @@ def cmd_set(args):
         container, key = resolve_path_parent(manifest, segments)
         previous = container.get(key)
         value = coerce_value(args.value, previous)
+        if key in PATH_LIST_FIELDS and isinstance(value, list):
+            value, changed = normalise_path_list(value)
+            if changed:
+                stderr("note: rewrote backslashes as '/' in " + str(changed) + " path(s) of " + args.path)
         container[key] = value
         introduced, warned = new_findings(
             before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent
@@ -4899,7 +4969,14 @@ def build_parser():
     add_parser = subparsers.add_parser("add", help="Append one object to a manifest collection")
     add_parser.add_argument("--manifest", required=True)
     add_parser.add_argument("--kind", required=True, choices=sorted(KIND_TARGETS))
-    add_parser.add_argument("--json", required=True, help="JSON object, array of objects, @file, or - for stdin")
+    payload = add_parser.add_mutually_exclusive_group(required=True)
+    payload.add_argument(
+        "--json", help="JSON object, array of objects, @file, or - for stdin"
+    )
+    payload.add_argument(
+        "--json-file", metavar="PATH",
+        help="read the JSON object or array from a file (PowerShell-safe; a BOM is accepted)",
+    )
     add_parser.add_argument("--entity", help="entity id, required when --kind capability")
     add_parser.add_argument("--allow-invalid", action="store_true")
     add_parser.set_defaults(func=cmd_add)
@@ -4993,7 +5070,27 @@ def build_parser():
     return parser
 
 
+def configure_console():
+    """Speak UTF-8 no matter what the console or pipe says it is.
+
+    With stdout a pipe -- which is how every agent harness runs this -- Python on
+    Windows picks cp1252, and any character outside it (an emoji in a platform name,
+    a CJK role) turned `validate`, `report`, `emit`, `coverage`, `harvest`, `promote`
+    and `lesson list` into a traceback with exit 1. `errors="replace"` means output
+    can never fail on encoding, whatever the reader's code page.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def main():
+    configure_console()
     parser = build_parser()
     args = parser.parse_args()
     try:
@@ -5001,6 +5098,13 @@ def main():
     except ManifestError as exc:
         stderr("ERROR: " + str(exc))
         return 2
+    except BrokenPipeError:
+        # `... | head`: the reader left early. Not a failure of this command.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+        return 0
     except KeyboardInterrupt:
         stderr("Interrupted")
         return 2

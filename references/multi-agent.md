@@ -47,6 +47,14 @@ python <skill-dir>/scripts/admin_console_manifest.py add \
 
 Quote the `--json` value so your shell passes it as a single argument.
 
+PowerShell 5.1 strips the double quotes inside single-quoted JSON before Python sees them, and splits a value containing spaces even when each quote is escaped. Put the JSON in a file and pass `--json-file`; the UTF-8 byte-order mark that `Set-Content -Encoding utf8` writes is accepted. (`--json '@role.json'` works too, but the `@` argument must be quoted: unquoted, PowerShell reads `@role` as splatting.)
+
+<!-- doc-test: skip -->
+```text
+Set-Content -Encoding utf8 role.json '{"id":"ops","name":"Ops team","responsibilities":["Admin"],"scopes":["all"]}'
+python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-root>/.admin-console/manifest.json --kind role --json-file role.json
+```
+
 ## Roles
 
 Five roles. Each is a distinct pass, whether five agents run them or one agent runs them in sequence.

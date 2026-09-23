@@ -126,7 +126,9 @@ Use `py -3` or `python3` if `python` is not on PATH. If Python is unavailable, c
 `assets/admin-console.manifest.template.json` and fill it manually against
 `assets/admin-console.manifest.schema.json`, which types every field.
 
-Model incrementally with `add` and `set`. Before release, an unfinished model reports gaps as
+Model incrementally with `add` and `set`. Pass structured values as one quoted argument
+(`--json '{"id":"ops", ...}'`), or, in PowerShell 5.1 — which strips the quotes inside
+single-quoted JSON — write the object to a file and use `--json-file role.json`. Before release, an unfinished model reports gaps as
 warnings rather than blocking — a role is unused until its first capability exists. Malformed
 edits still block: bad ids, unknown references, and placeholder values are refused at write
 time. `--allow-invalid` overrides that and prints exactly what it wrote through; anything it
