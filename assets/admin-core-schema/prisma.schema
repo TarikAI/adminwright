@@ -1,30 +1,49 @@
 // Adminwright admin control-plane core schema — Prisma
 //
-// Faithful translation of postgres.sql. Read ./README.md before adapting.
+// Translation of postgres.sql, kept in step with it by tests/test_core_schema.py.
+// Read ./README.md before adapting.
 //
-// WHAT PRISMA CANNOT ENFORCE — these must be added by hand in a migration created
-// with `prisma migrate dev --create-only`, and they are not optional:
+// PRISMA VERSIONS. Written for Prisma 7 (validated with `prisma validate` on 7.10).
+// Prisma 7 no longer accepts `url` in the datasource block: put the connection in
+// prisma.config.ts,
+//     import { defineConfig } from "prisma/config";
+//     export default defineConfig({
+//       schema: "prisma/schema.prisma",
+//       datasource: { url: process.env.DATABASE_URL },
+//     });
+// On Prisma 6 and earlier, add `url = env("DATABASE_URL")` to the datasource below
+// and drop prisma.config.ts.
 //
-//   1. CHECK constraints. Prisma has no CHECK support. Every enum-like column below
-//      is modelled as a Prisma enum, which enforces at the client but NOT in the
-//      database — a raw query or another service can still write garbage. The
-//      cross-column checks (no self-grant, revocation completeness, grant window)
-//      have no Prisma equivalent at all.
-//   2. Partial unique indexes. `adminActorRoleLiveUnique` (unique while
-//      revoked_at IS NULL) and `adminJobIdempotency` (unique while
-//      idempotency_key IS NOT NULL) cannot be expressed here. Declared below as
-//      comments; add them as raw SQL.
-//   3. Triggers. Append-only enforcement on audit_event and approval_decision, and
-//      the separation-of-duties trigger on approval_decision.
+// WHAT PRISMA CANNOT ENFORCE — all of it is written out in ./prisma_raw.sql, which you
+// append to the migration created with `prisma migrate dev --create-only`. It is not
+// optional, and it is not a sketch: it is the complete list.
 //
-// Append the raw statements at the end of the generated migration:
-//   ALTER TABLE admin_actor_role ADD CONSTRAINT admin_actor_role_no_self_grant
-//     CHECK (granted_by <> actor_id);
-//   CREATE UNIQUE INDEX admin_actor_role_live_unique ON admin_actor_role
-//     (actor_id, role_id, COALESCE(scope_tenant_id, '*')) WHERE revoked_at IS NULL;
-//   CREATE UNIQUE INDEX admin_job_idempotency ON admin_job
-//     (kind, idempotency_key) WHERE idempotency_key IS NOT NULL;
-//   -- plus the three triggers from postgres.sql
+//   1. CHECK constraints. Prisma has no CHECK support. The enum-like columns below
+//      are native PostgreSQL enums (a database-level constraint, with @map keeping
+//      the canonical strings), so the CHECKs that remain are the cross-column and
+//      numeric ones: no self-grant, revocation completeness, grant window,
+//      impersonation bounds, min approvals, job counts, secret_ref.
+//   2. Partial and expression indexes. Prisma turns none of these into a WHERE or
+//      COALESCE index, so they are left out of this file rather than emitted as full
+//      indexes: live-grant uniqueness, job idempotency, the one-live-impersonation
+//      index, the queue indexes and the per-scope config uniqueness.
+//   3. Triggers and functions. Append-only enforcement on audit_event and
+//      approval_decision (UPDATE / DELETE / TRUNCATE), the audit hash chain (the
+//      trigger assigns chain_seq, prev_hash, row_hash — the placeholder defaults
+//      below are overwritten), verify_audit_chain(), scrub_audit_payload(), and the
+//      separation-of-duties trigger.
+//
+// Then run grants.sql (psql) for the regulated profile.
+//
+// DIFFERENCES FROM postgres.sql that Prisma imposes:
+//   * Every relation states onDelete explicitly. Prisma's default for an optional
+//     relation is SetNull, which would erase audit_event.actor_id and the
+//     revoked_by columns when an actor row is deleted; here they all block.
+//   * Prisma emits ON UPDATE CASCADE by default (postgres.sql uses NO ACTION). It only
+//     matters if you rewrite referenced keys such as admin_permission.key.
+//   * chain_seq and row_hash have placeholder defaults (0 and "") because the client
+//     requires a value; the BEFORE INSERT trigger overwrites them.
+//   * admin_actor.email is text rather than citext.
 
 generator client {
   provider = "prisma-client-js"
@@ -32,7 +51,6 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 enum AdminActorKind {
@@ -44,7 +62,7 @@ enum AdminActorKind {
 enum AuthStrength {
   password
   mfa
-  phishing_resistant
+  phishing_resistant @map("phishing-resistant")
   sso
 }
 
@@ -76,6 +94,7 @@ enum ApprovalState {
   rejected
   expired
   executed
+  execution_failed
   cancelled
 }
 
@@ -119,7 +138,7 @@ enum DsrKind {
 
 enum DsrState {
   open
-  in_progress
+  in_progress @map("in-progress")
   fulfilled
   refused
   withdrawn
@@ -139,7 +158,7 @@ enum ConfigTarget {
 /// Credentials are never stored here; authSubject holds the IdP subject claim.
 model AdminActor {
   id             BigInt         @id @default(autoincrement())
-  actorUuid      String         @unique @default(uuid()) @map("actor_uuid") @db.Uuid
+  actorUuid      String         @unique @default(dbgenerated("gen_random_uuid()")) @map("actor_uuid") @db.Uuid
   appUserId      BigInt?        @map("app_user_id")
   authSubject    String         @unique @map("auth_subject")
   displayName    String         @map("display_name")
@@ -155,7 +174,6 @@ model AdminActor {
   grantsIssued   AdminActorRole[] @relation("GrantIssuer")
   grantsRevoked  AdminActorRole[] @relation("GrantRevoker")
   auditActed     AuditEvent[]     @relation("AuditActor")
-  auditEffective AuditEvent[]     @relation("AuditEffectiveActor")
   impersonations ImpersonationSession[] @relation("Impersonator")
   impersonationRevocations ImpersonationSession[] @relation("ImpersonationRevoker")
   approvalsRequested ApprovalRequest[]
@@ -218,10 +236,10 @@ model AdminRolePermission {
 
 /// A grant, not a join row: where it applies, when it expires, who granted it and
 /// why, and how it was revoked.
-/// RAW SQL REQUIRED: CHECK (granted_by <> actor_id) — no self-granting.
-/// RAW SQL REQUIRED: partial unique index on (actor_id, role_id,
-///   COALESCE(scope_tenant_id,'*')) WHERE revoked_at IS NULL. Duplicate live
-///   grants make revocation unreliable.
+/// RAW SQL REQUIRED (prisma_raw.sql): CHECK granted_by <> actor_id (no self-granting),
+/// the revocation and window CHECKs, and the partial unique index on
+/// (actor_id, role_id, COALESCE(scope_tenant_id,'*')) WHERE revoked_at IS NULL, plus
+/// the partial lookup index. Duplicate live grants make revocation unreliable.
 model AdminActorRole {
   id             BigInt    @id @default(autoincrement())
   actorId        BigInt    @map("actor_id")
@@ -238,12 +256,11 @@ model AdminActorRole {
   revokedBy      BigInt?   @map("revoked_by")
   revokeReason   String?   @map("revoke_reason")
 
-  actor   AdminActor  @relation("GrantHolder", fields: [actorId], references: [id])
-  role    AdminRole   @relation(fields: [roleId], references: [id])
-  granter AdminActor  @relation("GrantIssuer", fields: [grantedBy], references: [id])
-  revoker AdminActor? @relation("GrantRevoker", fields: [revokedBy], references: [id])
+  actor   AdminActor  @relation("GrantHolder", fields: [actorId], references: [id], onDelete: NoAction)
+  role    AdminRole   @relation(fields: [roleId], references: [id], onDelete: NoAction)
+  granter AdminActor  @relation("GrantIssuer", fields: [grantedBy], references: [id], onDelete: NoAction)
+  revoker AdminActor? @relation("GrantRevoker", fields: [revokedBy], references: [id], onDelete: NoAction)
 
-  @@index([actorId])
   @@map("admin_actor_role")
 }
 
@@ -264,14 +281,15 @@ model AdminPolicyVersion {
 // Audit
 // ---------------------------------------------------------------------------
 
-/// Append-only. RAW SQL REQUIRED: BEFORE UPDATE and BEFORE DELETE triggers that
-/// raise. Prisma cannot express this, and application-level guards are bypassed by
-/// raw queries and other services.
+/// Append-only. RAW SQL REQUIRED (prisma_raw.sql): BEFORE UPDATE / DELETE / TRUNCATE
+/// triggers that raise, and the BEFORE INSERT hash-chain trigger. Prisma cannot
+/// express this, and application-level guards are bypassed by raw queries and other
+/// services. Leave chainSeq, prevHash and rowHash to the trigger.
 model AuditEvent {
   id        BigInt   @id @default(autoincrement())
-  eventUuid String   @unique @default(uuid()) @map("event_uuid") @db.Uuid
+  eventUuid String   @unique @default(dbgenerated("gen_random_uuid()")) @map("event_uuid") @db.Uuid
   chainId   String   @default("default") @map("chain_id")
-  chainSeq  BigInt   @map("chain_seq")
+  chainSeq  BigInt   @default(0) @map("chain_seq") // placeholder; assigned by trigger
 
   occurredAt DateTime @map("occurred_at") @db.Timestamptz
   recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz
@@ -279,8 +297,11 @@ model AuditEvent {
   actorId   BigInt?        @map("actor_id")
   actorKind AuditActorKind @default(human) @map("actor_kind")
   /// Null unless impersonating. Never overwrite actorId with the impersonated
-  /// identity: that is the most common way impersonation audit is destroyed.
-  effectiveActorId       BigInt? @map("effective_actor_id")
+  /// identity: that is the most common way impersonation audit is destroyed. The
+  /// acted-as subject is usually a customer, not an AdminActor, so this is text in
+  /// the same identity space as ImpersonationSession.targetSubjectId — deliberately
+  /// not a relation.
+  effectiveActorId       String? @map("effective_actor_id")
   impersonationSessionId BigInt? @map("impersonation_session_id")
 
   tenantId    String? @map("tenant_id")
@@ -311,24 +332,21 @@ model AuditEvent {
 
   policyVersion String? @map("policy_version")
 
-  prevHash      String? @map("prev_hash")
-  rowHash       String  @map("row_hash")
+  prevHash      String? @map("prev_hash") // assigned by trigger
+  rowHash       String  @default("") @map("row_hash") // placeholder; assigned by trigger
   hashAlgorithm String  @default("sha256") @map("hash_algorithm")
 
-  actor          AdminActor?           @relation("AuditActor", fields: [actorId], references: [id])
-  effectiveActor AdminActor?           @relation("AuditEffectiveActor", fields: [effectiveActorId], references: [id])
-  impersonation  ImpersonationSession? @relation(fields: [impersonationSessionId], references: [id])
-  configChanges  ConfigChange[]
+  actor         AdminActor?           @relation("AuditActor", fields: [actorId], references: [id], onDelete: NoAction)
+  impersonation ImpersonationSession? @relation(fields: [impersonationSessionId], references: [id], onDelete: NoAction)
+  configChanges ConfigChange[]
 
-  @@unique([chainId, chainSeq])
-  @@index([occurredAt(sort: Desc), id(sort: Desc)])
-  @@index([targetType, targetId, occurredAt(sort: Desc)])
-  @@index([actorId, occurredAt(sort: Desc)])
-  @@index([tenantId, occurredAt(sort: Desc)])
-  @@index([action, occurredAt(sort: Desc)])
-  @@index([correlationId])
-  @@index([requestId])
-  @@index([idempotencyKey])
+  @@unique([chainId, chainSeq], map: "audit_event_chain")
+  @@index([occurredAt(sort: Desc), id(sort: Desc)], map: "audit_event_recent")
+  @@index([targetType, targetId, occurredAt(sort: Desc)], map: "audit_event_target")
+  @@index([actorId, occurredAt(sort: Desc)], map: "audit_event_actor")
+  @@index([action, occurredAt(sort: Desc)], map: "audit_event_action")
+  // The four partial indexes (tenant, correlation, request, idempotency) are in
+  // prisma_raw.sql; Prisma would emit them as full indexes.
   @@map("audit_event")
 }
 
@@ -336,14 +354,18 @@ model AuditEvent {
 // Impersonation
 // ---------------------------------------------------------------------------
 
+/// RAW SQL REQUIRED (prisma_raw.sql): the bounded-duration and end-state CHECKs and
+/// the unique partial index that allows one live session per real actor.
 model ImpersonationSession {
   id                BigInt    @id @default(autoincrement())
-  sessionUuid       String    @unique @default(uuid()) @map("session_uuid") @db.Uuid
+  sessionUuid       String    @unique @default(dbgenerated("gen_random_uuid()")) @map("session_uuid") @db.Uuid
   realActorId       BigInt    @map("real_actor_id")
   targetSubjectId   String    @map("target_subject_id")
   targetTenantId    String?   @map("target_tenant_id")
   reason            String
   ticketRef         String?   @map("ticket_ref")
+  /// Opting into write impersonation is a deliberate, separately permissioned act.
+  readOnly          Boolean   @default(true) @map("read_only")
   scopeRestrictions Json      @default("{}") @map("scope_restrictions")
   startedAt         DateTime  @default(now()) @map("started_at") @db.Timestamptz
   expiresAt         DateTime  @map("expires_at") @db.Timestamptz
@@ -351,11 +373,10 @@ model ImpersonationSession {
   endedReason       String?   @map("ended_reason")
   revokedBy         BigInt?   @map("revoked_by")
 
-  realActor AdminActor  @relation("Impersonator", fields: [realActorId], references: [id])
-  revoker   AdminActor? @relation("ImpersonationRevoker", fields: [revokedBy], references: [id])
+  realActor AdminActor  @relation("Impersonator", fields: [realActorId], references: [id], onDelete: NoAction)
+  revoker   AdminActor? @relation("ImpersonationRevoker", fields: [revokedBy], references: [id], onDelete: NoAction)
   events    AuditEvent[]
 
-  @@index([realActorId, expiresAt])
   @@map("impersonation_session")
 }
 
@@ -365,7 +386,7 @@ model ImpersonationSession {
 
 model ApprovalRequest {
   id                BigInt        @id @default(autoincrement())
-  requestUuid       String        @unique @default(uuid()) @map("request_uuid") @db.Uuid
+  requestUuid       String        @unique @default(dbgenerated("gen_random_uuid()")) @map("request_uuid") @db.Uuid
   commandKey        String        @map("command_key")
   payload           Json
   payloadHash       String        @map("payload_hash")
@@ -381,17 +402,20 @@ model ApprovalRequest {
   executedAt        DateTime?     @map("executed_at") @db.Timestamptz
   executionResult   String?       @map("execution_result")
 
-  permission AdminPermission    @relation(fields: [commandKey], references: [key])
-  requester  AdminActor         @relation(fields: [requestedBy], references: [id])
+  permission AdminPermission    @relation(fields: [commandKey], references: [key], onDelete: NoAction)
+  requester  AdminActor         @relation(fields: [requestedBy], references: [id], onDelete: NoAction)
   decisions  ApprovalDecision[]
 
-  @@index([state, expiresAt])
+  // The pending-queue partial index is in prisma_raw.sql.
   @@map("approval_request")
 }
 
-/// RAW SQL REQUIRED: the separation-of-duties trigger. The requester must not be
+/// Append-only. RAW SQL REQUIRED (prisma_raw.sql): the UPDATE / DELETE / TRUNCATE
+/// deny triggers and the separation-of-duties trigger. The requester must not be
 /// able to approve their own request, and enforcing that only in application code
-/// means the control is absent for anything writing this table directly.
+/// means the control is absent for anything writing this table directly. The request
+/// relation is Restrict, not Cascade: cascading would let a rejection be deleted
+/// with its request and re-entered as an approval.
 model ApprovalDecision {
   id         BigInt               @id @default(autoincrement())
   requestId  BigInt               @map("request_id")
@@ -400,12 +424,12 @@ model ApprovalDecision {
   reason     String
   decidedAt  DateTime             @default(now()) @map("decided_at") @db.Timestamptz
 
-  request  ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
-  approver AdminActor      @relation(fields: [approverId], references: [id])
+  request  ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  approver AdminActor      @relation(fields: [approverId], references: [id], onDelete: NoAction)
 
   // One approver decides once. Without this a single approver satisfies a
   // two-approval requirement by voting twice.
-  @@unique([requestId, approverId])
+  @@unique([requestId, approverId], map: "approval_decision_one_per_approver")
   @@map("approval_decision")
 }
 
@@ -413,12 +437,12 @@ model ApprovalDecision {
 // Jobs
 // ---------------------------------------------------------------------------
 
-/// RAW SQL REQUIRED: partial unique index on (kind, idempotency_key)
-/// WHERE idempotency_key IS NOT NULL. A repeated key must return the existing job
-/// rather than start a second one.
+/// RAW SQL REQUIRED (prisma_raw.sql): partial unique index on (kind, idempotency_key)
+/// WHERE idempotency_key IS NOT NULL, and the active-queue partial index. A repeated
+/// key must return the existing job rather than start a second one.
 model AdminJob {
   id              BigInt    @id @default(autoincrement())
-  jobUuid         String    @unique @default(uuid()) @map("job_uuid") @db.Uuid
+  jobUuid         String    @unique @default(dbgenerated("gen_random_uuid()")) @map("job_uuid") @db.Uuid
   kind            String // manifest capability.id where kind = job
   initiatedBy     BigInt    @map("initiated_by")
   tenantId        String?   @map("tenant_id")
@@ -437,10 +461,9 @@ model AdminJob {
   resultArtifact  String?   @map("result_artifact")
   cancelRequested Boolean   @default(false) @map("cancel_requested")
 
-  initiator AdminActor        @relation(fields: [initiatedBy], references: [id])
+  initiator AdminActor        @relation(fields: [initiatedBy], references: [id], onDelete: NoAction)
   failures  AdminJobFailure[]
 
-  @@index([state, queuedAt(sort: Desc)])
   @@map("admin_job")
 }
 
@@ -457,7 +480,7 @@ model AdminJobFailure {
 
   job AdminJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
-  @@index([jobId, failedAt])
+  @@index([jobId, failedAt], map: "admin_job_failure_job")
   @@map("admin_job_failure")
 }
 
@@ -482,17 +505,21 @@ model SavedView {
 
   owner AdminActor @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
-  @@unique([ownerId, route, name])
+  @@unique([ownerId, route, name], map: "saved_view_name_unique")
   @@map("saved_view")
 }
 
+/// The same key differs per environment and tenant, so it is unique per scope: the
+/// unique expression index (key, environment, COALESCE(tenant_id,'*')) is in
+/// prisma_raw.sql. A secret is only ever held as a reference (value_type =
+/// 'secret_ref'); the matching CHECK is in prisma_raw.sql too.
 model ConfigSetting {
   id          BigInt   @id @default(autoincrement())
-  key         String   @unique
+  key         String
   value       Json
   valueType   String   @map("value_type")
-  /// Secret values are never displayed after write. Support rotation and
-  /// revocation instead.
+  /// Set for value_type = secret_ref rows: value is a pointer, never the secret.
+  /// Secrets are never displayed; support rotation and revocation instead.
   isSecret    Boolean  @default(false) @map("is_secret")
   tenantId    String?  @map("tenant_id")
   environment String
@@ -501,12 +528,14 @@ model ConfigSetting {
   @@map("config_setting")
 }
 
+/// Unique per (key, environment, tenant): see ConfigSetting.
 model FeatureFlag {
   id          BigInt   @id @default(autoincrement())
-  key         String   @unique
+  key         String
   description String   @default("")
   isEnabled   Boolean  @default(false) @map("is_enabled")
   rollout     Json     @default("{}")
+  tenantId    String?  @map("tenant_id")
   environment String
   updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -514,11 +543,14 @@ model FeatureFlag {
 }
 
 /// Every configuration change is a privileged mutation and gets its own history
-/// row in addition to its audit event.
+/// row in addition to its audit event. Keys repeat across environments and tenants,
+/// so the row carries the same scope as the row it changed.
 model ConfigChange {
   id           BigInt       @id @default(autoincrement())
   targetTable  ConfigTarget @map("target_table")
   targetKey    String       @map("target_key")
+  environment  String
+  tenantId     String?      @map("tenant_id")
   beforeValue  Json?        @map("before_value")
   afterValue   Json?        @map("after_value")
   changedBy    BigInt       @map("changed_by")
@@ -526,10 +558,10 @@ model ConfigChange {
   changedAt    DateTime     @default(now()) @map("changed_at") @db.Timestamptz
   auditEventId BigInt?      @map("audit_event_id")
 
-  changer AdminActor  @relation(fields: [changedBy], references: [id])
-  event   AuditEvent? @relation(fields: [auditEventId], references: [id])
+  changer AdminActor  @relation(fields: [changedBy], references: [id], onDelete: NoAction)
+  event   AuditEvent? @relation(fields: [auditEventId], references: [id], onDelete: NoAction)
 
-  @@index([targetTable, targetKey, changedAt(sort: Desc)])
+  @@index([targetTable, targetKey, environment, changedAt(sort: Desc)], map: "config_change_target")
   @@map("config_change")
 }
 
@@ -539,7 +571,7 @@ model ConfigChange {
 
 model ExportRequest {
   id           BigInt      @id @default(autoincrement())
-  exportUuid   String      @unique @default(uuid()) @map("export_uuid") @db.Uuid
+  exportUuid   String      @unique @default(dbgenerated("gen_random_uuid()")) @map("export_uuid") @db.Uuid
   resource     String
   requestedBy  BigInt      @map("requested_by")
   tenantId     String?     @map("tenant_id")
@@ -559,9 +591,9 @@ model ExportRequest {
   downloadCount Int        @default(0) @map("download_count")
   lastDownloadedAt DateTime? @map("last_downloaded_at") @db.Timestamptz
 
-  requester AdminActor @relation(fields: [requestedBy], references: [id])
+  requester AdminActor @relation(fields: [requestedBy], references: [id], onDelete: NoAction)
 
-  @@index([state, expiresAt])
+  @@index([state, expiresAt], map: "export_request_state")
   @@map("export_request")
 }
 
@@ -569,7 +601,7 @@ model ExportRequest {
 /// fulfilment; it does not silently drop the request.
 model DataSubjectRequest {
   id          BigInt    @id @default(autoincrement())
-  requestUuid String    @unique @default(uuid()) @map("request_uuid") @db.Uuid
+  requestUuid String    @unique @default(dbgenerated("gen_random_uuid()")) @map("request_uuid") @db.Uuid
   kind        DsrKind
   subjectRef  String    @map("subject_ref")
   tenantId    String?   @map("tenant_id")
@@ -581,8 +613,8 @@ model DataSubjectRequest {
   resolution  String?
   resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz
 
-  assignee AdminActor? @relation(fields: [assignedTo], references: [id])
+  assignee AdminActor? @relation(fields: [assignedTo], references: [id], onDelete: NoAction)
 
-  @@index([state, dueAt])
+  @@index([state, dueAt], map: "data_subject_request_queue")
   @@map("data_subject_request")
 }
