@@ -73,29 +73,12 @@ jobs:
           print("no broken links")
           PY
 
+      # Compares postgres.sql with the five translations: tables, columns, CHECK constraint
+      # names and enum value sets, index names (partial and expression ones too), single-column
+      # UNIQUEs, foreign-key ON DELETE actions, and the text of every trigger and function.
+      # The same file runs in the `test` job; it is stdlib-only and needs no database.
       - name: Schema translations cover the same tables
-        run: |
-          python - <<'PY'
-          import re, pathlib, sys
-          d = pathlib.Path("assets/admin-core-schema")
-          canon = re.findall(r"CREATE TABLE (\w+)", (d / "postgres.sql").read_text())
-          patterns = {
-              "prisma.schema": r'@@map\("(\w+)"\)',
-              "drizzle.ts": r'adminCore\.table\(\s*"(\w+)"',
-              "django_models.py": r'db_table = "(\w+)"',
-              "laravel_migration.php": r"Schema::create\('(\w+)'",
-              "rails_migration.rb": r"create_table :(\w+)",
-          }
-          problems = []
-          for name, pattern in patterns.items():
-              found = set(re.findall(pattern, (d / name).read_text()))
-              missing = [t for t in canon if t not in found]
-              if missing:
-                  problems.append(f"{name} missing: {', '.join(missing)}")
-          if problems:
-              sys.exit("schema drift:\n  " + "\n  ".join(problems))
-          print(f"all translations cover {len(canon)} tables")
-          PY
+        run: python -m unittest discover -s tests -p "test_core_schema.py" -v
 
       - name: Reference files stay within budget
         run: |
@@ -110,3 +93,66 @@ jobs:
               sys.exit("over the 450-line ceiling:\n  " + "\n  ".join(over))
           print("all references within ceiling")
           PY
+
+  core-schema-postgres:
+    name: core schema on PostgreSQL ${{ matrix.postgres }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["14", "16"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # libpq variables: read by psql and by the tests. PGDATABASE is deliberately unset;
+      # each step or test names its own database.
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      ADMINWRIGHT_PG_TEST: "1"
+      ADMINWRIGHT_PRISMA_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: psql is available
+        run: |
+          command -v psql >/dev/null || { sudo apt-get update && sudo apt-get install -y postgresql-client; }
+          psql --version
+
+      - name: Apply postgres.sql
+        run: |
+          psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE core_schema"
+          psql -d core_schema -v ON_ERROR_STOP=1 -f assets/admin-core-schema/postgres.sql
+
+      # The SQL block under "Verifying the install" in the schema README. It raises (and psql
+      # exits non-zero) if a control is missing or refuses for the wrong reason, and it rolls
+      # everything back, so it also runs against the database the next steps reuse.
+      - name: Run the README verification SQL
+        run: |
+          python -c "import sys; sys.path.insert(0, 'tests'); import _core_schema_pg as p; open('verify.sql', 'w', encoding='utf-8').write(p.readme_verification_sql())"
+          psql -d core_schema -v ON_ERROR_STOP=1 -f verify.sql
+
+      # Django is installed only for the Django translation test; nothing in the skill needs it.
+      - name: Install Django and psycopg for the translation test
+        run: python -m pip install "django>=6" "psycopg[binary]"
+
+      # test_core_schema_db.py     postgres.sql: verification is not vacuous, grants.sql, concurrent chain writers
+      # test_core_schema_django.py django_models.py: check, sqlmigrate, migrate, django_triggers.sql, verification
+      # test_core_schema_prisma.py prisma.schema on Prisma 7: validate, no SET NULL, DDL + prisma_raw.sql, verification
+      - name: Core schema tests against the service container
+        run: python -m unittest discover -s tests -p "test_core_schema_*.py" -v
