@@ -1,13 +1,16 @@
 {
   "internal": {
+    "counts": {},
     "exit": 0,
     "findings": {}
   },
   "regulated": {
+    "counts": {},
     "exit": 0,
     "findings": {}
   },
   "standard": {
+    "counts": {},
     "exit": 0,
     "findings": {}
   }

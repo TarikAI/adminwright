@@ -2,7 +2,9 @@
   "$schema": "./admin-console.manifest.schema.json",
   "manifestVersion": "2.0",
   "profile": "regulated",
+  "projectRoot": "..",
   "platform": {
+    "id": "saas-clean-7b067d",
     "name": "saas-clean",
     "summary": "Multi-tenant B2B SaaS admin console slice.",
     "archetypes": [
@@ -569,5 +571,9 @@
   ],
   "declaredStatic": [],
   "feedback": [],
-  "agents": []
+  "agents": [],
+  "validatedWith": {
+    "ruleset": "30d8ebc4",
+    "skill": "a65e7bc"
+  }
 }

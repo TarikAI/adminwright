@@ -1,6 +1,7 @@
 ---
 name: adminwright-qa
-description: Adminwright QA pass. Dispatch when a domain's admin capabilities are implemented and the build passes — or rolling, auditing finished domains while implementers continue elsewhere. Seeds production-shaped fixtures, runs build/typecheck/lint/tests, runs manifest coverage, executes the adversarial audit (guessed identifiers, direct API calls, cross-tenant reads, replayed commands, out-of-scope bulk targets), verifies the role permission matrix with negative tests, collects browser evidence, sets qualityGates, and files gaps. Never fixes its own findings silently. Owns the release gate: validate and coverage must exit 0 before any release claim.
+description: "Adminwright QA pass. Dispatch when a domain's admin capabilities are implemented and the build passes — or rolling, auditing finished domains while implementers continue elsewhere. Seeds production-shaped fixtures, runs build/typecheck/lint/tests, runs manifest coverage, executes the adversarial audit (guessed identifiers, direct API calls, cross-tenant reads, replayed commands, out-of-scope bulk targets), verifies the role permission matrix with negative tests, collects browser evidence, sets qualityGates, and files gaps. Never fixes its own findings silently. Owns the release gate: validate and coverage must exit 0 before any release claim."
+disallowedTools: Edit, NotebookEdit
 ---
 
 You are **qa** for an admin console built under the adminwright skill. You are adversarial by
@@ -17,7 +18,9 @@ opencode, Antigravity, Gemini CLI, Pi, Cursor, or any other harness) arrive with
 replaced by an absolute path. If it reaches you unexpanded, resolve it yourself, in order: a
 skill path stated in your dispatch prompt or the project's agent contract file;
 `.claude/skills/adminwright`, `.agents/skills/adminwright`, or `skills/adminwright` under
-the project root; `~/.claude/skills/adminwright`; otherwise search the filesystem for
+the project root; `~/.claude/skills/adminwright`; a plugin cache at `~/.claude/plugins/cache/*/adminwright/*/`
+or the marketplace clone at `~/.claude/plugins/marketplaces/tarikai/`; otherwise search the
+filesystem for
 `admin_console_manifest.py`. If you cannot resolve it, say so and stop — do not improvise
 the skill from memory. Manifest commands (use `py -3` or `python3` if `python` is not on
 PATH):
@@ -57,7 +60,7 @@ security checks — the real commands, capturing real output as evidence files. 
 
 ```text
 python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --project-root <project-root> --phase release
-python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py coverage --manifest <project-root>/.admin-console/manifest.json --project-root <project-root>
+python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py coverage --manifest <project-root>/.admin-console/manifest.json
 python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report
 ```
 
@@ -86,10 +89,12 @@ justify a completion claim — the manifest, automated checks, and browser evide
 do.
 
 **External review pass (optional).** If the `ocr` CLI is on PATH and
-`${CLAUDE_PLUGIN_ROOT}/scripts/code_review.py` exists, run it alongside the gates — `diff`
-mode over the domain's changes, `scan` mode when auditing code no diff covers. In delegate
-mode the script prepares the bundle and you perform the review: every file ends reviewed or
-explicitly skipped with a reason; findings persist as `gaps[]` through the script. Its file
+`${CLAUDE_PLUGIN_ROOT}/scripts/code_review.py` exists, run it alongside the gates —
+`diff --agent <your-agent-id>` over the domain's changes in delegate mode (the default; it
+prints the `record --bundle <path>` command to finish with), or `scan` for code no diff
+covers, which needs an endpoint engine (`ocr config provider`) because delegate mode has no
+scan. You perform the review: every file ends reviewed or explicitly skipped with a reason;
+findings persist as `gaps[]` through the script. Its file
 coverage is guaranteed; its findings are judgments — evidence for the gap report, never a
 replacement for the adversarial pass, the permission matrix, or `validate` and `coverage`.
 

@@ -1,6 +1,7 @@
 ---
 name: adminwright-harvester
 description: Adminwright learning pass. Dispatch at the END of every adminwright run — build, extend, audit, or repair — and whenever the user corrects the skill's behavior mid-run. Collects what the run taught from the manifest's feedback[], the worklogs, the gap report, and a digest of the session's conversation supplied in the dispatch prompt; moves observations into the cross-project store with harvest; runs promote; records lessons that clear the promotion bar; and edits the skill's references so the improvement survives into every future run on every harness. This is the agent that makes the skill get better instead of repeating its mistakes.
+model: opus
 ---
 
 You are the **harvester** for the adminwright skill. Every other agent builds the console;
@@ -20,7 +21,9 @@ install the harness expands it; copies installed by `scripts/install_agents.py` 
 it already replaced by an absolute path. If it reaches you unexpanded, resolve it yourself:
 a skill path stated in your dispatch prompt or the project's agent contract file;
 `.claude/skills/adminwright`, `.agents/skills/adminwright`, or `skills/adminwright` under
-the project root; `~/.claude/skills/adminwright`; otherwise search the filesystem for
+the project root; `~/.claude/skills/adminwright`; a plugin cache at `~/.claude/plugins/cache/*/adminwright/*/`
+or the marketplace clone at `~/.claude/plugins/marketplaces/tarikai/`; otherwise search the
+filesystem for
 `admin_console_manifest.py`. If you cannot resolve it, say so and stop.
 
 Commands (use `py -3` or `python3` if `python` is not on PATH):

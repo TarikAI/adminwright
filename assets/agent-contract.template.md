@@ -8,6 +8,10 @@ Copy the fenced block below into the project as its agent instruction file — `
 A skill governs a session. This file governs the repository. It is what stops the next agent
 from undoing this one's work.
 
+If the repository already has an instruction file, do not replace it: append this block under
+its own heading (`## Admin console delivery rules`). Where a rule here conflicts with one
+already there, follow the stricter of the two and record the conflict in `decisions[]`.
+
 ```markdown
 # Admin console delivery rules
 
@@ -54,8 +58,8 @@ Read the authoritative documentation for this stack before implementing against 
 
 ## No mock data, no hard-coded values
 
-No mock, placeholder, stub, sample, random, or hard-coded value may reach the release path.
-A value that is genuinely static by design must be registered in the manifest's
+No fabricated data, simulated response, or literal constant standing in for a real source may
+reach the release path. A value that is genuinely static by design must be registered in the manifest's
 `declaredStatic[]` with a reason and an approver. That registry is the only exception.
 
 Fixtures, seeds, and story files are legitimate and must stay out of the paths named in
@@ -79,6 +83,17 @@ dropdown.
 - Bulk actions authorize per target row, not once for the batch, and report per-item results.
 - Exports and search obey the same row and field policy as detail views.
 - Every role has negative tests proving forbidden operations are rejected by the server.
+
+## Coordination
+
+- Change `.admin-console/manifest.json` only through the script's `add`, `set`, `claim` and
+  `release-claim`; never rewrite the file by hand, and never edit lock files.
+- `claim` a capability before you read the code you will change, work only inside the claim,
+  and `release-claim` when you stop. Exit 3 means another agent holds it: do not retry in a loop.
+- Write a worklog at `.admin-console/worklog/<agent id>.md` before you stop; the next agent
+  has the manifest and that file and nothing else.
+- A reviewer that contests a capability files a gap naming it. A capability contested twice
+  goes to a human; only a human, or a named approver in `decisions[]`, accepts a gap.
 
 ## Review independence
 

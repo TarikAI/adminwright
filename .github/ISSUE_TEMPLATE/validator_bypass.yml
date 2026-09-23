@@ -8,8 +8,8 @@ body:
         Thank you — this is the most important bug class in the project. A green result that
         means nothing is worse than no check at all.
 
-        If you would rather not post it publicly, use the
-        [security advisory form](https://github.com/TarikAI/adminwright/security/advisories/new).
+        If you would rather not post it publicly, open an issue titled "Security: private
+        contact request" with no details, and follow the route in SECURITY.md.
   - type: textarea
     id: bypass
     attributes:

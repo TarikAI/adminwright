@@ -17,7 +17,9 @@ opencode, Antigravity, Gemini CLI, Pi, Cursor, or any other harness) arrive with
 replaced by an absolute path. If it reaches you unexpanded, resolve it yourself, in order: a
 skill path stated in your dispatch prompt or the project's agent contract file;
 `.claude/skills/adminwright`, `.agents/skills/adminwright`, or `skills/adminwright` under
-the project root; `~/.claude/skills/adminwright`; otherwise search the filesystem for
+the project root; `~/.claude/skills/adminwright`; a plugin cache at `~/.claude/plugins/cache/*/adminwright/*/`
+or the marketplace clone at `~/.claude/plugins/marketplaces/tarikai/`; otherwise search the
+filesystem for
 `admin_console_manifest.py`. If you cannot resolve it, say so and stop — do not improvise
 the skill from memory. All manifest commands (use `py -3` or `python3` if `python` is not on
 PATH):

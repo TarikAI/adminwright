@@ -37,16 +37,27 @@ recover safely, and produce evidence of who changed what.
 - Preserve the project's architecture and design system unless there is evidence that
   changing them is required.
 
+Commands below use two placeholders. `<skill-dir>` is the directory containing this
+`SKILL.md`: Claude Code injects it as the plugin root, and other harnesses install it where
+[agents/README.md](agents/README.md) says. `<project-root>` is the repository the console
+administers; with several consoles in one repository, see "Monorepos and several
+consoles" under Phase 2.
+
 ## Select the operating mode
 
 - **Build:** create a new admin console or a major module end to end.
-- **Extend:** add capabilities while preserving established policies and component vocabulary.
+- **Extend:** add capabilities while preserving established policies and component
+  vocabulary. This is not a full build: skip Phases 1 and 4, load only the narrow-extension
+  set in the table below, `add` the new capabilities to the existing manifest, implement
+  them (Phase 5), and finish with Phase 7's `validate` and `coverage`.
 - **Audit:** compare an existing console with the domain and implementation, then report
   gaps. Do not modify the product's code — but the audit itself must leave durable
   artifacts, not only a chat report. Initialize the manifest if absent, model what you
   found at status `discovered`, record every gap in `gaps[]` and every observation about
   this skill in `feedback[]`, and write the report to a file:
-  `emit --format gap-report --out docs/admin-gap-report.md`. A chat report evaporates with
+  `python <skill-dir>/scripts/admin_console_manifest.py emit --manifest
+  <project-root>/.admin-console/manifest.json --format gap-report --out
+  docs/admin-gap-report.md` (that path, everywhere). A chat report evaporates with
   the session; the manifest is what lets the next agent repair instead of re-audit. Build
   the manifest through `add` and `set`, not by hand-writing JSON — the write guard catches
   malformed entries at the moment they are cheapest to fix. End the report by naming the
@@ -116,7 +127,9 @@ code, never the contract.
 
 ## Phase 2: Model the control plane
 
-Create `.admin-console/manifest.json`:
+If `.admin-console/manifest.json` already exists, do not `init`: read it, read every worklog
+whose `agents[].status` is `handed-off`, run `validate --phase plan`, and resume at the
+first phase whose exit condition fails. Otherwise create it:
 
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py init --project-root <project-root> --name "<platform name>" --archetype <archetype> --profile <profile>
@@ -124,7 +137,18 @@ python <skill-dir>/scripts/admin_console_manifest.py init --project-root <projec
 
 Use `py -3` or `python3` if `python` is not on PATH. If Python is unavailable, copy
 `assets/admin-console.manifest.template.json` and fill it manually against
-`assets/admin-console.manifest.schema.json`, which types every field.
+`assets/admin-console.manifest.schema.json`, which types every field. Without Python there
+are no release gates at all -- no `validate`, no `coverage`, no write guard -- so say so in
+the completion report instead of calling the console verified.
+
+Before your first `add`, read `<skill-dir>/evals/fixtures/saas-clean/.admin-console/manifest.json`,
+a complete manifest that passes at `regulated`, and imitate its field shapes. A capability
+attaches to its entity with `--entity`, and `set` changes one field by path:
+
+```text
+python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-root>/.admin-console/manifest.json --kind capability --entity user --json '{"id":"user.list","outcome":"Find an account","kind":"query","roles":["ops"]}'
+python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'entities[user].capabilities[user.list].status' --value planned
+```
 
 Model incrementally with `add` and `set`. Pass structured values as one quoted argument
 (`--json '{"id":"ops", ...}'`), or, in PowerShell 5.1 — which strips the quotes inside
@@ -147,6 +171,15 @@ Use `status: not-applicable` only with a recorded rationale, and `blocked` only 
 exact external dependency. Neither may hide unfinished work. Leave implementation fields
 empty rather than filling them with placeholder text — the scanner treats placeholders as
 defects, and an empty field is an honest one.
+
+What to commit: the manifest, its schema copy, `worklog/`, and the reports you `emit`.
+Not `locks/`, `.lock`, `*.tmp` or the OCR bundle files; `init` writes
+`.admin-console/.gitignore` with them.
+
+Monorepos and several consoles: one manifest per console. Root evidence at the repository
+(paths are repo-relative), and place each console's manifest with `init --manifest <path>`,
+which records `projectRoot` so `emit`, `harvest` and `code_review.py` stop guessing it.
+Keep the `platform.id` that `init` writes: `harvest` counts each console once by it.
 
 Check the model as you go:
 
@@ -209,7 +242,8 @@ For each capability afterward:
    operationally important.
 7. Build the interface using the project's design system.
 8. Cover loading, empty, populated, filtered-empty, validation, conflict, error, forbidden,
-   partial/stale, and success states as applicable.
+   partial/stale, and success states as applicable. Release requires `loading`, `populated`,
+   `error` and `forbidden` on every screen, and `success` on any screen with actions.
 9. Add unit, integration, authorization, contract, and browser tests proportional to risk.
 10. Update the manifest with real implementation and evidence paths.
 
@@ -242,7 +276,7 @@ Run the project's build, type check, lint, tests, security checks, and browser t
 
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --project-root <project-root> --phase release
-python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <project-root>/.admin-console/manifest.json --project-root <project-root>
+python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <project-root>/.admin-console/manifest.json
 python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report
 ```
 
@@ -319,7 +353,8 @@ console, and when a single agent runs the roles in sequence.
 Six agents ship with the skill — one per role plus a learning pass:
 `adminwright-architect`, `adminwright-implementer`, `adminwright-ux-reviewer`,
 `adminwright-qa`, `adminwright-security`, `adminwright-harvester`
-([agents/README.md](agents/README.md) has the dispatch order). Each carries its role
+([agents/README.md](agents/README.md) has the dispatch order; the harvester is a pass, not
+a claimable role, and never registers in `agents[]`). Each carries its role
 contract and needs no conversation history. In a harness with subagent support, dispatch
 them; in any other harness, install them with
 `python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <root>` and
@@ -356,10 +391,12 @@ prerequisite; record their use or absence in `decisions[]`.
   `handoff/coverage.md` at `holes_remaining: 0` before citing closure as evidence. The
   contract is affordance coverage, never visual design.
 - **Open Code Review (OCR)** (line-anchored review): at Phase 7 and in audit, if `ocr` is on
-  PATH, `scripts/code_review.py` runs a delegate-mode review — no OCR-side API key; the
-  reviewing agent covers every file in the bundle, findings persist to `gaps[]` and surface
-  in `emit --format gap-report`. Endpoint mode needs `ocr config provider` first. Findings
-  are judgments with guaranteed file coverage — a floor, not a proof.
+  PATH, `scripts/code_review.py diff --agent <id>` runs a delegate-mode review — no OCR-side
+  API key; the reviewing agent covers every file in the bundle and finishes with the `record
+  --bundle <path>` command `diff` prints, findings persist to `gaps[]` and surface in `emit
+  --format gap-report`. `scan` (full-file review) and `--engine ocr` need an endpoint
+  (`ocr config provider` first); delegate mode has no scan. Findings are judgments with
+  guaranteed file coverage — a floor, not a proof.
 - The harvester pass shares its lesson format with DesignArchitect's skill-harvester;
   cross-referencing between the two stores stays manual for now.
 

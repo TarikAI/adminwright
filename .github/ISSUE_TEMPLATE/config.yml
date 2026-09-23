@@ -1,5 +1,3 @@
 blank_issues_enabled: true
-contact_links:
-  - name: Question or idea
-    url: https://github.com/TarikAI/adminwright/discussions
-    about: For anything that is not a bug report or a concrete proposal.
+# No contact_links: the Discussions tab is not enabled for this repository, so a link
+# to it is a 404. Add one back when Discussions is turned on.

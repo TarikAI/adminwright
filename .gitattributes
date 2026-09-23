@@ -1,6 +1,6 @@
-# Normalize to LF in the repository. Windows checkouts still get CRLF locally
-# where the platform expects it; the committed bytes stay consistent so diffs
-# are readable and CI behaves the same on every runner.
+# Text files are LF in the repository AND in the working tree, on every platform
+# (`eol=lf`): a Windows checkout does not get CRLF. Diffs are readable and the
+# scripts, fixtures and expectations are byte-identical on every runner.
 * text=auto eol=lf
 
 # Shell scripts must keep LF even on Windows checkouts.

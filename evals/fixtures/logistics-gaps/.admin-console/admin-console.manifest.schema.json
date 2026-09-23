@@ -32,6 +32,10 @@
       "$ref": "#/$defs/profile",
       "description": "Scales gate severity. Choosing one is a recorded decision, not a default."
     },
+    "projectRoot": {
+      "type": "string",
+      "description": "Repository root that relative evidence paths resolve against, written relative to the folder holding this manifest ('..' for .admin-console/manifest.json). Absent means '..'. Record it when the manifest lives elsewhere, e.g. one console per app in a monorepo."
+    },
     "platform": {
       "type": "object",
       "required": [
@@ -47,6 +51,10 @@
         "volumes"
       ],
       "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable handle for this platform, written by `init`. `harvest` counts distinct projects by it, so renaming the platform does not make it two projects and two platforms called 'admin' are not one."
+        },
         "name": {
           "type": "string"
         },
@@ -759,7 +767,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Capability, screen, entity, or role ids this decision governs."
+            "description": "Capability, screen, entity, or role ids this decision governs. '*' means the whole manifest (a profile or scope decision)."
           }
         }
       }
@@ -891,6 +899,10 @@
               "tooling"
             ]
           },
+          "scope": {
+            "type": "string",
+            "description": "The one thing this would change in the skill: a references/<file>.md path, SKILL.md, scripts, or agents. Observations are grouped by scope and category, so an unscoped entry can never corroborate the same finding from another project."
+          },
           "proposedChange": {
             "type": "string"
           },
@@ -906,6 +918,10 @@
               "promoted",
               "rejected"
             ]
+          },
+          "promotedHash": {
+            "type": "string",
+            "description": "Written by `harvest`: a hash of the entry's wording when it was banked. An entry edited afterwards is banked again as a new observation."
           }
         }
       }
@@ -963,7 +979,26 @@
           },
           "notes": {
             "type": "string"
+          },
+          "stolenFrom": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Written by `claim --force-steal`: each capability this agent took from another, with who held it and the reason given."
           }
+        }
+      }
+    },
+    "validatedWith": {
+      "type": "object",
+      "description": "Written by add, set, claim, release-claim, harvest and migrate: the rule-set hash and skill commit that last touched this manifest, so an auto-updated install can tell which rules judged the edit.",
+      "properties": {
+        "ruleset": {
+          "type": "string"
+        },
+        "skill": {
+          "type": "string"
         }
       }
     }
@@ -1066,11 +1101,31 @@
             }
           }
         },
+        "surface": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "ui",
+              "api",
+              "cli",
+              "job",
+              "chat"
+            ]
+          },
+          "description": "Where operators reach this capability. Absent or empty means the admin UI. 'ui' requires uiRoutes and a route-anchored screen; every other surface requires entrypoints and policyTests instead, because no screen exists to carry them."
+        },
         "uiRoutes": {
           "type": "array",
           "items": {
             "type": "string"
           }
+        },
+        "entrypoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "For a non-UI surface: the route, command name or handler an operator invokes, e.g. 'POST /admin/api/tenants/{id}/suspend', 'admin tenants suspend', 'jobs/expire-trials'."
         },
         "serverOperations": {
           "type": "array",
@@ -1115,6 +1170,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "policyTests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Test files proving who may invoke a non-UI capability and that everyone else is refused. Checked like tests: shaped like a test, containing assertions."
         },
         "evidence": {
           "type": "array",

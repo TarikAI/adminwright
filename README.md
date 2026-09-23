@@ -49,7 +49,7 @@ python /path/to/adminwright/scripts/admin_console_manifest.py init \
   --project-root . --name "Your Platform" --archetype b2b-saas --profile standard
 ```
 
-Use `py -3` or `python3` if `python` isn't on your PATH. Python 3.8+, standard library only —
+Use `py -3` or `python3` if `python` isn't on your PATH. Python 3.9+, standard library only —
 no pip install, no dependencies, ever.
 
 ## Profiles: honest tiering
@@ -102,7 +102,8 @@ reviewed.** A single agent runs the roles in sequence, re-reading the code rathe
 recalling it.
 
 The roles ship as ready-to-dispatch agents in [`agents/`](agents/) — the five above plus
-`adminwright-harvester`, the learning pass that runs last on every mode. Claude Code loads
+`adminwright-harvester`, the learning pass that runs last on every mode. The harvester is a
+pass, not a claimable role: it never registers in `agents[]` or claims capabilities. Claude Code loads
 them from the plugin automatically; one command installs them into any other harness:
 
 ```bash
@@ -168,10 +169,12 @@ the same friction.
 init      scaffold .admin-console/manifest.json at a chosen profile
 migrate   upgrade a v1 manifest to v2
 validate  structure, evidence, placeholders, coverage        (0 clean / 1 findings / 2 usage)
+report    coverage summary: counts by status, kind, risk, review, gates; declared static values
 coverage  structural gap audit on its own
-emit      authz-matrix | test-plan | nav-map | seed-plan | operator-handbook | gap-report
+emit      authz-matrix | test-plan | nav-map | seed-plan | operator-handbook | gap-report | rule-matrix
 add/set   safe partial writes under a lock (never rewrite the whole file)
 claim     multi-agent capability ownership                    (3 = conflict)
+release-claim  give a claim back when you stop or hand off    (3 = not yours to release)
 harvest   move this project's feedback into the cross-project store
 promote   list what clears the promotion bar; --export to share, --include-community to weigh
 store     init | sync | status for the cross-device observation store

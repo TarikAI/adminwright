@@ -57,13 +57,15 @@ def validate(project_root, profile):
             + "\nstderr: " + completed.stderr[:500]
         )
     findings = {}
+    counts = {}
     for item in payload.get("findings", []):
         rule = item.get("rule")
         severity = item.get("severity")
+        counts[rule] = counts.get(rule, 0) + 1
         # Keep the strongest severity seen for a rule; that is what decides pass/fail.
         if findings.get(rule) != "error":
             findings[rule] = severity
-    return {"exit": completed.returncode, "findings": findings}
+    return {"exit": completed.returncode, "findings": findings, "counts": counts}
 
 
 def observed(fixture):
@@ -81,6 +83,17 @@ def compare(name, expected, actual):
                 "  %s @ %s: exit %s, expected %s"
                 % (name, profile, got.get("exit"), want.get("exit"))
             )
+        want_counts = want.get("counts", {})
+        got_counts = got.get("counts", {})
+        for rule in sorted(set(want_counts) | set(got_counts)):
+            # Same severity but a different NUMBER of findings is a behaviour
+            # change too: a rule that used to fire twice and now fires once has
+            # stopped checking something.
+            if want_counts and want_counts.get(rule) != got_counts.get(rule):
+                problems.append(
+                    "  %s @ %s: %s fired %s time(s), expected %s"
+                    % (name, profile, rule, got_counts.get(rule, 0), want_counts.get(rule, 0))
+                )
         want_rules = want.get("findings", {})
         got_rules = got.get("findings", {})
         for rule in sorted(set(want_rules) | set(got_rules)):
@@ -113,9 +126,8 @@ def main():
         actual = observed(fixture)
         expectation_path = fixture / "expected-findings.json"
         if args.update:
-            expectation_path.write_text(
-                json.dumps(actual, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
+            with open(str(expectation_path), "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(actual, indent=2, sort_keys=True) + "\n")
             print("updated  " + fixture.name)
             continue
         if not expectation_path.exists():

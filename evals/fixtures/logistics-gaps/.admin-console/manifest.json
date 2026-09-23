@@ -2,7 +2,9 @@
   "$schema": "./admin-console.manifest.schema.json",
   "manifestVersion": "2.0",
   "profile": "standard",
+  "projectRoot": "..",
   "platform": {
+    "id": "logistics-gaps-fdbdc4",
     "name": "logistics-gaps",
     "summary": "Dispatch and delivery operations console.",
     "archetypes": [
@@ -356,9 +358,24 @@
       "command": "k6 run admin-list.js"
     }
   ],
-  "decisions": [],
+  "decisions": [
+    {
+      "id": "dec.profile",
+      "decision": "Run at the standard profile",
+      "reason": "Internal dispatch staff; no regulated data",
+      "evidence": [],
+      "status": "confirmed",
+      "appliesTo": [
+        "*"
+      ]
+    }
+  ],
   "gaps": [],
   "declaredStatic": [],
   "feedback": [],
-  "agents": []
+  "agents": [],
+  "validatedWith": {
+    "ruleset": "30d8ebc4",
+    "skill": "a65e7bc"
+  }
 }

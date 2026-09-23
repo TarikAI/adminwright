@@ -28,7 +28,13 @@ Shape of a healthy run, orchestrated from the main session:
 4. Converge: `adminwright-ux-reviewer` and `adminwright-security` in parallel over each
    finished domain; `adminwright-qa` rolling behind them.
 5. Route filed gaps back to implementers under new claims; repeat until qa's release gate
-   (`validate` and `coverage` both exit 0) passes.
+   (`validate` and `coverage` both exit 0) passes. The loop has a stop rule: a reviewer that
+   sets `reviewStatus: contested` must file a `gaps[]` entry naming the capability (the
+   validator refuses `contested` without one), the implementer fixes it and returns it to
+   `unreviewed`, and a different reviewer than the contester reviews next. A capability
+   contested twice goes to the user, not to a third round: file a `blocked` gap stating both
+   positions. A gap becomes `accepted` only by the user, or by a named approver recorded as a
+   confirmed `decisions[]` entry; agents propose, they never accept.
 6. Dispatch `adminwright-harvester` last, passing it a short digest of this session's
    conversation — corrections the user made, guidance that proved wrong, phases that were
    skipped — so what the run taught outlives the chat.

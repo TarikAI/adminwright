@@ -1,0 +1,11 @@
+# Keep the first-party actions current. They are referenced by major-version tag
+# (actions/checkout@v4, ...) rather than by SHA, so a weekly update PR is what keeps
+# a compromised or yanked tag from sitting unnoticed. The one third-party action,
+# in ocr-advisory.yml, is pinned to a release SHA and bumped by hand together with
+# its `ocr_version`.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

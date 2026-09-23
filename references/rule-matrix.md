@@ -21,6 +21,7 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `capability-route-unknown`* | error | error | error |
 | `capability-screen-link`* | error | error | error |
 | `capability-unreviewed`* | warn | warn | error |
+| `contested-needs-gap`* | warn | warn | error |
 | `crosscutting-evidence` | warn | error | error |
 | `crosscutting-flag` | error | error | error |
 | `crosscutting-section-missing` | error | error | error |

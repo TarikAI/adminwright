@@ -25,9 +25,10 @@ project.
 
 ## Enforcement
 
-Report concerns privately through
-[GitHub's report form](https://github.com/TarikAI/adminwright/security/advisories/new) or by
-contacting the maintainers. Reports are handled confidentially. Maintainers may warn, remove
+Report concerns privately: open an issue titled **"Conduct: private contact request"** with no
+details in it, and the maintainers will reply with a private channel (see
+[SECURITY.md](SECURITY.md) for why there is no form to link). Reports are handled
+confidentially. Maintainers may warn, remove
 content, or ban, in proportion to the conduct and whether it repeats.
 
 Adapted from the [Contributor Covenant](https://www.contributor-covenant.org/), version 2.1.

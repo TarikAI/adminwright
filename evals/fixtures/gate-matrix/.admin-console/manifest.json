@@ -1,0 +1,722 @@
+{
+  "$schema": "./admin-console.manifest.schema.json",
+  "manifestVersion": "1.0",
+  "profile": "gold",
+  "projectRoot": "..",
+  "platform": {
+    "id": "gate-matrix-c2cb0a",
+    "name": "gate-matrix",
+    "summary": "",
+    "archetypes": [
+      "logistics-mobility"
+    ],
+    "tenancy": "single-tenant",
+    "regulatedData": [
+      "billing"
+    ],
+    "sourceSystems": [
+      "postgres"
+    ],
+    "operationalObjectives": [
+      "Exercise every gate"
+    ],
+    "stack": {
+      "frontend": "",
+      "backend": "",
+      "database": "",
+      "auth": "",
+      "jobs": "",
+      "hosting": "",
+      "designSystem": "",
+      "adminFramework": ""
+    },
+    "researchSources": [
+      {
+        "topic": "Framework auth",
+        "url": "https://example.test/auth",
+        "appliedTo": []
+      }
+    ],
+    "volumes": {
+      "entityCounts": "",
+      "peakConcurrentOperators": "",
+      "retentionHorizon": ""
+    }
+  },
+  "roles": [
+    {
+      "id": "ops",
+      "name": "Ops",
+      "responsibilities": [
+        "Run it"
+      ],
+      "scopes": [
+        "all"
+      ],
+      "mfaRequired": true,
+      "separationOfDuties": []
+    }
+  ],
+  "entities": [
+    {
+      "id": "alpha",
+      "name": "Alpha",
+      "sourceOfTruth": "postgres:alpha",
+      "sensitivity": "internal",
+      "tenantScoped": false,
+      "retention": "1y",
+      "lifecycleStates": [
+        "new",
+        "done"
+      ],
+      "lifecycleTransitions": [
+        {
+          "from": "new",
+          "to": "done",
+          "command": "alpha.ghost",
+          "actorRoles": [
+            "ops"
+          ]
+        }
+      ],
+      "capabilities": [
+        {
+          "id": "alpha.list",
+          "outcome": "Find alpha",
+          "kind": "query",
+          "roles": [
+            "ops"
+          ],
+          "risk": "low",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "new",
+              "done"
+            ],
+            "to": []
+          },
+          "uiRoutes": [
+            "/admin/alpha"
+          ],
+          "serverOperations": [
+            "AlphaRepo.find"
+          ],
+          "authorizationPolicies": [
+            "policy/alpha.read"
+          ],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "postgres:alpha via AlphaRepo.find",
+          "tests": [
+            "tests/alpha.spec.ts"
+          ],
+          "evidence": [
+            "evidence/build.log"
+          ],
+          "owner": "impl",
+          "implementedBy": "impl",
+          "reviewStatus": "contested",
+          "reviewedBy": "qa"
+        },
+        {
+          "id": "alpha.close",
+          "outcome": "Close alpha",
+          "kind": "command",
+          "roles": [
+            "ops",
+            "ghost"
+          ],
+          "risk": "critical",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "new"
+            ],
+            "to": [
+              "done"
+            ]
+          },
+          "uiRoutes": [
+            "/admin/alpha"
+          ],
+          "serverOperations": [
+            "AlphaService.close"
+          ],
+          "authorizationPolicies": [
+            "policy/alpha.close"
+          ],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "postgres:alpha via AlphaService.close",
+          "tests": [
+            "tests/alpha.spec.ts"
+          ],
+          "evidence": [
+            "evidence/build.log"
+          ],
+          "owner": "impl",
+          "implementedBy": "impl",
+          "reviewStatus": "unreviewed",
+          "reviewedBy": "qa"
+        }
+      ]
+    },
+    {
+      "id": "beta",
+      "name": "Beta",
+      "sourceOfTruth": "postgres:beta",
+      "sensitivity": "internal",
+      "tenantScoped": false,
+      "lifecycleStates": [
+        "open"
+      ],
+      "lifecycleTransitions": [],
+      "capabilities": [
+        {
+          "id": "beta.run",
+          "outcome": "Run beta",
+          "kind": "command",
+          "roles": [
+            "ops"
+          ],
+          "risk": "low",
+          "status": "planned",
+          "rationale": "",
+          "entityStates": {
+            "from": [],
+            "to": []
+          },
+          "uiRoutes": [],
+          "serverOperations": [],
+          "authorizationPolicies": [],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "",
+          "tests": [],
+          "evidence": [],
+          "owner": "impl",
+          "implementedBy": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa"
+        }
+      ]
+    },
+    {
+      "id": "gamma",
+      "name": "Gamma",
+      "sourceOfTruth": "postgres:gamma",
+      "sensitivity": "internal",
+      "tenantScoped": false,
+      "retention": "1y",
+      "lifecycleStates": [
+        "open"
+      ],
+      "lifecycleTransitions": [],
+      "capabilities": [
+        {
+          "id": "gamma.view",
+          "outcome": "View gamma",
+          "kind": "query",
+          "roles": [
+            "ops"
+          ],
+          "risk": "low",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "open"
+            ],
+            "to": []
+          },
+          "uiRoutes": [
+            "/admin/nowhere"
+          ],
+          "serverOperations": [
+            "GammaRepo.find"
+          ],
+          "authorizationPolicies": [
+            "policy/gamma.read"
+          ],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "hard-coded rate table in GammaRepo",
+          "tests": [
+            "tests/alpha.spec.ts"
+          ],
+          "evidence": [
+            "evidence/missing.log",
+            "manual: looked fine",
+            "evidence/vague.log"
+          ],
+          "owner": "impl",
+          "implementedBy": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa"
+        },
+        {
+          "id": "gamma.orphan",
+          "outcome": "Nobody can use this",
+          "kind": "query",
+          "roles": [],
+          "risk": "low",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "open"
+            ],
+            "to": []
+          },
+          "uiRoutes": [
+            "/admin/alpha"
+          ],
+          "serverOperations": [
+            "GammaRepo.orphan"
+          ],
+          "authorizationPolicies": [
+            "policy/gamma.orphan"
+          ],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "mockGammaRepo.findAll",
+          "tests": [
+            "evidence/build.log"
+          ],
+          "evidence": [
+            "evidence/build.log"
+          ],
+          "owner": "impl",
+          "implementedBy": "",
+          "reviewStatus": "reviewed",
+          "reviewedBy": ""
+        },
+        {
+          "id": "gamma.blocked",
+          "outcome": "Waits on a vendor",
+          "kind": "query",
+          "roles": [],
+          "risk": "low",
+          "status": "blocked",
+          "rationale": "",
+          "entityStates": {
+            "from": [],
+            "to": []
+          },
+          "uiRoutes": [],
+          "serverOperations": [],
+          "authorizationPolicies": [],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "",
+          "tests": [],
+          "evidence": [],
+          "owner": "impl",
+          "implementedBy": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa"
+        },
+        {
+          "id": "gamma.legacy",
+          "outcome": "Legacy purge",
+          "kind": "command",
+          "roles": [
+            "ops"
+          ],
+          "risk": "low",
+          "status": "not-applicable",
+          "rationale": "the vendor does it",
+          "entityStates": {
+            "from": [],
+            "to": []
+          },
+          "uiRoutes": [],
+          "serverOperations": [],
+          "authorizationPolicies": [],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "",
+          "tests": [],
+          "evidence": [],
+          "owner": "impl",
+          "implementedBy": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa"
+        },
+        {
+          "id": "gamma.meta",
+          "outcome": "Cites the manifest as its test",
+          "kind": "query",
+          "roles": [
+            "ops"
+          ],
+          "risk": "low",
+          "status": "implemented",
+          "rationale": "",
+          "entityStates": {
+            "from": [
+              "open"
+            ],
+            "to": []
+          },
+          "uiRoutes": [
+            "/admin/alpha"
+          ],
+          "serverOperations": [
+            "GammaRepo.meta"
+          ],
+          "authorizationPolicies": [
+            "policy/gamma.meta"
+          ],
+          "auditEvents": [],
+          "safeguards": [],
+          "dataBinding": "postgres:gamma via GammaRepo.meta",
+          "tests": [
+            ".admin-console/manifest.json",
+            "tests/alpha.spec.ts"
+          ],
+          "evidence": [
+            "evidence/build.log"
+          ],
+          "owner": "impl",
+          "implementedBy": "impl",
+          "reviewStatus": "reviewed",
+          "reviewedBy": "qa"
+        }
+      ]
+    }
+  ],
+  "workQueues": [
+    {
+      "id": "Bad Queue",
+      "purpose": "p",
+      "roles": [
+        "ops"
+      ],
+      "source": "s",
+      "priorityRule": "r",
+      "sla": "1h",
+      "actions": [
+        "a"
+      ],
+      "status": "planned",
+      "rationale": "",
+      "tests": []
+    },
+    {
+      "id": "Bad Queue",
+      "purpose": "p",
+      "roles": [
+        "ops"
+      ],
+      "source": "s",
+      "priorityRule": "r",
+      "sla": "1h",
+      "actions": [
+        "a"
+      ],
+      "status": "planned",
+      "rationale": "",
+      "tests": []
+    }
+  ],
+  "screens": [
+    {
+      "id": "s-alpha",
+      "route": "/admin/alpha",
+      "purpose": "Alpha board",
+      "roles": [
+        "ops"
+      ],
+      "dataSources": [
+        "postgres:alpha via AlphaRepo.find"
+      ],
+      "capabilities": [
+        "alpha.list",
+        "alpha.close",
+        "ghost.cap"
+      ],
+      "actions": [
+        "close"
+      ],
+      "states": [
+        "loading",
+        "populated"
+      ],
+      "responsive": false,
+      "accessibilityStatus": "planned",
+      "status": "implemented",
+      "rationale": "",
+      "tests": [
+        "tests/alpha.spec.ts"
+      ]
+    },
+    {
+      "id": "s-empty",
+      "route": "/admin/empty",
+      "purpose": "Nothing",
+      "roles": [
+        "ops"
+      ],
+      "dataSources": [
+        "postgres:alpha via AlphaRepo.find"
+      ],
+      "capabilities": [],
+      "actions": [],
+      "states": [
+        "loading",
+        "populated",
+        "error",
+        "forbidden"
+      ],
+      "responsive": true,
+      "accessibilityStatus": "implemented",
+      "status": "live",
+      "rationale": "",
+      "tests": [
+        "tests/alpha.spec.ts"
+      ]
+    },
+    {
+      "id": "s-bare",
+      "route": "/admin/bare",
+      "purpose": "Not built yet",
+      "roles": [
+        "ops"
+      ],
+      "dataSources": [],
+      "capabilities": [
+        "alpha.list"
+      ],
+      "actions": [],
+      "states": [],
+      "responsive": true,
+      "accessibilityStatus": "implemented",
+      "status": "implemented",
+      "rationale": "",
+      "tests": [
+        "tests/alpha.spec.ts"
+      ]
+    }
+  ],
+  "integrations": [
+    {
+      "id": "pay",
+      "direction": "outbound",
+      "sourceOfTruth": "the payment provider",
+      "operations": [
+        "charge"
+      ],
+      "failureHandling": "retry with backoff",
+      "reconciliation": "daily",
+      "monitoring": "",
+      "credentialBoundary": "",
+      "roles": [
+        "ops"
+      ],
+      "status": "implemented",
+      "rationale": "",
+      "tests": [
+        "tests/authz.spec.ts"
+      ]
+    }
+  ],
+  "crossCutting": {
+    "authentication": {
+      "implemented": false,
+      "mfaForPrivilegedRoles": false,
+      "sessionRevocation": false,
+      "stepUpForSensitiveActions": false,
+      "evidence": []
+    },
+    "authorization": {
+      "serverEnforced": false,
+      "defaultDeny": false,
+      "objectAndScopeChecks": false,
+      "policyTests": [],
+      "evidence": [
+        "evidence/build.log"
+      ]
+    },
+    "audit": {
+      "privilegedMutations": false,
+      "privilegedReadsWhenRequired": false,
+      "capturesActorTargetReasonResult": false,
+      "capturesSafeBeforeAfter": false,
+      "tamperProtected": false,
+      "evidence": []
+    },
+    "safety": {
+      "riskClassifiedActions": false,
+      "recoveryDefined": false,
+      "bulkPreviewAndPartialFailure": false,
+      "highRiskApprovalOrStepUp": false,
+      "evidence": []
+    },
+    "data": {
+      "releaseUsesRealSources": false,
+      "sensitiveFieldsClassified": false,
+      "retentionDefined": false,
+      "tenantIsolationTested": false,
+      "evidence": [
+        "evidence/shared.log"
+      ]
+    },
+    "experience": {
+      "wcagTarget": "2.2 AA",
+      "keyboardCriticalFlowsTested": false,
+      "responsiveCriticalFlowsTested": false,
+      "localizationRequirementsHandled": false,
+      "evidence": []
+    }
+  },
+  "qualityGates": [
+    {
+      "id": "build",
+      "status": "pending",
+      "threshold": "Project build succeeds",
+      "evidence": [],
+      "rationale": ""
+    },
+    {
+      "id": "typecheck",
+      "status": "passed",
+      "threshold": "0 errors",
+      "evidence": [
+        "evidence/none.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "tests",
+      "status": "not-applicable",
+      "threshold": "Required automated tests succeed",
+      "evidence": [],
+      "rationale": ""
+    },
+    {
+      "id": "browser",
+      "status": "passed",
+      "threshold": "critical flows pass",
+      "evidence": [
+        "tests/alpha.spec.ts"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "accessibility",
+      "status": "not-applicable",
+      "threshold": "WCAG target and keyboard checks pass",
+      "evidence": [],
+      "rationale": "declared out of scope"
+    },
+    {
+      "id": "security",
+      "status": "passed",
+      "threshold": "0 findings",
+      "evidence": [
+        "evidence/shared.log"
+      ],
+      "rationale": ""
+    },
+    {
+      "id": "performance",
+      "status": "passed",
+      "threshold": "p95 under 800ms",
+      "evidence": [],
+      "rationale": ""
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec.profile",
+      "decision": "Profile",
+      "reason": "",
+      "evidence": [],
+      "status": "confirmed",
+      "appliesTo": [
+        "nonexistent"
+      ]
+    },
+    {
+      "id": "dec.scope",
+      "decision": "Scope",
+      "reason": "Not yet asked",
+      "evidence": [],
+      "status": "assumed",
+      "appliesTo": [
+        "*"
+      ]
+    }
+  ],
+  "gaps": [
+    {
+      "id": "gap.critical",
+      "severity": "critical",
+      "description": "An open critical defect",
+      "status": "open",
+      "rationale": "",
+      "evidence": []
+    },
+    {
+      "id": "gap.accepted",
+      "severity": "low",
+      "description": "Accepted without saying why",
+      "status": "accepted",
+      "rationale": "",
+      "evidence": []
+    }
+  ],
+  "declaredStatic": [
+    {
+      "id": "static.binding",
+      "value": "rates",
+      "reason": "fixed by contract",
+      "approvedBy": "cfo",
+      "path": "entities[gamma].capabilities[gamma.view].dataBinding",
+      "evidence": []
+    },
+    {
+      "id": "static.incomplete",
+      "value": "v",
+      "reason": "",
+      "approvedBy": "cfo",
+      "path": "entities[gamma].capabilities[gamma.view].safeguards",
+      "evidence": []
+    },
+    {
+      "id": "static.self",
+      "value": "v",
+      "reason": "the label is fixed",
+      "approvedBy": "impl",
+      "path": "entities[gamma].capabilities[gamma.orphan].safeguards",
+      "evidence": []
+    },
+    {
+      "id": "static.unused",
+      "value": "v",
+      "reason": "left over",
+      "approvedBy": "cfo",
+      "path": "nothing.matches.this",
+      "evidence": []
+    }
+  ],
+  "feedback": [
+    {
+      "id": "fb-1",
+      "observation": "The gate list was hard to find",
+      "category": "friction",
+      "proposedChange": "Link it from SKILL.md",
+      "evidence": [],
+      "status": "open"
+    }
+  ],
+  "agents": [],
+  "validatedWith": {
+    "ruleset": "30d8ebc4",
+    "skill": "a65e7bc"
+  }
+}

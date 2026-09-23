@@ -323,6 +323,7 @@ RULES = {
     "test-file-shared": STRICT_ONLY,
     "implementer-unrecorded": LATE,
     "not-applicable-undecided": STRICT_ONLY,
+    "contested-needs-gap": LATE,
 }
 
 # Rules that describe an UNFINISHED model rather than a malformed one.
@@ -356,6 +357,7 @@ COMPLETENESS_RULES = frozenset(
         "capability-unreviewed",
         "implementer-unrecorded",
         "not-applicable-undecided",
+        "contested-needs-gap",
     }
 )
 
@@ -2323,6 +2325,14 @@ def validate_entities(manifest, findings, release, role_ids):
                     "an implemented capability must record who implemented it "
                     "(`claim --role implementer` stamps it), or review independence cannot be checked",
                 )
+        if capability.get("reviewStatus") == "contested" and not contested_gap_exists(manifest, cid):
+            findings.add(
+                "contested-needs-gap",
+                path + ".reviewStatus",
+                "'contested' must be paired with a gaps[] entry that names '" + cid
+                + "' (its `capability` field, or its id in the description), so the implementer "
+                "knows what to fix",
+            )
         if (
             status == "not-applicable"
             and capability.get("kind") in ("command", "job", "export")
@@ -2658,6 +2668,20 @@ def validate_agents(manifest, findings):
             findings.add("unknown-capability-reference", path + ".ownsScreens", "unknown screens: " + ", ".join(unknown_screens))
 
 
+def contested_gap_exists(manifest, capability_id):
+    """An open or blocked gap that names the capability a reviewer contested."""
+    for _path, gap in iter_named(manifest, "gaps"):
+        if gap.get("status") not in ("open", "blocked"):
+            continue
+        if text_of(gap.get("capability")) == capability_id:
+            return True
+        if capability_id and capability_id in (
+            text_of(gap.get("description")) + " " + text_of(gap.get("rationale"))
+        ):
+            return True
+    return False
+
+
 def implementer_ids(manifest, capability):
     """Every id that built or held this capability, lowercased.
 
@@ -2778,8 +2802,23 @@ def validate_evidence(manifest, findings, project_root):
                 )
     for path, gap in iter_named(manifest, "gaps"):
         if gap.get("status") == "fixed":
+            entries = gap.get("evidence")
+            if text_of(gap.get("source")).lower() == "ocr" and isinstance(entries, list):
+                # The OCR bridge cites its own review record (kept beside the
+                # manifest, and git-ignored) as evidence of the FINDING. That is a
+                # provenance note, not proof of a fix, so it is neither required to
+                # resolve nor accepted as proof; anything else it lists still is.
+                entries = [
+                    entry for entry in entries
+                    if not (
+                        isinstance(entry, str)
+                        and evidence_kind(entry) == "path"
+                        and evidence_path(entry, project_root) is not None
+                        and inside_manifest_dir(evidence_path(entry, project_root), findings.manifest_dir)
+                    )
+                ]
             check_evidence_list(
-                gap.get("evidence"), path + ".evidence", findings, project_root, True,
+                entries, path + ".evidence", findings, project_root, True,
                 role="gap-evidence", owner=text_of(gap.get("id")),
             )
 
@@ -3358,7 +3397,9 @@ def migrate_manifest(manifest):
         if isinstance(decision, dict):
             ensure_key(decision, "appliesTo", [], "decisions[" + str(index) + "]", changes)
 
-    for key in ("declaredStatic", "feedback", "agents"):
+    # Every collection the 2.0 schema requires, not only the three 2.0 introduced: a
+    # 1.0 manifest without `decisions` migrated to something the schema rejects.
+    for key in COLLECTION_KEYS:
         ensure_key(manifest, key, [], "manifest", changes)
 
     ordered = {}

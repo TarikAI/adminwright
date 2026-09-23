@@ -2,8 +2,19 @@
 
 ## Reporting a vulnerability
 
-Report privately through GitHub's [security advisory form](https://github.com/TarikAI/adminwright/security/advisories/new).
-Please do not open a public issue for anything in the first category below.
+GitHub's private vulnerability reporting is not enabled for this repository, so there is no
+private form to link to. Until it is, open a public issue titled **"Security: private contact
+request"** that contains **no details** of the problem (not the manifest, not the input, not
+the impact). The maintainers will answer in that issue with a private channel, and the details
+go there, not in the issue. A validator bypass that needs nothing but a crafted manifest is
+low-risk to discuss openly -- the tool runs locally -- and may be reported with the
+[Validator bypass](https://github.com/TarikAI/adminwright/issues/new?template=validator_bypass.yml)
+template; use the private route for anything about code execution or writes outside the
+project.
+
+(Maintainers: turning on *Settings, Code security, Private vulnerability reporting* lets this
+section link straight to GitHub's advisory form; [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and
+[PRIVACY.md](PRIVACY.md) point here, so this is the one place to change.)
 
 You can expect an acknowledgement within a few days, and an assessment of whether the report
 is accepted along with a fix timeline.

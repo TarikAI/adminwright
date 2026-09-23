@@ -7,23 +7,36 @@ against any of these are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Done
 
-Items 1 to 3 below have shipped; see [CHANGELOG.md](CHANGELOG.md) for detail.
+Everything below has shipped; see [CHANGELOG.md](CHANGELOG.md) for detail.
 
 - ~~Close the remaining audit findings~~ — schema parity, reviewer identity, screen evidence
   tokens, exit-code semantics.
 - ~~Learning v2~~ — `store init|sync|status` for multi-device sync, `promote --export` for
   sanitised sharing, the opt-in community lane, `PRIVACY.md`, and a weekly candidate digest.
 - ~~Eval suite~~ — golden fixtures in CI as the regression floor for guidance changes.
+- ~~First field tests~~ — two audits and a build across seven projects in August 2026. They
+  produced lessons 0002 to 0005 and the `llm-gateway` archetype, and showed that a chat-only
+  audit never starts the learning loop (see `SKILL.md` and the changelog).
+- ~~Role agents~~ — six dispatchable agents (architect, implementer, ux-reviewer, qa,
+  security, harvester) with `scripts/install_agents.py` for any harness.
+- ~~Optional integrations~~ — DesignArchitect for UI closure and Open Code Review for
+  line-anchored review (`scripts/code_review.py`), both soft: absence blocks nothing.
+- ~~The `llm-gateway` archetype~~ — for platforms whose product is managing LLM and
+  third-party APIs.
+- ~~The 2026-09-23 audit~~ — 289 verified findings across the gates, false blocks, Windows
+  and PowerShell, the learning loop, the core schema and the agents; each has a regression
+  test, and `gate-matrix` plus `tests/test_rule_coverage.py` keep every rule pinned.
 
 ## Next: field test and case study
 
-Run the skill end-to-end on a real platform, capture friction as `feedback[]` in the moment,
-hold the first genuine promotion session, and publish the build as a sanitised case study.
+Publish one of those field builds as a sanitised case study, and hold the first genuine
+promotion session over the store it filled: the two-project bar has been reachable since
+clustering was fixed, but no lesson has yet been promoted through it end to end.
 
-This is the highest-information step remaining and the only one that cannot be done by review.
-Everything so far has been verified against fixtures and adversarial audits; none of it has met
-a real codebase's mess. Where an agent following `SKILL.md` is tempted to deviate is exactly
-the data the learning loop was built to capture.
+The field tests so far were short and mostly audits. What is still missing is one long build
+on a real codebase, read closely: where an agent following `SKILL.md` was tempted to deviate
+is exactly the data the learning loop was built to capture, and a published case study is
+the evidence that the gates certify something a reader can check.
 
 ## Then: release and distribution
 

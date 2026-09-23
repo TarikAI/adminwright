@@ -24,11 +24,11 @@
 
   <g transform="translate(166 372)">
     <rect x="0" y="0" width="946" height="112" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-    <text x="22" y="30" fill="#6e7681" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500">$ adminwright validate --phase release</text>
+    <text x="22" y="30" fill="#6e7681" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500">$ python scripts/admin_console_manifest.py validate --phase release</text>
     <line x1="22" y1="46" x2="924" y2="46" stroke="#30363d" stroke-width="1"/>
-    <text x="22" y="72" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500"><tspan fill="#f85149">ERROR</tspan><tspan fill="#8b949e" xml:space="preserve">  placeholder-scan     dataBinding: 'mock database'</tspan></text>
-    <text x="22" y="96" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500"><tspan fill="#f85149">ERROR</tspan><tspan fill="#8b949e" xml:space="preserve">  lifecycle-reachable  state 'closed' has no command</tspan></text>
-    <text x="646" y="72" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500">no mock data</text>
-    <text x="646" y="96" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500">no orphan controls</text>
+    <text x="22" y="72" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500"><tspan fill="#f85149">ERROR</tspan><tspan fill="#8b949e" xml:space="preserve">  [placeholder-scan] ...dataBinding: placeholder token 'mock'</tspan></text>
+    <text x="22" y="96" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500"><tspan fill="#f85149">ERROR</tspan><tspan fill="#8b949e" xml:space="preserve">  [lifecycle-reachable] state 'closed' is the target of no command</tspan></text>
+    <text x="770" y="72" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500">no mock data</text>
+    <text x="770" y="96" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" font-weight="500">no orphan controls</text>
   </g>
 </svg>

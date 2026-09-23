@@ -77,6 +77,5 @@ make a paid tier attractive.
 
 ## Questions
 
-Open an issue, or use the
-[security advisory form](https://github.com/TarikAI/adminwright/security/advisories/new) for
-anything you would rather not post publicly.
+Open an issue. For anything you would rather not post publicly, follow the private-contact
+route in [SECURITY.md](SECURITY.md).

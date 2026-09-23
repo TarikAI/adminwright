@@ -57,12 +57,12 @@ TEMPLATE = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" widt
 
   <g transform="translate({panel_x} {panel_y})">
     <rect x="0" y="0" width="946" height="112" rx="10" fill="{panel}" stroke="{line}" stroke-width="1"/>
-    <text x="22" y="30" fill="{dim}" font-family="{MONO}" font-size="17" font-weight="500">$ adminwright validate --phase release</text>
+    <text x="22" y="30" fill="{dim}" font-family="{MONO}" font-size="17" font-weight="500">$ python scripts/admin_console_manifest.py validate --phase release</text>
     <line x1="22" y1="46" x2="924" y2="46" stroke="{line}" stroke-width="1"/>
-    <text x="22" y="72" font-family="{MONO}" font-size="17" font-weight="500"><tspan fill="{fail}">ERROR</tspan><tspan fill="{row}" xml:space="preserve">  placeholder-scan     dataBinding: 'mock database'</tspan></text>
-    <text x="22" y="96" font-family="{MONO}" font-size="17" font-weight="500"><tspan fill="{fail}">ERROR</tspan><tspan fill="{row}" xml:space="preserve">  lifecycle-reachable  state 'closed' has no command</tspan></text>
-    <text x="646" y="72" fill="{pass}" font-family="{MONO}" font-size="17" font-weight="500">no mock data</text>
-    <text x="646" y="96" fill="{pass}" font-family="{MONO}" font-size="17" font-weight="500">no orphan controls</text>
+    <text x="22" y="72" font-family="{MONO}" font-size="17" font-weight="500"><tspan fill="{fail}">ERROR</tspan><tspan fill="{row}" xml:space="preserve">  [placeholder-scan] ...dataBinding: placeholder token 'mock'</tspan></text>
+    <text x="22" y="96" font-family="{MONO}" font-size="17" font-weight="500"><tspan fill="{fail}">ERROR</tspan><tspan fill="{row}" xml:space="preserve">  [lifecycle-reachable] state 'closed' is the target of no command</tspan></text>
+    <text x="770" y="72" fill="{pass}" font-family="{MONO}" font-size="17" font-weight="500">no mock data</text>
+    <text x="770" y="96" fill="{pass}" font-family="{MONO}" font-size="17" font-weight="500">no orphan controls</text>
   </g>
 </svg>
 """

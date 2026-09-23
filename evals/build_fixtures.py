@@ -7,10 +7,13 @@ Fixtures are generated rather than hand-written so the manifests stay consistent
 with the current template as the schema evolves, and so a reviewer can read the
 INTENT of a fixture here instead of diffing 200 lines of JSON.
 
-Two platforms, deliberately different in shape:
+Three platforms, deliberately different in shape:
 
   saas-clean       a truthful multi-tenant B2B SaaS slice that must pass everywhere
   logistics-gaps   a dispatch platform with real, named defects that must be caught
+  gate-matrix      one console broken on purpose so that every rule the validator
+                   advertises fires at least once (tests/test_rule_coverage.py
+                   fails when a rule is in RULES but in no expectation or test)
 
 Run:  python evals/build_fixtures.py
 """
@@ -29,6 +32,11 @@ FIXTURES = EVAL_ROOT / "fixtures"
 
 def scaffold(name, archetype, profile):
     root = FIXTURES / name
+    kept = None
+    if (root / "expected-findings.json").exists():
+        # The expectation is reviewed by a human; regenerating a fixture must not
+        # throw it away.
+        kept = (root / "expected-findings.json").read_bytes()
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
@@ -37,6 +45,8 @@ def scaffold(name, archetype, profile):
          "--name", name, "--archetype", archetype, "--profile", profile],
         capture_output=True, text=True, check=True,
     )
+    if kept is not None:
+        (root / "expected-findings.json").write_bytes(kept)
     return root
 
 
@@ -102,13 +112,13 @@ EVIDENCE_LOGS = {
 def write(root, rel, body):
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    with open(str(path), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(body)
 
 
 def save(root, manifest):
-    (root / ".admin-console" / "manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-    )
+    with open(str(root / ".admin-console" / "manifest.json"), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(manifest, indent=2) + "\n")
 
 
 def load(root):
@@ -409,15 +419,215 @@ def build_logistics():
         "responsive": True, "accessibilityStatus": "implemented", "status": "implemented",
         "rationale": "", "tests": ["tests/job.spec.ts"],
     }]
+    # init records the profile as an assumed decision; this platform's owner has
+    # confirmed it, so decision-assumed is not one of the defects on show here.
+    m["decisions"] = [{
+        "id": "dec.profile", "decision": "Run at the standard profile",
+        "reason": "Internal dispatch staff; no regulated data", "evidence": [],
+        "status": "confirmed", "appliesTo": ["*"],
+    }]
     all_true(m)
     pass_gates(m)
     save(root, m)
     return root
 
 
+def build_matrix():
+    """One console, broken on purpose, so every advertised rule fires.
+
+    Each defect below names the rule it exists to trigger. The point is not a
+    realistic platform: it is that no rule can be deleted, loosened to `off`, or
+    made unreachable without an eval failing. Where two rules fire together
+    (a missing route also leaves a capability unreachable) that is noted, not
+    avoided.
+    """
+    root = scaffold("gate-matrix", "logistics-mobility", "regulated")
+    write(root, "evidence/vague.log", "command completed, exit 0\n")   # evidence-uninformative
+    write(root, "evidence/build.log", "build run\n  0 errors across 118 files\n")
+    write(root, "tests/authz.spec.ts",
+          "test('role matrix', () => {\n  expect(can('ops', 'alpha.list', {})).toBe(true);\n});\n")
+    write(root, "tests/alpha.spec.ts",
+          "test('alpha.list via /admin/alpha', async () => {\n"
+          "  expect((await listAlpha()).length).toBeGreaterThan(0);\n"
+          "});\n")
+
+    m = load(root)
+    m["manifestVersion"] = "1.0"                     # manifest-version
+    m["profile"] = "gold"                            # profile-invalid
+    m["platform"].update({
+        "summary": "",                               # required-field-empty (release)
+        "operationalObjectives": ["Exercise every gate"], "tenancy": "single-tenant",
+        "regulatedData": ["billing"], "sourceSystems": ["postgres"],
+        "archetypes": ["logistics-mobility"],        # archetype-coverage: models none of its domains
+    })
+    m["roles"] = [
+        {"id": "ops", "name": "Ops", "responsibilities": ["Run it"], "scopes": ["all"],
+         "mfaRequired": True, "separationOfDuties": []},   # separation-of-duties for the critical command
+    ]
+    m["entities"] = [
+        {"id": "alpha", "name": "Alpha", "sourceOfTruth": "postgres:alpha",
+         "sensitivity": "internal", "tenantScoped": False, "retention": "1y",
+         "lifecycleStates": ["new", "done"],
+         "lifecycleTransitions": [
+             {"from": "new", "to": "done", "command": "alpha.ghost",      # transition-command-unknown
+              "actorRoles": ["ops"]}],
+         "capabilities": [
+             capability(id="alpha.list", outcome="Find alpha", roles=["ops"],
+                        entityStates={"from": ["new", "done"], "to": []},
+                        uiRoutes=["/admin/alpha"], serverOperations=["AlphaRepo.find"],
+                        authorizationPolicies=["policy/alpha.read"],
+                        dataBinding="postgres:alpha via AlphaRepo.find",
+                        tests=["tests/alpha.spec.ts"], evidence=["evidence/build.log"],
+                        reviewStatus="contested"),          # contested-needs-gap, capability-unreviewed
+             capability(id="alpha.close", outcome="Close alpha", kind="command",
+                        roles=["ops", "ghost"],             # unknown-role-reference
+                        risk="critical", entityStates={"from": ["new"], "to": ["done"]},
+                        uiRoutes=["/admin/alpha"], serverOperations=["AlphaService.close"],
+                        authorizationPolicies=["policy/alpha.close"],
+                        auditEvents=[],                     # audit-events-missing
+                        dataBinding="postgres:alpha via AlphaService.close",
+                        tests=["tests/alpha.spec.ts"], evidence=["evidence/build.log"],
+                        reviewStatus="unreviewed"),
+         ]},
+        {"id": "beta", "name": "Beta", "sourceOfTruth": "postgres:beta",
+         "sensitivity": "internal", "tenantScoped": False,   # retention removed below: manifest-key-missing
+         "lifecycleStates": ["open"], "lifecycleTransitions": [],
+         "capabilities": [
+             capability(id="beta.run", outcome="Run beta", kind="command", roles=["ops"],
+                        status="planned"),                  # release-status-unresolved; beta has no query: entity-query-missing
+         ]},
+        {"id": "gamma", "name": "Gamma", "sourceOfTruth": "postgres:gamma",
+         "sensitivity": "internal", "tenantScoped": False, "retention": "1y",
+         "lifecycleStates": ["open"], "lifecycleTransitions": [],
+         "capabilities": [
+             capability(id="gamma.view", outcome="View gamma", roles=["ops"],
+                        entityStates={"from": ["open"], "to": []},
+                        uiRoutes=["/admin/nowhere"],        # capability-route-unknown, capability-screen-link
+                        serverOperations=["GammaRepo.find"],
+                        authorizationPolicies=["policy/gamma.read"],
+                        dataBinding="hard-coded rate table in GammaRepo",   # unregistered-static
+                        tests=["tests/alpha.spec.ts"],
+                        evidence=["evidence/missing.log",   # evidence-path-missing
+                                  "manual: looked fine",    # manual-evidence
+                                  "evidence/vague.log"]),   # evidence-uninformative
+             # no role, no implementer, reviewed by nobody, a mock binding, and a "test"
+             # that is a log: capability-no-role, implementer-unrecorded, reviewer-identity,
+             # placeholder-scan, test-file-shape
+             capability(id="gamma.orphan", outcome="Nobody can use this", roles=[],
+                        entityStates={"from": ["open"], "to": []}, uiRoutes=["/admin/alpha"],
+                        serverOperations=["GammaRepo.orphan"],
+                        authorizationPolicies=["policy/gamma.orphan"],
+                        dataBinding="mockGammaRepo.findAll", implementedBy="", reviewedBy="",
+                        tests=["evidence/build.log"], evidence=["evidence/build.log"]),
+             capability(id="gamma.blocked", outcome="Waits on a vendor", status="blocked",
+                        rationale=""),                      # rationale-required
+             capability(id="gamma.legacy", outcome="Legacy purge", kind="command",
+                        status="not-applicable", rationale="the vendor does it",
+                        roles=["ops"]),                     # not-applicable-undecided
+             capability(id="gamma.meta", outcome="Cites the manifest as its test", roles=["ops"],
+                        entityStates={"from": ["open"], "to": []}, uiRoutes=["/admin/alpha"],
+                        serverOperations=["GammaRepo.meta"],
+                        authorizationPolicies=["policy/gamma.meta"],
+                        dataBinding="postgres:gamma via GammaRepo.meta",
+                        # evidence-inside-manifest-dir; and the fourth capability citing
+                        # alpha.spec.ts, which is test-file-shared
+                        tests=[".admin-console/manifest.json", "tests/alpha.spec.ts"],
+                        evidence=["evidence/build.log"]),
+         ]},
+    ]
+    m["workQueues"] = [
+        {"id": "Bad Queue", "purpose": "p", "roles": ["ops"], "source": "s",     # id-invalid
+         "priorityRule": "r", "sla": "1h", "actions": ["a"], "status": "planned", "rationale": "",
+         "tests": []},
+        {"id": "Bad Queue", "purpose": "p", "roles": ["ops"], "source": "s",     # id-duplicate
+         "priorityRule": "r", "sla": "1h", "actions": ["a"], "status": "planned", "rationale": "",
+         "tests": []},
+    ]
+    m["screens"] = [
+        {"id": "s-alpha", "route": "/admin/alpha", "purpose": "Alpha board", "roles": ["ops"],
+         "dataSources": ["postgres:alpha via AlphaRepo.find"],
+         "capabilities": ["alpha.list", "alpha.close", "ghost.cap"],       # unknown-capability-reference
+         "actions": ["close"], "states": ["loading", "populated"],
+         "responsive": False,                                              # screen-responsive
+         "accessibilityStatus": "planned",                                 # screen-accessibility
+         "status": "implemented", "rationale": "", "tests": ["tests/alpha.spec.ts"]},
+        {"id": "s-empty", "route": "/admin/empty", "purpose": "Nothing", "roles": ["ops"],
+         "dataSources": ["postgres:alpha via AlphaRepo.find"], "capabilities": [],   # screen-no-capability
+         "actions": [], "states": ["loading", "populated", "error", "forbidden"],
+         "responsive": True, "accessibilityStatus": "implemented",
+         "status": "live",                                                      # enum-invalid
+         "rationale": "", "tests": ["tests/alpha.spec.ts"]},
+        {"id": "s-bare", "route": "/admin/bare", "purpose": "Not built yet", "roles": ["ops"],
+         "dataSources": [], "capabilities": ["alpha.list"], "actions": [],       # screen-incomplete
+         "states": [], "responsive": True, "accessibilityStatus": "implemented",
+         "status": "implemented", "rationale": "", "tests": ["tests/alpha.spec.ts"]},
+    ]
+    m["integrations"] = [
+        {"id": "pay", "direction": "outbound", "sourceOfTruth": "the payment provider",
+         "operations": ["charge"], "failureHandling": "retry with backoff",
+         "reconciliation": "daily", "monitoring": "",            # integration-controls
+         "credentialBoundary": "", "roles": ["ops"], "status": "implemented", "rationale": "",
+         "tests": ["tests/authz.spec.ts"]},
+    ]
+    cross = m["crossCutting"]
+    del cross["observability"]                                   # crosscutting-section-missing
+    cross["authorization"].update({"serverEnforced": False,      # crosscutting-flag
+                                   "policyTests": [],            # authorization-policy-tests
+                                   "evidence": ["evidence/build.log"]})
+    cross["audit"].update({"evidence": [],                       # crosscutting-evidence
+                           "privilegedReadsWhenRequired": False})   # privileged-read-audit
+    write(root, "evidence/shared.log", "run finished\n  0 errors across 118 files\n")
+    cross["data"]["evidence"] = ["evidence/shared.log"]         # evidence-shared (a gate and a section)
+    gates = {g["id"]: g for g in m["qualityGates"]}
+    m["qualityGates"] = [g for g in m["qualityGates"] if g["id"] != "lint"]   # gate-missing
+    gates["build"].update({"status": "pending"})                                # gate-not-passed
+    gates["typecheck"].update({"status": "passed",                              # gate-evidence-path
+                               "evidence": ["evidence/none.log"], "threshold": "0 errors"})
+    gates["tests"].update({"status": "not-applicable", "rationale": ""})       # gate-rationale-missing
+    gates["accessibility"].update({"status": "not-applicable",                  # nonfunctional-gate-required
+                                   "rationale": "declared out of scope"})
+    gates["performance"].update({"status": "passed", "evidence": [],            # gate-evidence-missing
+                                 "threshold": "p95 under 800ms"})
+    gates["browser"].update({"status": "passed", "threshold": "critical flows pass",
+                             "evidence": ["tests/alpha.spec.ts"]})              # evidence-is-test-file
+    gates["security"].update({"status": "passed", "threshold": "0 findings",   # gate-evidence-unrelated
+                              "evidence": ["evidence/shared.log"]})
+    m["decisions"] = [
+        {"id": "dec.profile", "decision": "Profile", "reason": "",             # decision-reason-missing
+         "evidence": [], "status": "confirmed", "appliesTo": ["nonexistent"]}, # decision-applies-to-unknown
+        {"id": "dec.scope", "decision": "Scope", "reason": "Not yet asked",    # decision-assumed
+         "evidence": [], "status": "assumed", "appliesTo": ["*"]},
+    ]
+    m["declaredStatic"] = [
+        {"id": "static.binding", "value": "rates", "reason": "fixed by contract", "approvedBy": "cfo",
+         "path": "entities[gamma].capabilities[gamma.view].dataBinding", "evidence": []},   # declared-static-forbidden-path
+        {"id": "static.incomplete", "value": "v", "reason": "", "approvedBy": "cfo",
+         "path": "entities[gamma].capabilities[gamma.view].safeguards", "evidence": []},    # declared-static-incomplete
+        {"id": "static.self", "value": "v", "reason": "the label is fixed", "approvedBy": "impl",
+         "path": "entities[gamma].capabilities[gamma.orphan].safeguards", "evidence": []},  # declared-static-self-approved
+        {"id": "static.unused", "value": "v", "reason": "left over", "approvedBy": "cfo",
+         "path": "nothing.matches.this", "evidence": []},                                   # declared-static-unused
+    ]
+    m["feedback"] = [
+        {"id": "fb-1", "observation": "The gate list was hard to find", "category": "friction",
+         "proposedChange": "Link it from SKILL.md", "evidence": [], "status": "open"},      # feedback-scope
+    ]
+    m["platform"]["researchSources"] = [
+        {"topic": "Framework auth", "url": "https://example.test/auth", "appliedTo": []},   # research-source-incomplete
+    ]
+    m["gaps"] = [
+        {"id": "gap.critical", "severity": "critical", "description": "An open critical defect",
+         "status": "open", "rationale": "", "evidence": []},                    # gap-unresolved
+        {"id": "gap.accepted", "severity": "low", "description": "Accepted without saying why",
+         "status": "accepted", "rationale": "", "evidence": []},                # gap-rationale-missing
+    ]
+    save(root, m)
+    return root
+
+
 def main():
     FIXTURES.mkdir(exist_ok=True)
-    for builder in (build_saas, build_logistics):
+    for builder in (build_saas, build_logistics, build_matrix):
         root = builder()
         print("built " + root.name)
     print("\nNow run: python evals/run.py --update")
