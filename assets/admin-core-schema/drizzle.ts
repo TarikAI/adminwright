@@ -7,7 +7,9 @@
 //
 //   1. Triggers and functions. Append-only enforcement on auditEvent and
 //      approvalDecision, the audit hash chain (chain_seq / prev_hash / row_hash are
-//      assigned by a BEFORE INSERT trigger; leave them out of your inserts),
+//      assigned by a BEFORE INSERT trigger; leave them out of your inserts: chainSeq
+//      and rowHash carry client-side $defaultFn placeholders so the insert type
+//      allows that, and the trigger overwrites them),
 //      verify_audit_chain(), scrub_audit_payload(), the separation-of-duties
 //      trigger, and the trigger that keeps an approval_request as written (only
 //      state, executed_at and execution_result change). Application-level guards
@@ -230,7 +232,9 @@ export const auditEvent = adminCore.table("audit_event", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
   eventUuid: uuid("event_uuid").notNull().defaultRandom().unique(),
   chainId: text("chain_id").notNull().default("default"),
-  chainSeq: bigint("chain_seq", { mode: "bigint" }).notNull(), // assigned by trigger
+  // Placeholder so inserts can leave it out; the BEFORE INSERT trigger assigns the real
+  // value. $defaultFn is client-side only: the column has no DEFAULT in the DDL.
+  chainSeq: bigint("chain_seq", { mode: "bigint" }).notNull().$defaultFn(() => BigInt(0)),
 
   occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
@@ -279,7 +283,7 @@ export const auditEvent = adminCore.table("audit_event", {
   policyVersion: text("policy_version"),
 
   prevHash: text("prev_hash"), // assigned by trigger
-  rowHash: text("row_hash").notNull(), // assigned by trigger
+  rowHash: text("row_hash").notNull().$defaultFn(() => ""), // placeholder, as chainSeq; the trigger assigns it
   hashAlgorithm: text("hash_algorithm").notNull().default("sha256"),
 }, (t) => [
   check("audit_event_actor_kind_check", sql`${t.actorKind} IN ('human','service','agent','system')`),

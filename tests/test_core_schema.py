@@ -1586,6 +1586,15 @@ class TestPackContents(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertRegex(src, r"\b%s = models\.DateTimeField\(default=timezone\.now, db_default=Now\(\)\)" % field)
 
+    def test_drizzle_inserts_may_leave_the_chain_columns_out(self):
+        # audit round 2: the header said "leave them out of your inserts" while $inferInsert
+        # required chainSeq and rowHash (TS2739). Client-side placeholders fix the type without
+        # adding a DEFAULT to the DDL (test_core_schema_drizzle.py compiles an insert with tsc).
+        src = read("drizzle.ts")
+        self.assertRegex(src, r'chainSeq: bigint\("chain_seq", \{ mode: "bigint" \}\)\.notNull\(\)\.\$defaultFn\(')
+        self.assertRegex(src, r'rowHash: text\("row_hash"\)\.notNull\(\)\.\$defaultFn\(')
+        self.assertNotRegex(src, r'(chainSeq|rowHash):[^\n]*\.default\(')
+
     def test_prisma_states_every_relation_action(self):
         # audit finding 5.6: an optional relation defaults to SetNull.
         src = re.sub(r"//[^\n]*", "", read("prisma.schema"))
