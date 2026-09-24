@@ -75,29 +75,32 @@ Claude Code-only — `model` (the harvester's `opus`), `disallowedTools` (the re
 guard), and any Claude Code field added later, such as `color` — so only the `claude-code`
 copies act on it; the neutral copy carries it verbatim for reference. Every other harness
 loses the reviewers' edit restriction: see
-[the reviewer edit guard](#the-reviewer-edit-guard-per-harness) below. The pointer block is
-delimited by marker comments, so rerunning with
-`--append-pointer` after the skill moves replaces it in place. Codex, Antigravity and Pi all
-read `AGENTS.md`, so the block there carries one marked section per harness installed into
-it: installing them one after another, in any order, keeps every harness's notes, and a
-rerun changes nothing.
+[the reviewer edit guard](#the-reviewer-edit-guard-per-harness) below.
+
+The pointer block is delimited by marker comments, so rerunning with `--append-pointer`
+after the skill moves replaces it in place. Codex, Antigravity and Pi all read `AGENTS.md`,
+so the block there carries one marked section per harness installed into it: installing
+them one after another, in any order, keeps every harness's notes, and a rerun changes
+nothing.
 
 No file the installer writes for the project to commit holds a machine's absolute path.
 When the skill lives inside the project, every copy and the pointer block name it relative
 to the project root. When it lives outside (a plugin cache, `~/.claude/skills/`, a clone
-elsewhere), the copies say `<skill>` where the source says `${CLAUDE_PLUGIN_ROOT}`, and
-the installer writes this machine's path to `.adminwright/skill-dir` and adds
-`/.adminwright/skill-dir` to the project's `.gitignore`. A skill found in Claude Code's
-versioned plugin cache (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, deleted
-about 14 days after the plugin updates) is recorded as the marketplace clone
-(`~/.claude/plugins/marketplaces/<marketplace>/`) when that holds the skill too, and the
-installer warns when it does not. Each agent's "Locate the skill"
+elsewhere), the copies say `<skill>` where the source says `${CLAUDE_PLUGIN_ROOT}`, and the
+installer writes this machine's path to `.adminwright/skill-dir` and adds
+`/.adminwright/skill-dir` to the project's `.gitignore`. Each agent's "Locate the skill"
 section reads that file first, and falls back to its search list whenever the path it names
 does not exist. A teammate who pulls the committed agents needs the skill in one of those
 standard places, or one run of the installer, which writes their own
-`.adminwright/skill-dir`. The placeholder is deliberately not a `${...}` variable: outside
-a Claude Code plugin no harness expands `${CLAUDE_PLUGIN_ROOT}`, and Gemini CLI reads
-`${name}` in a subagent body as a template input and refuses to start the subagent.
+`.adminwright/skill-dir`. The placeholder is deliberately not a `${...}` variable: outside a
+Claude Code plugin no harness expands `${CLAUDE_PLUGIN_ROOT}`, and Gemini CLI reads `${name}`
+in a subagent body as a template input and refuses to start the subagent.
+
+A skill found in Claude Code's versioned plugin cache
+(`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, deleted about 14 days after the
+plugin updates) is recorded as the marketplace clone
+(`~/.claude/plugins/marketplaces/<marketplace>/`) when that holds the skill too; the
+installer warns when it does not.
 
 In harnesses that spawn subagents, dispatch each file as one. In harnesses that cannot, the
 pointer block instructs the main agent to adopt the files one at a time, sequentially, with
