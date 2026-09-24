@@ -21,6 +21,8 @@ import unittest
 from _core_schema_pg import (NPM, NPM_ENABLED, NPM_SKIP_REASON, NPX, SCHEMA, PgCase, canonical_check_names,
                              integrity_section, readme_verification_sql)
 
+NPM_PACKAGES = ("drizzle-orm@0.45", "drizzle-kit@0.31", "typescript@5")
+
 # The insert the drizzle.ts header describes: chain_seq, prev_hash and row_hash left to the trigger.
 PROBE = """\
 import { auditEvent } from "./schema";
@@ -56,7 +58,9 @@ class TestDrizzleTranslationOnPostgres(PgCase):
             "export default { dialect: 'postgresql', schema: './schema.ts', out: './out' };\n", encoding="utf-8"
         )
         self.run_cmd(project, NPM, "init", "-y")
-        self.run_cmd(project, NPM, "install", "--no-audit", "--no-fund", "drizzle-orm", "drizzle-kit", "typescript@5")
+        # Pinned to the release lines this was checked on: a new drizzle major (1.0 is in release
+        # candidates, with a different migration layout) must not turn CI red on its own.
+        self.run_cmd(project, NPM, "install", "--no-audit", "--no-fund", *NPM_PACKAGES)
         self.run_cmd(project, NPX, "drizzle-kit", "generate", "--config", "drizzle.config.ts")
 
         # the header's insert compiles: chainSeq and rowHash have client-side placeholders ...
