@@ -436,6 +436,73 @@ class TestClustering(unittest.TestCase):
         sizes = sorted(len(c) for c in acm.cluster_observations(records))
         self.assertEqual(sizes, [1, 2])
 
+    def groups(self, records):
+        return sorted(sorted(r["project"] for r in c) for c in acm.cluster_observations(records))
+
+    def assert_apart(self, records, first, second):
+        for members in self.groups(records):
+            self.assertFalse(first in members and second in members,
+                             first + " and " + second + " were merged: " + str(self.groups(records)))
+
+    # The reviewer's probes (audit 2026-09-23, re-checked by the round-1 verifier).
+
+    def test_reviewer_probe_a_a_shared_complaint_is_not_a_shared_finding(self):
+        records = [self.obs("P1", "Manifest validation failed on the audit event"),
+                   self.obs("P2", "Manifest validation failed on screens")]
+        self.assertEqual(self.groups(records), [["P1"], ["P2"]])
+
+    def test_reviewer_probe_c_a_short_note_is_not_absorbed_by_a_paragraph(self):
+        records = [
+            self.obs("P1", "validator rejected screens"),
+            self.obs("P2", "The implementer agent modelled the tenants entity and its screens before "
+                           "the roles, and the validator rejected the manifest because the screens "
+                           "referenced capabilities that did not exist yet; ordering guidance in "
+                           "build-order is unclear"),
+        ]
+        self.assertEqual(self.groups(records), [["P1"], ["P2"]])
+
+    def test_reviewer_probe_d_a_bridging_note_does_not_chain_two_findings(self):
+        records = [
+            self.obs("P1", "Bulk suspend authorized once per batch", "authorize each target in bulk commands"),
+            self.obs("P2", "Bulk export authorized once per batch and audit event missing",
+                     "authorize each target and emit audit events"),
+            self.obs("P3", "Audit event missing on export screen", "emit audit events for exports"),
+        ]
+        self.assert_apart(records, "P1", "P3")
+
+    def test_a_strong_bridge_does_not_chain_in_any_order(self):
+        # P2 repeats both findings word for word: it matches P1 and P3 perfectly
+        # while they share nothing. Average-link admitted P3 on mean(0, 1) = 0.5.
+        texts = {"P1": "bulk suspend authorized once per batch",
+                 "P2": "bulk suspend authorized once per batch; audit event missing on export screen",
+                 "P3": "audit event missing on export screen"}
+        for order in (("P1", "P2", "P3"), ("P2", "P1", "P3"), ("P3", "P2", "P1"), ("P2", "P3", "P1")):
+            records = []
+            for day, project in enumerate(order, 1):
+                record = self.obs(project, texts[project])
+                record["date"] = "2026-09-%02d" % day
+                records.append(record)
+            self.assert_apart(records, "P1", "P3")
+
+    def test_two_short_notes_sharing_a_bigram_stay_apart(self):
+        records = [self.obs("P1", "audit log export missing filters"),
+                   self.obs("P2", "audit log retention too short")]
+        self.assertEqual(self.groups(records), [["P1"], ["P2"]])
+
+    def test_identical_wording_always_groups_however_short(self):
+        records = [self.obs("A", "Fix validation"), self.obs("B", "Fix validation")]
+        self.assertEqual(self.groups(records), [["A", "B"]])
+
+    def test_a_larger_cluster_admits_a_record_that_matches_a_majority(self):
+        members = [self.obs("A1", "alpha bravo charlie delta echo foxtrot"),
+                   self.obs("A2", "alpha bravo charlie delta echo golf"),
+                   self.obs("A3", "alpha bravo charlie delta echo hotel"),
+                   self.obs("A4", "alpha bravo charlie india juliet kilo")]
+        joins = self.obs("E", "delta echo foxtrot golf hotel lima")          # A1-A3, not A4
+        stays = self.obs("F", "delta echo foxtrot mike november oscar")      # A1 only
+        self.assertEqual(self.groups(members + [joins]), [["A1", "A2", "A3", "A4", "E"]])
+        self.assertEqual(self.groups(members + [stays]), [["A1", "A2", "A3", "A4"], ["F"]])
+
 
 @unittest.skipUnless(HAVE_GIT, "git is required for store sync")
 class TestStoreSync(unittest.TestCase):

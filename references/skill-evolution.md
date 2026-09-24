@@ -37,7 +37,12 @@ distinct projects" cannot be evaluated while each project's copy of the skill on
 about itself. `harvest` moves a finished project's `feedback[]` into a store outside every
 project — `$ADMINWRIGHT_HOME`, or `~/.adminwright` by default — where observations from every
 platform you have built accumulate. `promote` then groups observations that say the same
-thing in different words and reports only those that clear the bar.
+thing in different words and reports only those that clear the bar. Grouping is deliberately
+conservative, because a false merge invents the second project the bar asks for: two records
+group only when they share at least three words beyond the vocabulary of complaint
+(manifest, validation, failed, missing), and a record joins a group only if it matches every
+member of a group of three or fewer, or a majority of a larger one. `promote` lists every
+member; if two of them are not the same finding, do not adopt them as one.
 
 A project is counted by its stable `platform.id` (written by `init`, so renaming the platform
 does not make it a new project); `promote --export` replaces it with a fingerprint salted per

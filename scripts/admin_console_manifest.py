@@ -4025,6 +4025,23 @@ STOPWORDS = frozenset("""
 a an and are as at be been but by for from had has have in into is it its of on or so than
 that the then there these they this to was were will with without would should must can not
 no nor own too very s t just don now
+when which what why how all each every any some also only more most other same like even
+still yet via per after before during while where because onto upon over under about
+against between through does did doing done them their our your
+""".split())
+
+# The skill's own vocabulary of complaint. Nearly every observation says that a
+# manifest failed validation, an agent's build broke, or something is missing,
+# so sharing these words is no evidence of sharing a finding: they count toward
+# a note's length but never toward the shared-word minimum. Reviewer probe:
+# "Manifest validation failed on the audit event" and "...failed on screens"
+# scored 0.75 and merged on exactly these three words, although they name
+# different defects. The OBJECTS of a complaint (audit, screens, roles, export)
+# are never listed here.
+GENERIC_WORDS = frozenset("""
+manifest manifests validation validate validates validated validating validator validators
+skill skills agent agents build builds session sessions project projects run runs ran
+fail fails failed failing failure failures error errors reject rejects rejected missing
 """.split())
 
 # Two agents describing one problem rarely choose the same words, so exact
@@ -4033,6 +4050,15 @@ no nor own too very s t just don now
 SIMILARITY_THRESHOLD = 0.45
 # Denominator floor for the overlap coefficient: see observation_similarity.
 SIMILARITY_FLOOR = 4
+# A match needs at least this many shared words outside GENERIC_WORDS. Two
+# short notes that share a bigram ("audit log export missing filters" / "audit
+# log retention too short") scored 0.5 and merged.
+MIN_SHARED_WORDS = 3
+# ...and the shared words must be at least this share of the LONGER note, or a
+# three-word note is absorbed by any paragraph that happens to contain its words
+# (reviewer probe: "validator rejected screens" scored 0.75 against an
+# unrelated paragraph about build order).
+MIN_LONGER_SHARE = 0.2
 
 
 def content_words(*texts):
@@ -4046,6 +4072,13 @@ def content_words(*texts):
     return words
 
 
+def observation_text(record):
+    """An observation's whole wording, normalised for an exact comparison."""
+    return " ".join(
+        (text_of(record.get("observation")) + " " + text_of(record.get("proposedChange"))).lower().split()
+    )
+
+
 def observation_similarity(left, right):
     """Overlap of two observations' content words, 0.0 to 1.0.
 
@@ -4053,13 +4086,45 @@ def observation_similarity(left, right):
     a paragraph about the same defect, and Jaccard punishes that difference in
     length even when the shorter text is wholly contained in the longer. The
     denominator has a floor, though: without one, two-word notes sharing a single
-    word scored 0.5 and merged with anything that mentioned it.
+    word scored 0.5 and merged with anything that mentioned it. Identical wording
+    scores 1.0 however short it is.
     """
+    if observation_text(left) and observation_text(left) == observation_text(right):
+        return 1.0
     a = content_words(left.get("observation"), left.get("proposedChange"))
     b = content_words(right.get("observation"), right.get("proposedChange"))
     if not a or not b:
         return 0.0
     return len(a & b) / float(max(min(len(a), len(b)), SIMILARITY_FLOOR))
+
+
+def observations_match(left, right, threshold=SIMILARITY_THRESHOLD):
+    """Whether two observations may be one finding.
+
+    Identical wording always is. Otherwise all three must hold: the overlap
+    reaches the threshold, at least MIN_SHARED_WORDS of the shared words are not
+    GENERIC_WORDS, and the shared words are at least MIN_LONGER_SHARE of the
+    longer note. A false merge fabricates the second project the promotion bar
+    asks for; a false split only waits for another sighting, and both reports
+    stay in the store.
+    """
+    if observation_text(left) and observation_text(left) == observation_text(right):
+        return True
+    a = content_words(left.get("observation"), left.get("proposedChange"))
+    b = content_words(right.get("observation"), right.get("proposedChange"))
+    if not a or not b:
+        return False
+    shared = a & b
+    if len(shared - GENERIC_WORDS) < MIN_SHARED_WORDS:
+        return False
+    if len(shared) < MIN_LONGER_SHARE * max(len(a), len(b)):
+        return False
+    return len(shared) / float(max(min(len(a), len(b)), SIMILARITY_FLOOR)) >= threshold
+
+
+def members_needed(cluster):
+    """How many members a record must match to join: all of a small cluster, else a majority."""
+    return len(cluster) if len(cluster) <= 3 else len(cluster) // 2 + 1
 
 
 def cluster_observations(records, threshold=SIMILARITY_THRESHOLD):
@@ -4068,13 +4133,17 @@ def cluster_observations(records, threshold=SIMILARITY_THRESHOLD):
     Scope and category must match exactly -- they are the coordinates of what
     the rule would change, and a friction note about SKILL.md is not the same
     finding as a tooling bug in the validator however similar the wording.
-    Within a bucket, greedy AVERAGE-link clustering: a record joins the cluster
-    whose members it resembles on average, best cluster first.
+    Within a bucket, a record joins a cluster only if it MATCHES (see
+    observations_match) every member of a cluster of up to three, or a majority
+    of a larger one; among the clusters it may join it takes the one it
+    resembles most on average.
 
     Single-link let one shared word chain unrelated findings into one cluster:
     A resembled B, B resembled C, so A and C were "the same finding" although
-    they shared nothing. Average-link needs the record to resemble the cluster,
-    not merely one member of it.
+    they shared nothing. Average-link still admitted a strong bridge: a note
+    that repeats two unrelated findings scores 1.0 against each, so the mean
+    (0.0 + 1.0) / 2 let the second finding in. Requiring a match with the
+    members themselves closes both.
 
     Field-tested: two projects reported "modelled entities and screens but no
     roles or capabilities" in different words. Exact fingerprint matching filed
@@ -4101,9 +4170,11 @@ def cluster_observations(records, threshold=SIMILARITY_THRESHOLD):
         for record in members:
             best = None
             for cluster in local:
-                scores = [observation_similarity(record, other) for other in cluster]
-                mean = sum(scores) / float(len(scores))
-                if mean >= threshold and (best is None or mean > best[0]):
+                matched = sum(1 for other in cluster if observations_match(record, other, threshold))
+                if matched < members_needed(cluster):
+                    continue
+                mean = sum(observation_similarity(record, other) for other in cluster) / float(len(cluster))
+                if best is None or mean > best[0]:
                     best = (mean, cluster)
             if best is not None:
                 best[1].append(record)
@@ -6169,7 +6240,8 @@ def build_parser():
         type=float,
         default=SIMILARITY_THRESHOLD,
         help="content-word overlap needed to treat two observations as one "
-             "finding (0.0-1.0; lower groups more aggressively)",
+             "finding (0.0-1.0; lower groups more aggressively). Three shared "
+             "non-generic words and a match with the group's members are always required",
     )
     promote.add_argument("--json", action="store_true")
     promote.add_argument(
