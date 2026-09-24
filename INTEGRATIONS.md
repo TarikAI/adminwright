@@ -130,8 +130,9 @@ Endpoint engine (`--engine ocr`, needs provider config): runs
 `ocr review --audience agent --format json` itself, keeps the raw JSON as evidence
 (`.admin-console/ocr-diff-<timestamp>-<pid>.json`; `scan` writes `ocr-scan-...`), and
 persists findings directly. What happens next depends on how `ocr` says the run ended: the
-reply's `status`, which repeats the run manifest's `terminal_state` (`ocr` 1.8.5 and later;
-replies recorded from the real CLI are in `tests/fixtures/ocr/`).
+reply's `status`, which repeats the run manifest's `terminal_state` (`ocr` 1.8.5 and later).
+Replies recorded from `ocr` 1.12.9 are in `tests/fixtures/ocr/`, and CI runs the bridge
+against the real CLI at 1.9.6 and at npm's latest.
 
 | `ocr` reports | Meaning | The bridge |
 |---|---|---|
@@ -326,14 +327,19 @@ bundle is yours alone.
   findings already recorded are not duplicated.
 - **"ocr reported ..., a state this bridge does not know"** — a newer `ocr` uses a word the
   bridge has not seen. Its findings were recorded; exit 2 because nothing confirms the
-  coverage. Check `ocr --version` against the versions above.
+  coverage. Compare `ocr --version` with the versions named under "The three commands".
 - **"ocr did not finish within N seconds"** — `ocr` and its children were stopped. Narrow the
   review, or raise `--timeout` / `ADMINWRIGHT_OCR_TIMEOUT`.
 - **"the --rule file ... does not exist" / "the shipped rules ... are missing"** — the review
   is refused rather than run without the admin-console rules. Fix the path, or restore
   `assets/adminwright-ocr-rules.json`.
-- **"nothing to review"** — the workspace has no changes; pass `--from/--to` or
-  `--commit` for a range, or use `scan`.
+- **"nothing to review"** — the workspace has no changes, or only files the rules exclude
+  (`ocr` reports that as `skipped`); pass `--from/--to` or `--commit` for a range, or use
+  `scan`.
+- **"the findings file ... is not valid UTF-8" / "standard input is not valid UTF-8"** — the
+  payload is in a legacy code page, typically from Windows PowerShell 5.1's plain
+  `Set-Content`. Write it with `Set-Content -Encoding utf8`, `Out-File` or `>` and pass
+  `--findings-file`; nothing was recorded.
 - **"several review bundles are waiting to be recorded"** — more than one live bundle sits
   beside the manifest (concurrent agents, or an abandoned run). Pass `--bundle <path>` with
   the path your `diff` printed.
