@@ -1,0 +1,21 @@
+{
+  "captured_with": "open-code-review v1.12.9 (bccbc15f) windows/amd64",
+  "scenario": "HTTP 500 for src/b.py: status completed_with_errors with a scan_subtask_error warning, exit 0",
+  "argv": [
+    "ocr",
+    "scan",
+    "--audience",
+    "agent",
+    "--format",
+    "json",
+    "--path",
+    "src",
+    "--rule",
+    "<skill>/assets/adminwright-ocr-rules.json",
+    "--repo",
+    "<repo>"
+  ],
+  "returncode": 0,
+  "stdout": "{\n  \"status\": \"completed_with_errors\",\n  \"llm\": {\n    \"provider\": \"fakegw\",\n    \"model\": \"fake-model\"\n  },\n  \"summary\": {\n    \"files_reviewed\": 4,\n    \"comments\": 2,\n    \"total_tokens\": 225,\n    \"input_tokens\": 180,\n    \"output_tokens\": 45,\n    \"elapsed\": \"26s\"\n  },\n  \"tool_calls\": {\n    \"total\": 2,\n    \"by_tool\": {\n      \"code_comment\": 2\n    },\n    \"failure\": 0,\n    \"failure_by_tool\": {},\n    \"failure_details\": []\n  },\n  \"comments\": [\n    {\n      \"path\": \"src/a.py\",\n      \"content\": \"eval() on caller input executes arbitrary code; parse the expression instead\",\n      \"existing_code\": \"    return eval(expression)\",\n      \"start_line\": 2,\n      \"end_line\": 2,\n      \"category\": \"security\",\n      \"severity\": \"high\"\n    },\n    {\n      \"path\": \"src/c.py\",\n      \"content\": \"Division by zero when b is 0; reject or handle a zero divisor\",\n      \"existing_code\": \"    return a / b\",\n      \"start_line\": 2,\n      \"end_line\": 2,\n      \"category\": \"bug\",\n      \"severity\": \"medium\"\n    }\n  ],\n  \"warnings\": [\n    {\n      \"file\": \"src/b.py\",\n      \"message\": \"LLM completion error: POST \\\"http://127.0.0.1:53157/v1/chat/completions\\\": 500 Internal Server Error {\\\"message\\\": \\\"fake upstream failure\\\", \\\"type\\\": \\\"server_error\\\"}\",\n      \"type\": \"scan_subtask_error\"\n    }\n  ],\n  \"project_summary\": \"### Top Issues\\n- none\",\n  \"session_id\": \"20aa48a9-fbc8-4e60-a261-845da414c277\"\n}\n",
+  "stderr": ""
+}

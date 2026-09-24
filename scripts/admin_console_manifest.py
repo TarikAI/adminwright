@@ -3459,7 +3459,7 @@ def validate_evidence(manifest, findings, project_root):
             entries = gap.get("evidence")
             if text_of(gap.get("source")).lower() == "ocr" and isinstance(entries, list):
                 # The OCR bridge cites its own review record (kept beside the
-                # manifest, and git-ignored) as evidence of the FINDING. That is a
+                # manifest and committed with it) as evidence of the FINDING. That is a
                 # provenance note, not proof of a fix, so it is neither required to
                 # resolve nor accepted as proof; anything else it lists still is.
                 entries = [

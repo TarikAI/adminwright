@@ -4,8 +4,11 @@
 
 Standard library only (unittest), so `python -m unittest discover tests` works
 anywhere the skill itself works. The `ocr` CLI is faked through the
-ADMINWRIGHT_OCR_BIN hook: no network, no LLM, no provider configuration. The
-real `ocr` package is never run (RealCliSmoke is opt-in). On Windows the fake is
+ADMINWRIGHT_OCR_BIN hook: no network, no LLM, no provider configuration. What
+the fake prints for a review or scan is either a shape written here or, in
+RealReplies, a reply recorded from the real CLI (tests/fixtures/ocr, made by
+capture.py there) and replayed byte for byte. The real `ocr` package is never
+run unless RealCliSmoke is opted into. On Windows the fake is
 laid out like an npm install (`ocr.cmd` shim plus a `node_modules/.../ocr.js`
 entry point) and ADMINWRIGHT_NODE_BIN points the resolved launcher at this
 Python, so the tests need neither node nor cmd.exe's cooperation.
@@ -17,9 +20,11 @@ Run:  python -m unittest discover -s tests -v
 """
 
 import atexit
+import codecs
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +38,8 @@ from unittest import mock
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = SKILL_ROOT / "scripts" / "code_review.py"
 MANIFEST_SCRIPT = SKILL_ROOT / "scripts" / "admin_console_manifest.py"
+# Replies recorded from the real ocr CLI by tests/fixtures/ocr/capture.py.
+OCR_FIXTURES = SKILL_ROOT / "tests" / "fixtures" / "ocr"
 
 
 def load_bridge():
@@ -99,6 +106,14 @@ FAKE_OCR_SOURCE = (
     "if os.environ.get('FAKE_FAIL'):\n"
     "    sys.stderr.write('provider not configured\\n')\n"
     "    sys.exit(1)\n"
+    "if os.environ.get('FAKE_REPLAY') and args and args[0] in ('review', 'scan'):\n"
+    "    with open(os.environ['FAKE_REPLAY'], encoding='utf-8') as handle:\n"
+    "        recorded = json.load(handle)\n"
+    "    sys.stdout.buffer.write(recorded['stdout'].encode('utf-8'))\n"
+    "    sys.stderr.buffer.write(recorded['stderr'].encode('utf-8'))\n"
+    "    sys.stdout.flush()\n"
+    "    sys.stderr.flush()\n"
+    "    sys.exit(recorded['returncode'])\n"
     "if args[:2] == ['delegate', 'preview']:\n"
     "    print(os.environ.get('FAKE_PREVIEW', " + repr(FAKE_PREVIEW) + "))\n"
     "elif args[:2] == ['delegate', 'rule']:\n"
@@ -242,6 +257,12 @@ class TempConsole(unittest.TestCase):
         """A path as the manifest cites it: relative to the project root, forward slashes."""
         return str(Path(path).relative_to(self.root)).replace("\\", "/")
 
+    def cited(self, gap):
+        """The one evidence file a bridge gap cites, as (relative path, parsed JSON)."""
+        self.assertEqual(len(gap["evidence"]), 1, gap)
+        cited = gap["evidence"][0]
+        return cited, json.loads((self.root / cited).read_text(encoding="utf-8"))
+
     def diff(self, *extra, **kwargs):
         code, out, err = self.review("diff", "--manifest", self.manifest, *extra, **kwargs)
         self.assertEqual(code, 0, err)
@@ -307,6 +328,21 @@ class WrongOverride(TempConsole):
         self.assertEqual(code, 2)
         self.assertIn("ADMINWRIGHT_OCR_BIN", err)
 
+    def test_a_file_that_cannot_be_executed_names_the_real_native_binary(self):
+        # Windows: "%1 is not a valid Win32 application"; POSIX: permission denied.
+        # The advice used to send people looking for an ocr.exe npm never installs.
+        text_file = self.tmp / "not-a-program.txt"
+        text_file.write_text("hello\n", encoding="utf-8")
+        code, _out, err = run(
+            SCRIPT, "diff", "--manifest", self.manifest,
+            env={"ADMINWRIGHT_OCR_BIN": str(text_file)},
+        )
+        self.assertEqual(code, 2, err)
+        self.assertIn("could not execute", err)
+        self.assertIn("opencodereview.exe", err)
+        self.assertNotRegex(err, r"(?<![\w-])ocr\.exe")
+        self.assertNotIn("Traceback", err)
+
 
 class DelegateDiff(TempConsole):
     def test_writes_bundle_with_instructions_and_next_command(self):
@@ -367,7 +403,14 @@ class Record(TempConsole):
         self.assertEqual(gaps[0]["severity"], "high")
         self.assertIn("src/orders.py:10", gaps[0]["description"])
         self.assertIn("OCR delegate pass", gaps[0]["rationale"])
-        self.assertIn(self.rel(self.bundle_path), gaps[0]["evidence"])
+        # The evidence is the committed record of this review, which names the
+        # (transient, git-ignored) bundle it was checked against.
+        cited, record = self.cited(gaps[0])
+        self.assertRegex(cited, r"^\.admin-console/ocr-record-\d{8}-\d{6}-\d+\.json$")
+        self.assertEqual(record["bundle"]["file"], self.bundle_path.name)
+        self.assertEqual(record["findings"], self.findings_payload()["findings"])
+        # The summary names the file to commit.
+        self.assertIn("record=" + str(self.root / cited), out)
 
     def test_refuses_silent_omission(self):
         payload = {"findings": [], "skipped": []}
@@ -650,14 +693,31 @@ class EndpointVerdict(TempConsole):
         code, out, err = self.endpoint({"status": "failed", "message": "quota exceeded", "comments": [comment()]})
         self.assert_failed_run(code, out, err, "quota exceeded", "status 'failed'")
 
-    def test_terminal_state_other_than_completed(self):
+    def test_a_failed_terminal_state_records_nothing_even_with_exit_zero(self):
         for document in (
-            {"manifest": {"terminal_state": "aborted"}, "comments": [comment()]},
             {"terminal_state": "failed", "comments": [comment()]},
-            {"run_manifest": {"terminal_state": "in_progress"}, "comments": [comment()]},
+            {"manifest": {"terminal_state": "failed"}, "comments": [comment()]},
+            {"status": "complete", "run_manifest": {"terminal_state": "FAILED"}, "comments": [comment()]},
         ):
             code, out, err = self.endpoint(document)
             self.assert_failed_run(code, out, err, "terminal_state")
+
+    def test_an_unknown_state_keeps_the_findings_but_is_not_called_complete(self):
+        # Replaces "terminal_state other than completed fails": that rule turned
+        # ocr's real `complete` into a failure (R2). An unknown word with exit 0
+        # is usable coverage by ocr's own exit contract, so the findings are
+        # kept; exit 2 says completeness was not confirmed.
+        for index, document in enumerate((
+            {"manifest": {"terminal_state": "aborted"}, "comments": [comment(start_line=1)]},
+            {"run_manifest": {"terminal_state": "in_progress"}, "comments": [comment(start_line=2)]},
+            {"status": "finished_somehow", "comments": [comment(start_line=3)]},
+        ), 1):
+            code, out, err = self.endpoint(document)
+            self.assertEqual(code, 2, out + err)
+            self.assertIn("1 finding(s) recorded", out)
+            self.assertIn("does not know", err)
+            self.assertNotIn("Traceback", err)
+            self.assertEqual(len(self.gaps()), index)
 
     def test_a_completed_run_with_nothing_failed_is_recorded_normally(self):
         code, out, err = self.endpoint({
@@ -709,6 +769,155 @@ class EndpointVerdict(TempConsole):
         self.assertIn("exit code 4", err)
 
 
+def recorded_reply(name):
+    return json.loads((OCR_FIXTURES / (name + ".json")).read_text(encoding="utf-8"))
+
+
+class RealReplies(TempConsole):
+    """Audit R2 (6.14): the bridge against what ocr really prints.
+
+    Every reply here was recorded from the real CLI (open-code-review v1.12.9,
+    tests/fixtures/ocr/capture.py, against the stand-in endpoint in
+    fake_llm.py) and is replayed byte for byte, exit code included. The tests
+    above use shapes written from memory; one of them, "terminal_state":
+    "completed", is a word ocr never prints, and a bridge that failed every real
+    review passed them all.
+    """
+
+    def replay(self, name, path=None):
+        command = ["scan"] if name.startswith("scan-") else ["diff", "--engine", "ocr"]
+        return self.review(
+            command[0], "--manifest", self.manifest, *command[1:],
+            env={"FAKE_REPLAY": str(path or OCR_FIXTURES / (name + ".json"))},
+        )
+
+    def raw_files(self):
+        folder = self.root / ".admin-console"
+        return sorted(list(folder.glob("ocr-diff-*.json")) + list(folder.glob("ocr-scan-*.json")))
+
+    def lines_of(self, gaps):
+        return sorted((gap["severity"], gap["description"].split(" — ")[0]) for gap in gaps)
+
+    def test_the_fixtures_are_what_ocr_printed(self):
+        for name, returncode, state in (
+            ("review-complete", 0, "complete"), ("review-partial", 0, "partial"),
+            ("review-failed", 1, "failed"), ("review-skipped", 0, "skipped"),
+        ):
+            recorded = recorded_reply(name)
+            self.assertIn("open-code-review v", recorded["captured_with"], name)
+            self.assertEqual(recorded["returncode"], returncode, name)
+            body = json.loads(recorded["stdout"])
+            self.assertEqual((body["status"], body["manifest"]["terminal_state"]), (state, state), name)
+        for name, returncode, status in (("scan-success", 0, "success"), ("scan-partial", 0, "completed_with_errors")):
+            recorded = recorded_reply(name)
+            self.assertEqual(recorded["returncode"], returncode, name)
+            self.assertEqual(json.loads(recorded["stdout"])["status"], status, name)
+        for name in ("review-no-provider", "review-bad-ref", "scan-failed"):
+            recorded = recorded_reply(name)
+            self.assertEqual((recorded["returncode"], recorded["stdout"]), (1, ""), name)
+            self.assertIn("Error: ", recorded["stderr"], name)
+
+    def test_a_complete_review_records_its_findings(self):
+        code, out, err = self.replay("review-complete")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("2 finding(s) recorded as gaps", out)
+        self.assertNotIn("ERROR", err)
+        self.assertNotIn("hint:", err)
+        self.assertEqual(self.lines_of(self.gaps()), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+        self.assertEqual(len(self.raw_files()), 1)
+
+    def test_a_complete_review_that_found_nothing_exits_zero(self):
+        recorded = recorded_reply("review-complete")
+        body = json.loads(recorded["stdout"])
+        body["comments"] = []
+        recorded["stdout"] = json.dumps(body, indent=2)
+        path = self.tmp / "clean.json"
+        path.write_text(json.dumps(recorded), encoding="utf-8")
+        code, out, err = self.replay("review-complete", path)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("0 finding(s) recorded", out)
+        self.assertEqual(self.gaps(), [])
+
+    def test_a_partial_review_records_what_it_found_and_names_the_failed_file(self):
+        code, out, err = self.replay("review-partial")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("2 finding(s) recorded as gaps", out)
+        self.assertIn("could not review 1 file(s) of 4 selected", err)
+        self.assertIn("src/b.py (provider: provider or subtask request failed)", err)
+        # The provider answered for three files: "configure a provider" would mislead.
+        self.assertNotIn("ocr config provider", err)
+        self.assertEqual(self.lines_of(self.gaps()), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+        self.assertEqual(len(self.raw_files()), 1)
+
+    def test_a_failed_review_records_nothing_and_says_why(self):
+        code, out, err = self.replay("review-failed")
+        self.assertEqual(code, 2, out + err)
+        for needle in ("exit code 1", "status 'failed'", "terminal_state 'failed'",
+                       "check your LLM configuration and API key"):
+            self.assertIn(needle, err)
+        for path in ("src/a.py", "src/b.py", "src/c.py", "src/d.py"):
+            self.assertIn(path + " (provider:", err)
+        self.assertIn("ocr config provider", err)  # every file failed at the provider
+        self.assertNotIn('"session_id"', err, "ocr's stderr usage record is noise here")
+        self.assertNotIn("finding(s) recorded", out)
+        self.assertEqual(self.gaps(), [])
+        self.assertEqual(self.raw_files(), [])
+
+    def test_a_skipped_review_had_nothing_to_review(self):
+        code, out, err = self.replay("review-skipped")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("nothing to review", out)
+        self.assertIn("Review skipped: no items were selected.", out)
+        self.assertNotIn("ERROR", err)
+        self.assertEqual(self.gaps(), [])
+        self.assertEqual(self.raw_files(), [])
+
+    def test_no_provider_configured_gets_the_set_up_hint(self):
+        code, out, err = self.replay("review-no-provider")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("no valid LLM endpoint configured", err)
+        self.assertIn("ocr config provider", err)
+        self.assertEqual(self.gaps(), [])
+
+    def test_a_bad_ref_is_not_blamed_on_the_provider(self):
+        code, out, err = self.replay("review-bad-ref")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn('--from value "no-such-ref" is not a valid commit ref', err)
+        self.assertNotIn("hint:", err)
+        self.assertNotIn("ocr config provider", err)
+
+    def test_a_successful_scan_records_its_findings(self):
+        code, out, err = self.replay("scan-success")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("OCR scan: 2 finding(s) recorded", out)
+        self.assertEqual(self.lines_of(self.gaps()), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+        for gap in self.gaps():
+            self.assertIn("scan mode", gap["rationale"])
+
+    def test_a_scan_completed_with_errors_is_partial(self):
+        code, out, err = self.replay("scan-partial")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("OCR scan: 2 finding(s) recorded", out)
+        self.assertIn("could not review 1 file(s)", err)
+        self.assertIn("src/b.py (scan_subtask_error: LLM completion error", err)
+        self.assertEqual(len(self.gaps()), 2)
+
+    def test_a_failed_scan_records_nothing(self):
+        code, out, err = self.replay("scan-failed")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("scan failed: all 4 file scan(s) failed", err)
+        self.assertIn("ocr config provider", err)
+        self.assertEqual(self.gaps(), [])
+        self.assertEqual(self.raw_files(), [])
+
+    def test_a_rerun_of_a_partial_review_does_not_duplicate(self):
+        self.assertEqual(self.replay("review-partial")[0], 2)
+        code, out, err = self.replay("review-complete")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("(2 already recorded)", out)
+        self.assertEqual(len(self.gaps()), 2)
+
+
 class BundleLifecycle(TempConsole):
     """Audit 6.15: per-run bundles, consumed on record, expired when abandoned."""
 
@@ -743,7 +952,7 @@ class BundleLifecycle(TempConsole):
         qa = [p for p in self.bundles() if "qa-1" in p.name][0]
         code, out, err = self.record(self.payload(), "--bundle", str(qa))
         self.assertEqual(code, 1, err)
-        self.assertIn(self.rel(qa), self.gaps()[0]["evidence"])
+        self.assertEqual(self.cited(self.gaps()[0])[1]["bundle"]["file"], qa.name)
         # security-1's bundle is now the only live one, so it is picked up.
         code, out, err = self.record({"findings": [], "skipped": [{"path": "src/orders.py", "reason": "vendored"}]})
         self.assertEqual(code, 0, err)
@@ -778,6 +987,11 @@ class BundleLifecycle(TempConsole):
         closed = json.loads(bundle_path.read_text(encoding="utf-8"))["closed"]
         self.assertEqual(closed["by"], "record")
         self.assertEqual(closed["skipped"], [{"path": "src/orders.py", "reason": "generated code"}])
+        # The skip reasons also reach the committed record the bundle points at.
+        record = json.loads((bundle_path.parent / closed["record"]).read_text(encoding="utf-8"))
+        self.assertEqual(record["skipped"], closed["skipped"])
+        self.assertEqual(record["bundle"]["reviewable_files"],
+                         [{"path": "src/orders.py", "status": "modified"}])
         # Spent: the next record is no longer gated by, or checked against, it.
         code, out, err = self.record(self.payload(path="anywhere/else.py"))
         self.assertEqual(code, 1, err)
@@ -866,6 +1080,56 @@ class BundleLifecycle(TempConsole):
         self.assertNotIn("total_files", out)
         self.assertIn("no review bundle", err)
 
+    def test_gaps_cite_committed_evidence_never_a_bundle(self):
+        # Bundles are transient and git-ignored; a gap citing one pointed every
+        # clone and CI checkout at a file it does not have (audit ocr#5).
+        self.diff("--agent", "qa-1")
+        self.assertEqual(self.record(self.payload())[0], 1)
+        self.assertEqual(self.record(self.payload(content="without a bundle"))[0], 1)
+        endpoint = {"FAKE_FINDINGS": json.dumps({"comments": [comment(content="from the endpoint")]})}
+        code, _out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr", env=endpoint)
+        self.assertEqual(code, 1, err)
+        gaps = self.gaps()
+        self.assertEqual(len(gaps), 3)
+        for gap in gaps:
+            cited, _document = self.cited(gap)
+            self.assertNotIn("ocr-bundle", cited, gap["id"])
+            self.assertRegex(cited, r"^\.admin-console/ocr-(record|diff|scan)-[0-9-]+\.json$")
+
+    def test_a_refused_record_leaves_no_record_file_behind(self):
+        self.diff()
+        payload = self.payload()
+        payload["findings"].append(dict(comment(), severity="catastrophic"))
+        code, _out, _err = self.record(payload)
+        self.assertEqual(code, 2)
+        self.assertEqual(list((self.root / ".admin-console").glob("ocr-record-*.json")), [])
+        # And the add itself refusing (not just normalisation) cleans up too.
+        with mock.patch.object(bridge, "add_gaps", return_value=subprocess.CompletedProcess(
+                [], 2, stdout="", stderr="gap refused")):
+            args = bridge.build_parser().parse_args(
+                ["record", "--manifest", str(self.manifest), "--findings", json.dumps(self.payload())])
+            with mock.patch.object(bridge, "stderr"):
+                with self.assertRaises(bridge.ReviewError):
+                    bridge.cmd_record(args)
+        self.assertEqual(list((self.root / ".admin-console").glob("ocr-record-*.json")), [])
+        self.assertNotIn("closed", json.loads(self.only_bundle().read_text(encoding="utf-8")))
+
+    def test_every_json_file_the_bridge_writes_has_lf_line_endings(self):
+        # Text mode wrote CRLF on Windows (1205 CR bytes in one ocr-record file).
+        self.diff("--agent", "qa-1")
+        self.assertEqual(self.record(self.payload())[0], 1)  # closes (rewrites) the bundle
+        self.assertEqual(self.record(self.payload(content="no bundle now"))[0], 1)
+        code, _out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr")
+        self.assertIn(code, (0, 1), err)
+        folder = self.root / ".admin-console"
+        written = sorted(folder.glob("ocr-*.json"))
+        kinds = {path.name.split("-")[1] for path in written}
+        self.assertTrue({"bundle", "record", "diff"} <= kinds, kinds)
+        for path in written:
+            data = path.read_bytes()
+            self.assertNotIn(b"\r", data, path.name)
+            self.assertTrue(data.endswith(b"\n"), path.name)
+
     def test_the_no_bundle_evidence_file_is_unique_per_run(self):
         self.record(self.payload(content="one"))
         self.record(self.payload(content="two"))
@@ -928,6 +1192,57 @@ class Deduplication(TempConsole):
         self.assertEqual(self.record(self.payload())[0], 1)
         self.assertEqual(len(self.gaps()), 1)
 
+    def set_field(self, gap_id, field, value):
+        code, _out, err = run(
+            MANIFEST_SCRIPT, "set", "--manifest", self.manifest,
+            "--path", "gaps[" + gap_id + "]." + field, "--value", value,
+        )
+        self.assertEqual(code, 0, err)
+
+    def test_accepting_a_gap_the_documented_way_keeps_it_accepted(self):
+        # Audit 6.15: verification.md says to record a triaged finding with
+        # status accepted and a rationale. Rewriting the rationale used to wipe
+        # the `fp:` key stored in it, and the next run filed the finding again
+        # as a new open gap, turning the release gate red for an accepted risk.
+        self.assertEqual(self.record(self.payload(severity="critical"))[0], 1)
+        gap_id = self.gaps()[0]["id"]
+        self.set_field(gap_id, "rationale",
+                       "Accepted risk: internal-only tool, approved by ops lead (dec.ocr-accept)")
+        self.set_field(gap_id, "status", "accepted")
+        code, out, err = self.record(self.payload(severity="critical"))
+        self.assertEqual(code, 1, err)
+        self.assertIn("recorded 0 finding(s) as gaps (1 already recorded)", out)
+        gaps = self.gaps()
+        self.assertEqual([(g["id"], g["status"]) for g in gaps], [(gap_id, "accepted")])
+
+    def test_the_legacy_rationale_suffix_is_still_honoured(self):
+        # Gaps written before the `fingerprint` field keep their key in the
+        # rationale; a re-run must not duplicate them either.
+        finding = bridge.normalize_finding(comment())
+        legacy = {
+            "id": "ocr-20260901-src-orders-py-1", "severity": "high",
+            "description": "src/orders.py:10 — SQL built by string concatenation (security, high)",
+            "status": "open", "evidence": [],
+            "rationale": "OCR delegate pass, delegate review mode, 2026-09-01; fp:"
+            + bridge.finding_fingerprint(finding),
+            "source": "ocr",
+        }
+        code, _out, err = run(
+            MANIFEST_SCRIPT, "add", "--manifest", self.manifest, "--kind", "gap",
+            "--json", json.dumps(legacy),
+        )
+        self.assertEqual(code, 0, err)
+        code, out, err = self.record(self.payload())
+        self.assertEqual(code, 1, err)
+        self.assertIn("(1 already recorded)", out)
+        self.assertEqual(len(self.gaps()), 1)
+
+    def test_the_fingerprint_field_is_part_of_the_schema(self):
+        self.assertEqual(self.record(self.payload())[0], 1)
+        code, out, err = run(MANIFEST_SCRIPT, "validate", "--manifest", self.manifest, "--json")
+        self.assertNotIn("unknown-field", out + err)
+        self.assertIn("fingerprint", self.gaps()[0])
+
     def test_endpoint_reruns_do_not_duplicate(self):
         for _ in range(3):
             code, out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr")
@@ -952,7 +1267,10 @@ class GapShape(TempConsole):
             self.assertEqual(gap["source"], "ocr")
             self.assertNotIn("entity", gap)
             self.assertNotIn("capability", gap)
-            self.assertRegex(gap["rationale"], r"; fp:[0-9a-f]{12}$")
+            # The dedupe key has its own field now (audit 6.15); the rationale
+            # is free text people rewrite when they accept a gap.
+            self.assertRegex(gap["fingerprint"], r"^[0-9a-f]{12}$")
+            self.assertNotIn("fp:", gap["rationale"])
 
     def test_endpoint_gaps_carry_the_same_marks(self):
         code, _out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr")
@@ -1196,6 +1514,43 @@ class Timeouts(TempConsole):
             self.assertNotIn("Traceback", err)
         self.assertEqual(self.ocr_calls(), [])
 
+    def test_a_non_finite_timeout_is_refused_before_ocr_runs(self):
+        # `--timeout inf` crashed communicate() with OverflowError: exit 1
+        # ("findings recorded"), a traceback, and ocr left running.
+        for command, args, env in (
+            ("diff", ("--timeout", "inf"), {}),
+            ("diff", ("--timeout", "nan"), {}),
+            ("scan", (), {"ADMINWRIGHT_OCR_TIMEOUT": "inf"}),
+            ("diff", (), {"ADMINWRIGHT_OCR_TIMEOUT": "-Infinity"}),
+        ):
+            code, _out, err = self.review(command, "--manifest", self.manifest, *args, env=env)
+            self.assertEqual(code, 2, (command, args, env, err))
+            self.assertNotIn("Traceback", err)
+        self.assertEqual(self.ocr_calls(), [])
+
+    def test_a_huge_timeout_is_lowered_to_the_maximum_not_a_crash(self):
+        for command, args, env in (
+            ("diff", ("--timeout", "1e30"), {}),
+            ("scan", (), {"ADMINWRIGHT_OCR_TIMEOUT": "1e30"}),
+        ):
+            code, _out, err = self.review(command, "--manifest", self.manifest, *args, env=env)
+            self.assertIn(code, (0, 1), (command, err))
+            self.assertNotIn("Traceback", err)
+            self.assertIn("using " + str(bridge.MAX_TIMEOUT_SECONDS), err)
+        with mock.patch.object(bridge, "stderr") as note:
+            self.assertEqual(bridge.ocr_timeout(mock.Mock(timeout=1e30)), bridge.MAX_TIMEOUT_SECONDS)
+            self.assertEqual(bridge.ocr_timeout(mock.Mock(timeout=120.0)), 120.0)
+        note.assert_called_once()
+
+    def test_ocr_is_stopped_whatever_communicate_raises(self):
+        proc = mock.Mock(pid=4242)
+        proc.communicate.side_effect = OverflowError("timestamp out of range for platform time_t")
+        with mock.patch.object(bridge.subprocess, "Popen", return_value=proc):
+            with mock.patch.object(bridge, "kill_tree") as kill:
+                with self.assertRaises(OverflowError):
+                    bridge.run_bounded(["ocr"], {}, 5)
+        kill.assert_called_once_with(proc)
+
     def test_a_slow_but_finishing_ocr_is_not_cut_off(self):
         self.diff("--timeout", "20", env={"FAKE_SLEEP": "0.5"})
 
@@ -1271,6 +1626,118 @@ class ConsoleEncoding(TempConsole):
         self.assertIn("Schlüssel", self.gaps()[0]["description"])
 
 
+class FindingsInput(TempConsole):
+    """Windows-written findings: decoded like the manifest script, never exit 1 for nothing.
+
+    Windows PowerShell 5.1's `>` and Out-File write UTF-16LE with a byte-order
+    mark, and Set-Content without -Encoding writes the ANSI code page. Both used
+    to end in a UnicodeDecodeError traceback and exit 1, which the exit table
+    defines as "findings recorded", with no gap written.
+    """
+
+    TEXT = "Schlüssel 東京 \U0001f511"
+
+    def payload_bytes(self, encoding, bom=b""):
+        payload = {"findings": [comment(content=self.TEXT)]}
+        return bom + json.dumps(payload, ensure_ascii=False).encode(encoding)
+
+    def record_file(self, data, flag="--findings-file"):
+        path = self.tmp / "findings.json"
+        path.write_bytes(data)
+        value = str(path) if flag == "--findings-file" else "@" + str(path)
+        option = "--findings-file" if flag == "--findings-file" else "--findings"
+        return self.review("record", "--manifest", self.manifest, option, value)
+
+    def record_stdin(self, data):
+        env = dict(os.environ)
+        env.update({
+            "ADMINWRIGHT_OCR_BIN": str(self.launcher), "PYTHONIOENCODING": "cp1252",
+            "ADMINWRIGHT_HOME": scratch_home(),
+        })
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "record", "--manifest", str(self.manifest), "--findings", "-"],
+            input=data, capture_output=True, env=env,
+        )
+        return proc.returncode, proc.stdout.decode("utf-8"), proc.stderr.decode("utf-8")
+
+    def assert_recorded(self, result):
+        code, out, err = result
+        self.assertEqual(code, 1, out + err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn(self.TEXT, self.gaps()[-1]["description"])
+
+    def assert_refused(self, result, *needles):
+        code, out, err = result
+        self.assertEqual(code, 2, out + err)
+        self.assertNotIn("Traceback", err)
+        for needle in needles:
+            self.assertIn(needle, err)
+        self.assertEqual(self.gaps(), [])
+
+    def test_a_utf16_file_as_powershell_redirection_writes_it_is_read(self):
+        for flag in ("--findings-file", "--findings"):
+            self.assert_recorded(self.record_file(self.payload_bytes("utf-16-le", codecs.BOM_UTF16_LE), flag))
+
+    def test_big_endian_utf16_and_utf8_with_or_without_bom_are_read(self):
+        # Content differs per run so none is deduplicated away.
+        for index, (encoding, bom) in enumerate((
+            ("utf-16-be", codecs.BOM_UTF16_BE), ("utf-8", codecs.BOM_UTF8), ("utf-8", b""),
+        ), 1):
+            self.TEXT = "Schlüssel %d 東京" % index
+            self.assert_recorded(self.record_file(self.payload_bytes(encoding, bom)))
+        self.assertEqual(len(self.gaps()), 3)
+
+    def test_an_ansi_file_from_set_content_is_refused_with_a_hint(self):
+        data = json.dumps({"findings": [comment(content="Schlüssel")]}, ensure_ascii=False).encode("cp1252")
+        self.assert_refused(self.record_file(data), "not valid UTF-8", "Re-save it as UTF-8")
+        self.assert_refused(self.record_file(data, "--findings"), "not valid UTF-8")
+
+    def test_a_bom_followed_by_bad_bytes_is_refused_not_a_traceback(self):
+        self.assert_refused(self.record_file(codecs.BOM_UTF8 + b'{"findings": ["\xfc"]}'), "not valid UTF-8")
+        self.assert_refused(self.record_file(codecs.BOM_UTF16_LE + b"{\x00x"), "not valid UTF-16")
+
+    def test_stdin_is_decoded_the_same_way(self):
+        self.assert_recorded(self.record_stdin(self.payload_bytes("utf-16-le", codecs.BOM_UTF16_LE)))
+
+    def test_undecodable_stdin_points_at_output_encoding(self):
+        data = json.dumps({"findings": [comment(content="Schlüssel")]}, ensure_ascii=False).encode("cp1252")
+        self.assert_refused(self.record_stdin(data), "standard input", "$OutputEncoding", "--findings-file")
+
+    def test_findings_and_findings_file_are_exclusive_and_one_is_required(self):
+        path = self.tmp / "findings.json"
+        path.write_text(json.dumps({"findings": [comment()]}), encoding="utf-8")
+        code, _out, err = self.review(
+            "record", "--manifest", self.manifest, "--findings", "[]", "--findings-file", str(path)
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("not allowed with", err)
+        code, _out, err = self.review("record", "--manifest", self.manifest)
+        self.assertEqual(code, 2)
+        self.assertIn("--findings", err)
+        self.assertEqual(self.gaps(), [])
+
+    def test_a_missing_findings_file_is_a_usage_error(self):
+        code, _out, err = self.review(
+            "record", "--manifest", self.manifest, "--findings-file", str(self.tmp / "nope.json")
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("could not read findings file", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_inline_json_that_powershell_mangled_names_the_file_option(self):
+        # What PS 5.1 hands Python for '{"findings": []}': the quotes are gone.
+        code, _out, err = self.review("record", "--manifest", self.manifest, "--findings", "{findings: []}")
+        self.assertEqual(code, 2)
+        self.assertIn("not valid JSON", err)
+        self.assertIn("--findings-file", err)
+
+    def test_the_printed_record_command_is_safe_to_paste_into_powershell(self):
+        out = self.diff()
+        line = [text for text in out.splitlines() if " record " in text][0]
+        self.assertIn("--findings-file <findings.json>", line)
+        self.assertNotRegex(line, r"(^|\s)@", "a bare leading @ is splatting in PowerShell")
+
+
 class ShimResolution(unittest.TestCase):
     """resolve_cmd_shim / ocr_executable in-process, so POSIX runs them too.
 
@@ -1326,6 +1793,10 @@ class ShimResolution(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("ADMINWRIGHT_OCR_BIN", message)
         self.assertIn("native executable", message)
+        # The npm install has no ocr.exe; its binary is opencodereview.exe.
+        self.assertIn("opencodereview.exe", message)
+        self.assertNotIn("(ocr.exe)", message)
+        self.assertNotRegex(message, r"(?<![\w-])ocr\.exe")
 
     def test_an_entry_point_that_is_not_open_code_review_is_refused(self):
         other = NPM_SHIM.replace("open-code-review", "some-other-tool")
@@ -1614,50 +2085,270 @@ class BatchIoErrors(unittest.TestCase):
         self.assertIn("disk full", str(caught.exception))
 
 
-@unittest.skipUnless(
-    os.environ.get("ADMINWRIGHT_REAL_OCR") and shutil.which("ocr"),
-    "opt-in: set ADMINWRIGHT_REAL_OCR=1 with the real ocr CLI installed",
-)
-class RealCliSmoke(unittest.TestCase):
-    """Check the command surface against a real ocr install when one exists.
+GITHUB = SKILL_ROOT / ".github"
 
-    Every other test fakes the binary through ADMINWRIGHT_OCR_BIN and accepts
-    any flags; this is the only guard against a renamed flag or subcommand
-    reaching users. Opt-in (ADMINWRIGHT_REAL_OCR=1) so an ordinary test run
-    never executes a globally installed CLI that phones home; skipped where
-    ocr is absent, because the bridge itself is optional. It only runs
-    `ocr <subcommand> --help`, with the update check switched off.
+
+class AdvisoryPins(unittest.TestCase):
+    """Audit 6.16: the pinned OCR action, the CLI version it installs, and CI agree.
+
+    The action SHA and its `ocr_version` input must move together. Dependabot
+    would move only the SHA, so it ignores the action, and this checks what a
+    hand bump must keep consistent. It also pins the secret scoping: only a
+    true/false is in the job env, and the token reaches the review step alone.
     """
 
-    def help_text(self, *args):
-        executable = shutil.which("ocr")
-        env = dict(os.environ)
-        env["OCR_NO_UPDATE"] = "1"
-        proc = subprocess.run(
-            [executable, *args, "--help"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
+    def text(self, *parts):
+        return GITHUB.joinpath(*parts).read_text(encoding="utf-8")
+
+    def pinned(self):
+        workflow = self.text("workflows", "ocr-advisory.yml")
+        match = re.search(
+            r"uses:\s*alibaba/open-code-review@([0-9a-f]{40})\s*#\s*v(\d+\.\d+\.\d+)", workflow
         )
-        self.assertEqual(proc.returncode, 0, "ocr " + " ".join(args) + " --help failed")
-        return (proc.stdout or "") + (proc.stderr or "")
+        self.assertIsNotNone(match, "the action must be pinned to a full SHA with a '# vX.Y.Z' comment")
+        return workflow, match.group(2)
 
-    def test_flags_the_bridge_passes_exist(self):
-        for args, flags in (
-            (("review",), ("--audience", "--format", "--rule")),
-            (("scan",), ("--audience", "--format", "--rule")),
-            (("delegate", "preview"), ("--format", "--rule")),
-            (("delegate", "rule"), ("--format", "--rule")),
-        ):
-            text = self.help_text(*args)
-            for flag in flags:
-                self.assertIn(flag, text, flag + " missing from ocr " + " ".join(args))
+    def test_the_action_sha_comment_and_ocr_version_name_the_same_release(self):
+        workflow, tag = self.pinned()
+        self.assertEqual(re.findall(r"ocr_version:\s*'([^']+)'", workflow), [tag])
 
-    def test_helper_subcommands_from_integrations_exist(self):
-        self.assertIn("set", self.help_text("config"))
-        self.assertIn("check", self.help_text("rules"))
+    def test_the_ci_smoke_runs_the_pinned_version(self):
+        _workflow, tag = self.pinned()
+        ci = self.text("workflows", "ci.yml")
+        smoke = ci[ci.index("\n  ocr-smoke:"):]
+        smoke = smoke[:smoke.index("\n  integrity:")]
+        self.assertIn(tag, smoke)
+
+    def test_dependabot_leaves_the_action_to_a_hand_bump(self):
+        self.assertRegex(self.text("dependabot.yml"), r'dependency-name:\s*"alibaba/open-code-review"')
+
+    def test_the_token_reaches_the_review_step_only(self):
+        workflow, _tag = self.pinned()
+        uses_of_secrets = [
+            line.strip() for line in workflow.splitlines()
+            if "secrets." in line and not line.strip().startswith("#")
+        ]
+        self.assertTrue(uses_of_secrets)
+        for line in uses_of_secrets:
+            self.assertTrue(line.startswith(("HAS_OCR:", "llm_url:", "llm_auth_token:")), line)
+        self.assertIn("llm_auth_token: ${{ secrets.OCR_LLM_TOKEN }}", workflow)
+        self.assertNotRegex(workflow, r"OCR_LLM_(TOKEN|URL):\s*\$\{\{\s*secrets\.")
+
+    def test_the_workflow_files_are_valid_yaml_with_that_shape(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML is not installed (CI installs it)")
+        for parts in (("workflows", "ocr-advisory.yml"), ("workflows", "ci.yml"), ("dependabot.yml",)):
+            self.assertIsInstance(yaml.safe_load(self.text(*parts)), dict, parts)
+        job = yaml.safe_load(self.text("workflows", "ocr-advisory.yml"))["jobs"]["ocr-advisory"]
+        self.assertEqual(sorted(job["env"]), ["HAS_OCR", "OCR_NO_UPDATE"])
+        review = [step for step in job["steps"] if "uses" in step][0]
+        self.assertEqual(review["if"], "${{ env.HAS_OCR == 'true' }}")
+        self.assertEqual(review["with"]["llm_auth_token"], "${{ secrets.OCR_LLM_TOKEN }}")
+        notice = [step for step in job["steps"] if "run" in step][0]
+        self.assertEqual(notice["if"], "${{ env.HAS_OCR != 'true' }}")
+        updates = yaml.safe_load(self.text("dependabot.yml"))["updates"]
+        actions = [entry for entry in updates if entry["package-ecosystem"] == "github-actions"][0]
+        self.assertIn({"dependency-name": "alibaba/open-code-review"}, actions["ignore"])
+
+
+def load_fixture_module(name):
+    spec = importlib.util.spec_from_file_location("ocr_fixture_" + name, OCR_FIXTURES / (name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Variables that would point ocr at another endpoint or config than the test's.
+OCR_ENDPOINT_VARIABLES = (
+    "OCR_CONFIG_PATH", "OCR_LLM_URL", "OCR_LLM_TOKEN", "OCR_LLM_MODEL",
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
+)
+
+
+@unittest.skipUnless(
+    os.environ.get("ADMINWRIGHT_REAL_OCR"),
+    "opt-in: set ADMINWRIGHT_REAL_OCR=1 with the real ocr CLI installed",
+)
+class RealCliSmoke(TempConsole):
+    """The bridge against the real `ocr` CLI (opt-in: ADMINWRIGHT_REAL_OCR=1).
+
+    Every other test fakes the binary and accepts any flag, which is how a
+    renamed flag, or a reply in words the bridge did not expect (R2), could
+    reach users while the suite stayed green. So this class
+
+    * derives every subcommand and flag the bridge passes from the bridge
+      itself (run against the argv-logging fake), then finds each in the real
+      `ocr <subcommand> --help`: a flag added to the bridge is covered with
+      no table to update;
+    * runs real reviews, a real scan and a real delegate diff through the
+      bridge against fake_llm.FakeLLM, a stand-in OpenAI-compatible endpoint
+      on 127.0.0.1, and checks what the bridge makes of the replies.
+
+    HOME, USERPROFILE, APPDATA and LOCALAPPDATA point into the test's own
+    directory and OCR_NO_UPDATE=1 for every ocr run, so the user's
+    ~/.opencodereview is never read or written (the npm launcher reads, and
+    may delete, an update hint there even for --help). With the variable set
+    and no `ocr` on PATH the class fails instead of skipping: whoever opted in
+    asked for the real CLI. CI's ocr-smoke job runs it against the version
+    ocr-advisory.yml pins and against npm's latest.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not shutil.which("ocr"):
+            raise AssertionError("ADMINWRIGHT_REAL_OCR is set, but no `ocr` is on PATH")
+        cls.fake_llm = load_fixture_module("fake_llm")
+        cls.capture = load_fixture_module("capture")
+
+    def isolated_env(self):
+        """env overrides for run(): a private home, and no inherited endpoint."""
+        home = self.tmp / "ocr-home"
+        env = {
+            "ADMINWRIGHT_OCR_BIN": None, "ADMINWRIGHT_NODE_BIN": None, "OCR_NO_UPDATE": "1",
+            "HOME": str(home), "USERPROFILE": str(home),
+            "APPDATA": str(home / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(home / "AppData" / "Local"),
+        }
+        for key in ("APPDATA", "LOCALAPPDATA"):
+            Path(env[key]).mkdir(parents=True, exist_ok=True)
+        env.update((key, None) for key in OCR_ENDPOINT_VARIABLES)
+        return env
+
+    def real_ocr(self, *args):
+        """Run the real ocr itself (as the bridge would launch it), isolated."""
+        env = dict(os.environ)
+        for key, value in self.isolated_env().items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+        proc = subprocess.run(
+            bridge.command_prefix(shutil.which("ocr")) + list(args),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=env, stdin=subprocess.DEVNULL,
+        )
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    def help_text(self, *subcommand):
+        code, text = self.real_ocr(*(subcommand + ("--help",)))
+        self.assertEqual(code, 0, "ocr " + " ".join(subcommand) + " --help failed: " + text)
+        return text
+
+    def bridge_argv(self):
+        """Every argv the bridge hands ocr, from each command shape it has."""
+        self.diff("--from", "main", "--to", "feature")
+        self.diff("--commit", "abc1234")
+        for extra in (("--from", "main", "--to", "feature"), ("--commit", "abc1234")):
+            code, _out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr", *extra)
+            self.assertEqual(code, 1, err)
+        code, _out, err = self.review("scan", "--manifest", self.manifest, "--path", "src")
+        self.assertEqual(code, 1, err)
+        return [call["args"] for call in self.ocr_calls()]
+
+    def test_every_subcommand_and_flag_the_bridge_passes_exists(self):
+        seen = {}
+        for argv in self.bridge_argv():
+            words = []
+            for token in argv:
+                if token.startswith("-"):
+                    break
+                words.append(token)
+            subcommand = tuple(words[:2]) if words[:1] == ["delegate"] else tuple(words[:1])
+            seen.setdefault(subcommand, set()).update(t for t in argv if t.startswith("--"))
+        # The table is derived, so first prove the derivation saw every shape.
+        self.assertEqual(sorted(seen), [("delegate", "preview"), ("delegate", "rule"), ("review",), ("scan",)])
+        for subcommand in (("delegate", "preview"), ("review",)):
+            self.assertTrue({"--from", "--to", "--commit", "--repo", "--rule"} <= seen[subcommand], seen)
+        self.assertTrue({"--path", "--audience", "--format"} <= seen[("scan",)], seen)
+        self.assertTrue({"--audience", "--format"} <= seen[("review",)], seen)
+        for subcommand, flags in sorted(seen.items()):
+            text = self.help_text(*subcommand)
+            for flag in sorted(flags):
+                self.assertRegex(
+                    text, r"(?m)^\s+(?:-\w, )?" + re.escape(flag) + r"\b",
+                    flag + " is not a flag of `ocr " + " ".join(subcommand) + "`",
+                )
+        # `delegate rule` takes the reviewable files as positionals, after the flags.
+        self.assertIn("<path", self.help_text("delegate", "rule"))
+
+    def test_helper_commands_from_integrations_exist(self):
+        code, text = self.real_ocr("--version")
+        self.assertEqual(code, 0, text)
+        self.assertIn("open-code-review", text)
+        self.assertRegex(self.help_text("config"), r"(?m)^\s+set\b")
+        self.assertRegex(self.help_text("config"), r"(?m)^\s+provider\b")
+        self.assertRegex(self.help_text("config"), r"(?m)^\s+model\b")
+        self.assertRegex(self.help_text("rules"), r"(?m)^\s+check\b")
+        self.assertRegex(self.help_text("rules", "check"), r"(?m)^\s+--rule\b")
+
+    # -- real runs against the stand-in endpoint ---------------------------------
+
+    def make_repository(self):
+        """self.root as a git repository whose workspace changes four files."""
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        capture = self.capture
+        capture.git(str(self.root), "init", "-q")
+        capture.write_files(str(self.root), capture.BASE)
+        capture.git(str(self.root), "add", "--", *sorted(capture.BASE))
+        capture.git(str(self.root), "commit", "-q", "-m", "base")
+        capture.write_files(str(self.root), capture.CHANGES)
+
+    def through_bridge(self, *args, **llm_options):
+        with self.fake_llm.FakeLLM(comments=self.capture.COMMENTS, **llm_options) as llm:
+            env = self.isolated_env()
+            self.fake_llm.isolated_ocr_home(env["HOME"], llm.url)
+            return run(SCRIPT, *args, env=env)
+
+    def recorded_lines(self):
+        return sorted((gap["severity"], gap["description"].split(" — ")[0]) for gap in self.gaps())
+
+    def test_a_real_complete_review_is_recorded(self):
+        self.make_repository()
+        code, out, err = self.through_bridge("diff", "--manifest", self.manifest, "--engine", "ocr")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("2 finding(s) recorded as gaps", out)
+        self.assertEqual(self.recorded_lines(), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+
+    def test_a_real_partial_review_records_the_rest_and_names_the_failed_file(self):
+        self.make_repository()
+        code, out, err = self.through_bridge(
+            "diff", "--manifest", self.manifest, "--engine", "ocr", fail_paths=["src/b.py"]
+        )
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("2 finding(s) recorded as gaps", out)
+        self.assertIn("could not review 1 file(s)", err)
+        self.assertIn("src/b.py (provider", err)
+        self.assertEqual(self.recorded_lines(), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+
+    def test_a_real_scan_is_recorded(self):
+        self.make_repository()
+        code, out, err = self.through_bridge("scan", "--manifest", self.manifest, "--path", "src")
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.recorded_lines(), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+
+    def test_a_real_delegate_diff_bundles_exactly_the_changed_files(self):
+        self.make_repository()
+        code, out, err = self.through_bridge("diff", "--manifest", self.manifest, "--agent", "smoke")
+        self.assertEqual(code, 0, out + err)
+        bundle = json.loads(self.only_bundle().read_text(encoding="utf-8"))
+        self.assertEqual(
+            sorted(entry["path"] for entry in bundle["reviewable_files"]),
+            ["src/a.py", "src/b.py", "src/c.py", "src/d.py"],  # not README.md, not .admin-console/
+        )
+        self.assertTrue(bundle["rule_groups"])
+
+    def test_a_real_review_without_a_provider_gets_the_set_up_hint(self):
+        self.make_repository()
+        code, out, err = run(
+            SCRIPT, "diff", "--manifest", self.manifest, "--engine", "ocr", env=self.isolated_env()
+        )
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("ocr config provider", err)
+        self.assertEqual(self.gaps(), [])
 
 
 if __name__ == "__main__":

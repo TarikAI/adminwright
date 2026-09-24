@@ -17,24 +17,41 @@ diff    Build/Repair mode. --engine delegate (default, no OCR-side LLM): runs
         itself to the calling agent, which returns findings through `record`.
         --engine ocr: runs `ocr review --audience agent --format json` and
         persists findings directly; requires prior `ocr config provider` and
-        `ocr config model`. A run that fails (non-zero exit, status failed,
-        terminal_state other than completed) or reports files it could not
-        review exits 2; it is never "0 findings recorded".
+        `ocr config model`. ocr reports the run as complete, partial, failed
+        or skipped (`status`, and `manifest.terminal_state` since ocr 1.8.5).
+        complete: findings recorded (exit 1, or 0 when there are none).
+        partial: the findings that exist are recorded, every file ocr could
+        not review is printed with its reason, exit 2. failed, or a non-zero
+        ocr exit: nothing is recorded, exit 2; it is never "0 findings
+        recorded". skipped: nothing was selected for review, exit 0.
 scan    Audit mode: full-file review of code no diff covers, via `ocr scan
         --audience agent --format json`. Endpoint engine only; delegate mode
-        has no full-file scan.
+        has no full-file scan. scan has no run manifest: its `status` is
+        success, completed_with_warnings or completed_with_errors, and files
+        it could not scan are named in `warnings[]`; they get the same
+        verdicts as a review (completed_with_errors is partial).
 record  Persist delegate-mode findings as manifest gaps[] through
         admin_console_manifest.py `add --kind gap` — one all-or-nothing
-        batch, so a refusal leaves the manifest unmodified. With a bundle
+        batch, so a refusal leaves the manifest unmodified. The payload
+        comes from --findings-file PATH or --findings (inline JSON, '@file',
+        or - for stdin); a file or stdin may be UTF-8, with or without a
+        byte-order mark, or UTF-16 with one. With a bundle
         (--bundle, or the one live unrecorded bundle beside the manifest),
         every bundled (path, status) must end reviewed or explicitly skipped
         with a reason, and findings/skips for paths outside the bundle are
         refused; silent omissions and invented paths alike. A successful
-        record closes its bundle (kept as evidence, no longer discoverable);
-        a bundle older than 24 hours is ignored. Without a bundle nothing can
-        be checked, and the summary says `coverage: unknown` instead of
+        record closes its bundle (no longer discoverable); a bundle older
+        than 24 hours is ignored. Bundles are transient work files: every
+        record writes .admin-console/ocr-record-<timestamp>-<pid>.json (the
+        findings and skips as submitted, plus the bundle's mode, refs and
+        file list), and that is what the gaps cite. Without a bundle nothing
+        can be checked, and the summary says `coverage: unknown` instead of
         claiming 100%. Findings already recorded as live gaps (same path,
         start_line and content) are not written twice.
+
+Evidence files: ocr-bundle*.json are transient (the .gitignore that `init`
+writes excludes them); ocr-record-*, ocr-diff-* and ocr-scan-*.json are the
+evidence the gaps cite and belong in the repository with the manifest.
 
 Findings use OCR's comment schema: path, content, start_line, end_line,
 category (bug|security|performance|maintainability|test|style|documentation|
@@ -57,9 +74,10 @@ manifest), else that directory's parent. Each ocr call is bounded by
 
 Exit codes: 0 clean or nothing reviewable, 1 findings recorded, 2 usage/IO/
 validation failure (including a refused add, which leaves the manifest
-unmodified — gaps are written as one atomic batch — and an endpoint review
-that failed or left files unreviewed). Exit 3 is intentionally unused:
-capability claim conflicts do not apply to this script.
+unmodified — gaps are written as one atomic batch — an endpoint review that
+failed, and one that left files unreviewed, whose findings for the other
+files are recorded). Exit 3 is intentionally unused: capability claim
+conflicts do not apply to this script.
 
 ADMINWRIGHT_OCR_BIN overrides the ocr executable path (tests and exotic
 installs); otherwise the script uses `ocr` from PATH. A value that names no
@@ -78,8 +96,10 @@ sets OCR_NO_UPDATE=1: the launcher otherwise contacts npm and can run
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -130,6 +150,12 @@ ENV_TIMEOUT = "ADMINWRIGHT_OCR_TIMEOUT"
 # file); this only bounds a hang. --timeout / ADMINWRIGHT_OCR_TIMEOUT raise it.
 DEFAULT_TIMEOUT_SECONDS = 900
 
+# The most either may ask for. A day is far past any real review, and it keeps
+# the value inside what the platform's waits accept: `--timeout 1e30` used to
+# make communicate() raise OverflowError, which left ocr running and exited 1
+# ("findings recorded") with a traceback. A non-finite value is refused.
+MAX_TIMEOUT_SECONDS = 24 * 3600
+
 # A review bundle nobody recorded within this long is treated as abandoned.
 BUNDLE_TTL_SECONDS = 24 * 3600
 
@@ -164,12 +190,22 @@ def ocr_executable():
     return shutil.which("ocr")
 
 
+# The npm package's native binary. There is no ocr.exe: npm installs ocr.cmd,
+# ocr.ps1 and an sh shim, and bin/ocr.js starts this file from the per-platform
+# package (@alibaba-group/ocr-win32-x64/bin/ on x64 Windows).
+NATIVE_BINARY_HINT = (
+    "the package's native opencodereview.exe (<npm prefix>/node_modules/@alibaba-group/"
+    "open-code-review/node_modules/@alibaba-group/ocr-win32-x64/bin/opencodereview.exe)"
+)
+
+
 def refuse_cmd_shim(shim, reason):
     return ReviewError(
         "refusing to run '" + str(shim) + "': Windows would hand a .cmd/.bat file to"
         " cmd.exe, which executes '&', '%', '^' and '!' in a repository file name as"
-        " commands. " + reason + " Set " + ENV_OCR_BIN + " to a native executable"
-        " (ocr.exe), or to the ocr.cmd of a standard npm install with `node` on PATH."
+        " commands. " + reason + " Set " + ENV_OCR_BIN + " to a native executable, such as "
+        + NATIVE_BINARY_HINT + ", or to the ocr.cmd of a standard npm install with `node`"
+        " on PATH."
     )
 
 
@@ -244,18 +280,35 @@ def command_prefix(executable):
 
 
 def ocr_timeout(args=None):
-    """Seconds one ocr call may run: --timeout, else ADMINWRIGHT_OCR_TIMEOUT, else 900."""
+    """Seconds one ocr call may run: --timeout, else ADMINWRIGHT_OCR_TIMEOUT, else 900.
+
+    Finite and positive, and at most MAX_TIMEOUT_SECONDS (a larger value is
+    lowered to it, with a note).
+    """
     value = getattr(args, "timeout", None)
+    source = "--timeout"
     if value is None:
         raw = os.environ.get(ENV_TIMEOUT, "").strip()
         if not raw:
             return DEFAULT_TIMEOUT_SECONDS
+        source = ENV_TIMEOUT
         try:
             value = float(raw)
         except ValueError:
             raise ReviewError(ENV_TIMEOUT + " must be a number of seconds, not '" + raw + "'")
-    if not value > 0:
+    if not value > 0:  # NaN fails this too
         raise ReviewError("the ocr timeout must be a positive number of seconds")
+    if math.isinf(value):
+        raise ReviewError(
+            source + " must be a finite number of seconds, at most " + str(MAX_TIMEOUT_SECONDS)
+            + "; ocr runs are always bounded"
+        )
+    if value > MAX_TIMEOUT_SECONDS:
+        stderr(
+            "note: " + source + " " + format(value, "g") + " is above the "
+            + str(MAX_TIMEOUT_SECONDS) + "-second maximum; using " + str(MAX_TIMEOUT_SECONDS)
+        )
+        return MAX_TIMEOUT_SECONDS
     return value
 
 
@@ -306,7 +359,10 @@ def run_bounded(command, env, timeout):
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
         raise
-    except KeyboardInterrupt:
+    except BaseException:
+        # Ctrl-C, or anything communicate() itself raises (an OverflowError
+        # from a wait the platform could not honour once left the review
+        # running): whatever happens here, ocr and its children do not outlive it.
         kill_tree(proc)
         raise
     return subprocess.CompletedProcess(command, proc.returncode, stdout, errors)
@@ -339,9 +395,9 @@ def run_ocr(arguments, repo=None, trailing=None, timeout=None):
         )
     except OSError as exc:
         raise ReviewError(
-            "could not execute '" + executable + "' ("
-            "on Windows point " + ENV_OCR_BIN + " at the npm install's ocr.cmd or a"
-            " native ocr.exe, not the extensionless npm shell shim): " + str(exc)
+            "could not execute '" + executable + "' (on Windows point " + ENV_OCR_BIN
+            + " at the npm install's ocr.cmd or at " + NATIVE_BINARY_HINT
+            + ", not at the extensionless npm shell shim): " + str(exc)
         )
 
 
@@ -384,6 +440,73 @@ def parse_json(text, what):
         return json.loads(text)
     except ValueError:
         raise ReviewError("could not parse " + what + " output as JSON")
+
+
+# What Windows tools write, for the --findings file and pipe. Windows
+# PowerShell 5.1: `>` and Out-File write UTF-16LE with a byte-order mark;
+# Set-Content writes the ANSI code page unless given -Encoding (utf8 adds a
+# BOM); a pipe into a native program is encoded with $OutputEncoding, which is
+# ASCII by default, so every non-ASCII character arrives as '?' before this
+# script sees a byte. PowerShell 7 writes and pipes UTF-8 without a BOM.
+DECODE_HINT_FILE = (
+    " Re-save it as UTF-8 (a byte-order mark is fine); in Windows PowerShell 5.1 use"
+    " `Set-Content -Encoding utf8` or `Out-File -Encoding utf8`."
+)
+DECODE_HINT_PIPE = (
+    " Pipe UTF-8 (in Windows PowerShell 5.1 set"
+    " `$OutputEncoding = [System.Text.UTF8Encoding]::new()` first, or non-ASCII text"
+    " arrives as '?'), or write the JSON to a file and pass --findings-file <path>."
+)
+POWERSHELL_JSON_HINT = (
+    " In PowerShell, double quotes inside single-quoted JSON are stripped before Python"
+    " sees them: write the JSON to a file and pass --findings-file <path>."
+)
+
+
+def decode_text_bytes(data, source, hint):
+    """Decode a findings payload the way Windows tools actually write it.
+
+    The rules of admin_console_manifest.decode_text_bytes: a UTF-8 or UTF-16
+    byte-order mark is honoured, anything else must be strict UTF-8. A legacy
+    code-page file is refused (exit 2) rather than guessed at; a traceback here
+    used to exit 1, which reads as "findings recorded" with nothing persisted.
+    """
+    encoding = "utf-8"
+    if data.startswith(codecs.BOM_UTF8):
+        data = data[len(codecs.BOM_UTF8):]
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encoding = "utf-16"  # reads the BOM, then drops it
+    try:
+        return data.decode(encoding)
+    except UnicodeDecodeError:
+        raise ReviewError(
+            source + " is not valid " + ("UTF-16" if encoding == "utf-16" else "UTF-8")
+            + " (a legacy code-page file, or UTF-16 without a byte-order mark?)." + hint
+        )
+
+
+def read_findings_file(name):
+    try:
+        data = Path(name).read_bytes()
+    except OSError as exc:
+        raise ReviewError("could not read findings file '" + name + "': " + str(exc))
+    return decode_text_bytes(data, "the findings file '" + name + "'", DECODE_HINT_FILE)
+
+
+def findings_text(args):
+    """The findings payload: --findings-file, or --findings as JSON, @file or - (stdin)."""
+    if getattr(args, "findings_file", None) is not None:
+        return read_findings_file(args.findings_file)
+    raw = args.findings
+    if raw == "-":
+        if sys.stdin is None:
+            raise ReviewError("--findings - reads standard input, but there is none")
+        stream = getattr(sys.stdin, "buffer", None)
+        data = stream.read() if stream is not None else sys.stdin.read().encode("utf-8")
+        return decode_text_bytes(data, "standard input", DECODE_HINT_PIPE)
+    if raw.startswith("@"):
+        return read_findings_file(raw[1:])
+    return raw
 
 
 def extract_reviewable(preview):
@@ -435,12 +558,17 @@ def find_findings(node):
 
     Prefer a list under a known key (comments/findings/results) so a document
     that also echoes rule groups or file lists cannot win by appearing first;
-    otherwise return the first list that satisfies the shape contract.
+    otherwise return the first list that satisfies the shape contract. A
+    known key that is empty or null (a failed ocr run says `"comments": null`)
+    means "no findings": the search stops there rather than mistaking some
+    other list of path-bearing objects for review comments.
     """
     if isinstance(node, dict):
         for key in FINDINGS_KEYS:
             if is_findings_list(node.get(key)):
                 return node[key]
+        if any(key in node and node[key] in (None, []) for key in FINDINGS_KEYS):
+            return []
         for value in node.values():
             found = find_findings(value)
             if found is not None:
@@ -526,7 +654,9 @@ def slug_for(path):
 # Gap statuses that still stand for an unresolved finding. A `fixed` gap that
 # OCR reports again is a regression and is recorded anew.
 LIVE_GAP_STATUSES = ("open", "accepted", "blocked")
-FINGERPRINT = re.compile(r"\bfp:([0-9a-f]{12})\b")
+# Gaps recorded before the `fingerprint` field existed carry it at the end of
+# their rationale instead.
+LEGACY_FINGERPRINT = re.compile(r"\bfp:([0-9a-f]{12})\b")
 
 
 def finding_fingerprint(finding):
@@ -542,9 +672,12 @@ def finding_fingerprint(finding):
 def read_gaps(manifest):
     """Best-effort read of gaps[]: (ids taken, fingerprints of live gaps).
 
-    Ids keep new gap ids unique; the fingerprints, stored in each gap's
-    rationale as `fp:<12 hex>`, keep a re-run from recording a finding that is
-    already an open, accepted or blocked gap.
+    Ids keep new gap ids unique; the fingerprints keep a re-run from recording
+    a finding that is already an open, accepted or blocked gap. A gap keeps its
+    fingerprint in its own `fingerprint` field, so accepting it the documented
+    way (status `accepted` plus a rewritten, accepted-risk rationale) does not
+    turn it into a new open gap on the next run. The `fp:<12 hex>` rationale
+    suffix that older gaps carry is still honoured while it is there.
     """
     try:
         data = json.loads(manifest.read_text(encoding="utf-8-sig"))
@@ -560,9 +693,14 @@ def read_gaps(manifest):
             continue
         if isinstance(gap.get("id"), str):
             ids.add(gap["id"])
+        if gap.get("status") not in LIVE_GAP_STATUSES:
+            continue
+        fingerprint = gap.get("fingerprint")
+        if isinstance(fingerprint, str) and fingerprint.strip():
+            prints.add(fingerprint.strip().lower())
         rationale = gap.get("rationale")
-        if gap.get("status") in LIVE_GAP_STATUSES and isinstance(rationale, str):
-            prints.update(FINGERPRINT.findall(rationale))
+        if isinstance(rationale, str):
+            prints.update(LEGACY_FINGERPRINT.findall(rationale))
     return ids, prints
 
 
@@ -689,12 +827,10 @@ def persist_findings(manifest, findings, engine, mode, evidence_path):
                     "severity": finding["severity"],
                     "description": description,
                     "status": "open",
-                    "rationale": (
-                        "OCR " + engine + " pass, " + mode + " mode, " + date
-                        + "; fp:" + fingerprint
-                    ),
+                    "rationale": "OCR " + engine + " pass, " + mode + " mode, " + date,
                     "evidence": [evidence_rel],
                     "source": "ocr",
+                    "fingerprint": fingerprint,
                 }
             )
         return gaps, duplicates
@@ -771,9 +907,15 @@ def require_ocr(args):
 
 
 def write_json_atomic(path, document):
-    """Write a JSON file so a reader never sees half of it (temp file + replace)."""
+    """Write a JSON file so a reader never sees half of it (temp file + replace).
+
+    LF line endings on every platform, like the gap batch in add_gaps: text
+    mode would write CRLF on Windows, and the ocr-record/-diff/-scan files are
+    evidence the gaps cite, under the repository's eol=lf rule.
+    """
     temp = path.with_name(path.name + ".tmp")
-    temp.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    with open(str(temp), "w", encoding="utf-8", newline="\n") as out:
+        out.write(json.dumps(document, indent=2) + "\n")
     os.replace(str(temp), str(path))
 
 
@@ -825,7 +967,11 @@ def write_bundle(manifest, bundle, agent=None):
 
 
 def close_bundle(path, bundle, **facts):
-    """Mark a bundle spent. It stays on disk: recorded gaps cite it as evidence."""
+    """Mark a bundle spent, so it neither gates nor is checked against another record.
+
+    The file stays on disk until someone deletes it; the gaps never cite it
+    (they cite the ocr-record file named in `closed.record`).
+    """
     closed = dict(facts)
     closed["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     bundle["closed"] = closed
@@ -978,10 +1124,12 @@ def cmd_diff(args):
         path = write_bundle(manifest, bundle, args.agent)
         print("OCR bundle written: " + str(path))
         print(str(len(files)) + " file(s) to review. Next:")
+        # --findings-file, not `--findings @file`: a bare leading @ is splatting
+        # in PowerShell, which refuses to parse the pasted line.
         print(
             "  python " + quote_arg(Path(__file__).resolve()) + " record --manifest "
             + quote_arg(manifest) + " --bundle " + quote_arg(path)
-            + " --findings @<findings.json>"
+            + " --findings-file <findings.json>"
         )
         return EXIT_OK
 
@@ -1008,7 +1156,47 @@ def cmd_scan(args):
     return persist_endpoint_result(manifest, scan, "scan")
 
 
-FAILED_STATUSES = ("failed", "error", "errored", "failure")
+# How ocr says a review or scan ended. Taken from the ocr source (the run
+# manifest in internal/session/manifest.go, the reply in
+# cmd/opencodereview/output.go, the exit code in review_cmd.go; 1.8.5 to
+# 1.12.9) and checked against real replies, kept in tests/fixtures/ocr:
+#
+# * A review carries a run manifest whose `terminal_state` is complete,
+#   partial, failed or skipped, and the top-level `status` repeats it. ocr
+#   exits non-zero only when the run itself failed or every selected file
+#   failed, so a partial review arrives with exit 0. skipped means nothing was
+#   selected: a clean workspace, or only excluded files changed.
+# * scan has no run manifest (nor had a review before ocr 1.8.5): `status` is
+#   success, completed_with_warnings or completed_with_errors, and a file that
+#   could not be reviewed is named in `warnings[]`.
+#
+# A state outside these lists is not guessed at; see endpoint_verdict.
+COMPLETE_STATES = ("complete", "completed", "success", "completed_with_warnings")
+PARTIAL_STATES = ("partial", "completed_with_errors")
+FAILED_STATES = ("failed", "failure", "error", "errored")
+SKIPPED_STATES = ("skipped",)
+# When fields disagree, the worst one decides.
+STATE_RANK = {"skipped": 0, "complete": 1, "partial": 2, "unknown": 3, "failed": 4}
+
+# Warning types that mean a file was not (fully) reviewed. They are read only
+# from a reply without a run manifest: with one, coverage.failed names those
+# files already (and ocr drops the per-file error warnings from the reply).
+COVERAGE_WARNINGS = (
+    "subtask_error", "scan_subtask_error", "token_threshold_exceeded", "token_budget_reached",
+)
+
+# A failure ocr classifies this way, or a message with one of these phrases
+# ("no valid LLM endpoint configured", "check your LLM configuration and API
+# key"), is a provider set-up problem; only then is the set-up hint printed.
+PROVIDER_CLASSES = ("provider", "configuration")
+PROVIDER_PHRASES = ("llm configuration", "llm endpoint", "llm completion error", "api key", "provider")
+PROVIDER_HINT = (
+    "hint: the LLM provider is missing, unreachable or refusing requests. The endpoint"
+    " engine needs `ocr config provider` and `ocr config model` (INTEGRATIONS.md, Setup);"
+    " check the gateway URL and key, or use the default delegate engine, which needs no"
+    " provider."
+)
+FAILED_LISTING_LIMIT = 20
 
 
 def result_nodes(document):
@@ -1031,54 +1219,105 @@ def result_nodes(document):
     return nodes
 
 
-def tool_message(document, stderr_text):
-    """What ocr itself said went wrong: an error field, else its stderr."""
+def has_run_manifest(document):
+    return isinstance(document, dict) and any(
+        isinstance(document.get(key), dict) for key in ("manifest", "run_manifest", "coverage")
+    )
+
+
+def run_failure(document):
+    """The manifest's run_failure ({classification, reason}), if ocr gave one."""
+    for node, _root in result_nodes(document):
+        failure = node.get("run_failure")
+        if isinstance(failure, dict):
+            return failure
+    return None
+
+
+def tool_messages(document, stderr_text):
+    """What ocr itself said: the reply's message or error, then its `Error:` lines.
+
+    stderr is read only for the lines ocr's CLI prints as `Error: ...`; the JSON
+    usage record a failed review also writes there is noise here. With no
+    message at all, the last few non-JSON stderr lines stand in.
+    """
+    messages = []
     for node, _root in result_nodes(document):
         for key in ("error", "error_message", "message", "last_error"):
             value = node.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
-        errors = node.get("errors")
-        if isinstance(errors, list) and errors:
-            return "; ".join(str(item)[:200] for item in errors[:5])
-    return (stderr_text or "").strip()
-
-
-def run_verdict(document, returncode):
-    """Why a review/scan reply is not a completed review; "" when it is one.
-
-    A non-zero exit, `status: failed`, or a `terminal_state` other than
-    "completed" each mean the run did not finish, whatever else the JSON holds.
-    Reading none of them let a review in which every file failed print
-    "0 finding(s) recorded" and exit 0.
-    """
-    reasons = []
-    if returncode != 0:
-        reasons.append("exit code " + str(returncode))
-    if isinstance(document, dict):
-        status = document.get("status")
-        if isinstance(status, str) and status.strip().lower() in FAILED_STATUSES:
-            reasons.append("status '" + status.strip() + "'")
-        for node, _root in result_nodes(document):
-            state = node.get("terminal_state")
-            if isinstance(state, str) and state.strip() and state.strip().lower() != "completed":
-                reasons.append("terminal_state '" + state.strip() + "'")
+                messages.append(value.strip())
                 break
-    return ", ".join(reasons)
+        else:
+            errors = node.get("errors")
+            if isinstance(errors, list) and errors:
+                messages.append("; ".join(str(item)[:200] for item in errors[:5]))
+        if messages:
+            break
+    failure = run_failure(document)
+    if failure:
+        messages.append(
+            "run failure (" + str(failure.get("classification") or "unknown") + ")"
+            + (": " + str(failure["reason"]) if failure.get("reason") else "")
+        )
+    lines = [line.strip() for line in (stderr_text or "").splitlines() if line.strip()]
+    said = [line[len("Error:"):].strip() for line in lines if line.startswith("Error:")]
+    if not said and not messages:
+        said = [line for line in lines if not line.startswith(("{", "}", "[", "]", '"'))][-5:]
+    for line in said:
+        if line and line not in messages:
+            messages.append(line)
+    return messages
+
+
+def state_category(state):
+    state = state.strip().lower()
+    for category, states in (
+        ("complete", COMPLETE_STATES), ("partial", PARTIAL_STATES),
+        ("failed", FAILED_STATES), ("skipped", SKIPPED_STATES),
+    ):
+        if state in states:
+            return category
+    return "unknown"
+
+
+def reported_states(document):
+    """[(field, state)] for every place the reply says how the run ended."""
+    states = []
+    if not isinstance(document, dict):
+        return states
+    status = document.get("status")
+    if isinstance(status, str) and status.strip():
+        states.append(("status", status.strip()))
+    for node, _root in result_nodes(document):
+        state = node.get("terminal_state")
+        if isinstance(state, str) and state.strip():
+            states.append(("terminal_state", state.strip()))
+    return states
 
 
 def describe_failure(entry):
+    """One file ocr could not review, as `path (classification: reason)`."""
     if isinstance(entry, dict):
         path = entry.get("path") or entry.get("file") or entry.get("name") or json.dumps(entry)[:120]
+        kind = entry.get("classification") or entry.get("type")
         reason = entry.get("reason") or entry.get("error") or entry.get("message")
-        return str(path) + (" (" + str(reason)[:160] + ")" if reason else "")
+        detail = ": ".join(str(part) for part in (kind, reason) if part)
+        return str(path) + (" (" + detail[:200] + ")" if detail else "")
     return str(entry)
 
 
 def failed_files(document):
-    """(files ocr says it could not review, count reported without names)."""
+    """Files ocr says it could not review: (descriptions, unnamed count, classes).
+
+    Read from the run manifest's coverage (`failed`; `failed_files` is accepted
+    too) when the reply has one, else from the warnings that mean a file went
+    unreviewed (scan, and reviews before ocr 1.8.5). `classes` holds the
+    failure classifications (provider, timeout, budget, ...) ocr attached.
+    """
     named = []
     unnamed = 0
+    classes = set()
     for node, is_root in result_nodes(document):
         for key in ("failed", "failed_files"):
             if is_root and key == "failed":
@@ -1089,13 +1328,170 @@ def failed_files(document):
                     text = describe_failure(entry)
                     if text not in named:
                         named.append(text)
+                    if isinstance(entry, dict) and entry.get("classification"):
+                        classes.add(str(entry["classification"]).strip().lower())
             elif isinstance(value, dict):
                 for name in value:
                     if str(name) not in named:
                         named.append(str(name))
             elif isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 unnamed = max(unnamed, value)
-    return named, unnamed
+    failure = run_failure(document)
+    if failure and failure.get("classification"):
+        classes.add(str(failure["classification"]).strip().lower())
+    if isinstance(document, dict) and not has_run_manifest(document):
+        warnings = document.get("warnings")
+        for warning in warnings if isinstance(warnings, list) else []:
+            if isinstance(warning, dict) and warning.get("type") in COVERAGE_WARNINGS:
+                text = describe_failure(warning)
+                if text not in named:
+                    named.append(text)
+                if warning.get("type") in ("subtask_error", "scan_subtask_error"):
+                    message = str(warning.get("message") or "").lower()
+                    if any(phrase in message for phrase in PROVIDER_PHRASES):
+                        classes.add("provider")
+    return named, unnamed, classes
+
+
+def warning_notes(document):
+    """ocr's other warnings, passed on as notes (the unreviewed-file ones are listed instead)."""
+    warnings = document.get("warnings") if isinstance(document, dict) else None
+    notes = []
+    for warning in warnings if isinstance(warnings, list) else []:
+        if not isinstance(warning, dict):
+            continue
+        kind = str(warning.get("type") or "warning")
+        if kind in COVERAGE_WARNINGS and not has_run_manifest(document):
+            continue
+        where = str(warning["file"]) + ": " if warning.get("file") else ""
+        notes.append("ocr warning [" + kind + "] " + where + str(warning.get("message") or "")[:200])
+    return notes
+
+
+def selected_count(document):
+    """How many files the run manifest says ocr selected, or None."""
+    for node, is_root in result_nodes(document):
+        selected = None if is_root else node.get("selected")
+        if isinstance(selected, list):
+            return len(selected)
+    return None
+
+
+class Verdict(object):
+    """What the bridge does with one ocr reply (see endpoint_verdict)."""
+
+    def __init__(self):
+        self.outcome = "complete"
+        self.state = ""  # the deciding field, e.g. "terminal_state 'partial'"
+        self.reasons = []  # why the run failed; empty unless outcome == "failed"
+        self.failed = []  # "path (classification: reason)" per unreviewed file
+        self.unnamed = 0  # unreviewed files ocr counted without naming them
+        self.classes = set()  # ocr's failure classifications
+        self.selected = None  # files ocr selected, when the manifest says
+        self.notes = []  # other ocr warnings
+
+
+def endpoint_verdict(document, returncode):
+    """Classify an ocr review/scan reply.
+
+    outcome:
+      complete     every selected file was reviewed (a reply that states no
+                   outcome at all counts too): record the findings.
+      partial      some files could not be reviewed: record the findings that
+                   exist, list the others, exit 2.
+      skipped      ocr selected nothing to review: exit 0.
+      unconfirmed  a state this bridge does not know, with exit 0: ocr's exit
+                   code says the coverage is usable, so the findings are
+                   recorded, but completeness cannot be confirmed: exit 2.
+      failed       a non-zero exit, a failed state, or no JSON at all: record
+                   nothing, exit 2.
+
+    The previous check accepted only "completed", a word ocr never uses, and
+    so failed every real review; the states are compared as sets now.
+    """
+    verdict = Verdict()
+    ranked = []
+    for field, state in reported_states(document):
+        category = state_category(state)
+        label = field + " '" + state + "'"
+        ranked.append((STATE_RANK[category], category, label))
+        if category == "failed":
+            verdict.reasons.append(label)
+    if returncode != 0:
+        verdict.reasons.insert(0, "exit code " + str(returncode))
+    elif document is None:
+        verdict.reasons.append("no parseable JSON on stdout")
+    verdict.failed, verdict.unnamed, verdict.classes = failed_files(document)
+    verdict.notes = warning_notes(document)
+    verdict.selected = selected_count(document)
+    _rank, worst, verdict.state = max(ranked) if ranked else (1, "complete", "")
+    if verdict.reasons:
+        verdict.outcome = "failed"
+    elif worst == "unknown":
+        verdict.outcome = "unconfirmed"
+    elif worst == "partial" or verdict.failed or verdict.unnamed:
+        verdict.outcome = "partial"
+    else:
+        verdict.outcome = worst
+    return verdict
+
+
+def provider_problem(verdict, messages):
+    """Whether a failure points at the provider set-up (and so earns the hint)."""
+    if verdict.classes.intersection(PROVIDER_CLASSES):
+        return True
+    text = " ".join(messages).lower()
+    return any(phrase in text for phrase in PROVIDER_PHRASES)
+
+
+def report_failed_run(mode, verdict, messages):
+    head = messages[0] if messages else "ocr " + mode + " produced no message"
+    stderr("ERROR: ocr " + mode + " did not complete (" + ", ".join(verdict.reasons) + "): " + head)
+    for line in messages[1:]:
+        stderr("  ocr: " + line)
+    if verdict.failed:
+        stderr("Files ocr could not review:")
+        for entry in verdict.failed[:FAILED_LISTING_LIMIT]:
+            stderr("  " + entry)
+        if len(verdict.failed) > FAILED_LISTING_LIMIT:
+            stderr("  ... and " + str(len(verdict.failed) - FAILED_LISTING_LIMIT) + " more")
+    stderr("Nothing was recorded.")
+    if provider_problem(verdict, messages):
+        stderr(PROVIDER_HINT)
+
+
+def report_partial(verdict, messages):
+    count = len(verdict.failed) if verdict.failed else verdict.unnamed
+    said = " (" + messages[0] + ")" if messages else ""
+    if count:
+        scope = " of " + str(verdict.selected) + " selected" if verdict.selected else ""
+        stderr(
+            "ERROR: ocr could not review " + str(count) + " file(s)" + scope
+            + "; coverage is incomplete" + said + "."
+        )
+    else:
+        stderr("ERROR: ocr reported " + verdict.state + "; coverage is incomplete" + said + ".")
+    for entry in verdict.failed:
+        stderr("  " + entry)
+    stderr(
+        "Findings for the files it did review were recorded above; re-run once the failures"
+        " are resolved (findings already recorded are not written twice)."
+    )
+    if "provider" in verdict.classes:
+        stderr(
+            "hint: the provider failed for these files while it served the others; a rate"
+            " limit or an upstream error is the usual cause, so a later re-run often succeeds."
+        )
+
+
+def report_unconfirmed(verdict):
+    stderr(
+        "ERROR: ocr reported " + verdict.state + ", a state this bridge does not know (it acts"
+        " on complete, partial, failed and skipped, and on scan's success,"
+        " completed_with_warnings and completed_with_errors). The findings above were"
+        " recorded, but coverage is not confirmed; compare `ocr --version` with the"
+        " version INTEGRATIONS.md was checked against."
+    )
 
 
 def duplicate_note(duplicates):
@@ -1106,12 +1502,12 @@ def duplicate_note(duplicates):
 def persist_endpoint_result(manifest, proc, mode):
     """Parse an ocr review/scan reply, keep it as evidence, persist findings.
 
-    A reply is only a review when the run completed: a failed run exits 2 with
-    the tool's own message instead of "0 finding(s) recorded". When the run
-    completed but some files could not be reviewed, the findings for the rest
-    are still recorded (real findings are not thrown away), the unreviewed
-    paths are listed, and the exit is 2 so nobody reads the gap list as
-    complete coverage.
+    What happens depends on how ocr says the run ended (endpoint_verdict). A
+    failed run exits 2 with ocr's own message instead of "0 finding(s)
+    recorded", and records nothing. A partial one records the findings that
+    exist (real findings are not thrown away), lists every file ocr could not
+    review with its reason, and exits 2 so nobody reads the gap list as
+    complete coverage. A skipped one had nothing to review.
     """
     document = None
     if proc.stdout.strip():
@@ -1119,58 +1515,73 @@ def persist_endpoint_result(manifest, proc, mode):
             document = json.loads(proc.stdout)
         except ValueError:
             document = None
-    problem = run_verdict(document, proc.returncode)
-    if document is None and not problem:
-        problem = "no parseable JSON on stdout"
-    if problem:
-        message = tool_message(document, proc.stderr) or "ocr " + mode + " produced no message"
-        stderr("ERROR: ocr " + mode + " did not complete (" + problem + "): " + message)
-        stderr("hint: endpoint engine needs `ocr config provider` and `ocr config model` first")
+    verdict = endpoint_verdict(document, proc.returncode)
+    messages = tool_messages(document, proc.stderr)
+    if verdict.outcome == "failed":
+        report_failed_run(mode, verdict, messages)
         return EXIT_USAGE
+    found = find_findings(document) or []
+    if verdict.outcome == "skipped" and not found:
+        print("OCR " + mode + ": nothing to review" + ("; ocr: " + messages[0] if messages else "."))
+        return EXIT_OK
     raw = manifest.parent / (
         "ocr-" + mode + "-" + time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()) + ".json"
     )
     write_json_atomic(raw, document)
-    found = find_findings(document)
-    findings = [normalize_finding(item) for item in (found or [])]
-    failed, unnamed = failed_files(document)
+    findings = [normalize_finding(item) for item in found]
     written, duplicates = persist_findings(manifest, findings, "endpoint", mode, raw)
     print(
         "OCR " + mode + ": " + str(written) + " finding(s) recorded as gaps"
         + duplicate_note(duplicates) + "; raw output kept at " + str(raw)
     )
-    if failed or unnamed:
-        count = len(failed) if failed else unnamed
-        stderr(
-            "ERROR: ocr could not review " + str(count) + " file(s); coverage is incomplete."
-            " Findings for the files it did review were recorded above; re-run once the"
-            " failures are resolved."
-        )
-        for entry in failed:
-            stderr("  " + entry)
+    for note in verdict.notes:
+        stderr("note: " + note)
+    if verdict.outcome == "partial":
+        report_partial(verdict, messages)
+        return EXIT_USAGE
+    if verdict.outcome == "unconfirmed":
+        report_unconfirmed(verdict)
         return EXIT_USAGE
     if written or duplicates:
         return EXIT_FINDINGS
     return EXIT_OK
 
 
+def record_document(bundle_path, bundle, findings, skipped):
+    """The evidence a delegate `record` leaves: what was submitted, against which bundle."""
+    summary = None
+    if bundle is not None:
+        summary = {
+            "file": bundle_path.name,
+            "agent": bundle.get("agent"),
+            "mode": bundle.get("mode"),
+            "refs": bundle.get("refs") or {},
+            "created": bundle.get("created"),
+            "reviewable_files": bundle.get("reviewable_files", []),
+        }
+    return {
+        "schema_version": "1",
+        "engine": "delegate",
+        "recorded": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "bundle": summary,
+        "findings": findings,
+        "skipped": skipped,
+    }
+
+
 def cmd_record(args):
     manifest = Path(args.manifest)
     if not manifest.exists():
         raise ReviewError("manifest not found: " + str(manifest))
-    raw = args.findings
-    if raw == "-":
-        text = sys.stdin.read()
-    elif raw.startswith("@"):
-        try:
-            # utf-8-sig: PowerShell 5.1 writes a BOM with `> file` and
-            # `Set-Content -Encoding utf8`; a BOM is not part of the JSON.
-            text = Path(raw[1:]).read_text(encoding="utf-8-sig")
-        except OSError as exc:
-            raise ReviewError("could not read findings file '" + raw[1:] + "': " + str(exc))
-    else:
-        text = raw
-    payload = parse_json(text, "findings")
+    text = findings_text(args)
+    try:
+        payload = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        inline = args.findings is not None and args.findings != "-" and not args.findings.startswith("@")
+        raise ReviewError(
+            "the findings are not valid JSON: " + str(exc)[:200] + "."
+            + (POWERSHELL_JSON_HINT if inline else "")
+        )
     if isinstance(payload, dict):
         findings_raw = payload.get("findings", [])
         skipped_raw = payload.get("skipped", [])
@@ -1206,7 +1617,6 @@ def cmd_record(args):
             for f in missing:
                 stderr("  " + f["path"] + " (" + str(f.get("status", "changed")) + ")")
             return EXIT_USAGE
-        evidence_path = bundle_path
     else:
         # No `diff` bundle: there is no reviewable-file set to check the
         # payload against, so it is taken as given and coverage is unknown.
@@ -1214,22 +1624,33 @@ def cmd_record(args):
             "note: no review bundle found; paths are not checked against a diff."
             " Run `diff` first for guaranteed file coverage."
         )
-        evidence_path = manifest.parent / (
-            "ocr-record-" + time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()) + ".json"
-        )
-        write_json_atomic(evidence_path, payload)
 
-    written, duplicates = persist_findings(
-        manifest, findings, "delegate", "delegate review", evidence_path
+    # The gaps cite this record, never the bundle: a bundle is a transient work
+    # file (git-ignored, so absent from every clone), while ocr-record-*.json is
+    # committed with the manifest. It therefore carries what a reader needs from
+    # the bundle as well: its mode, refs and file list.
+    evidence_path = manifest.parent / (
+        "ocr-record-" + time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()) + ".json"
     )
+    write_json_atomic(evidence_path, record_document(bundle_path, bundle, findings_raw, skipped))
+    try:
+        written, duplicates = persist_findings(
+            manifest, findings, "delegate", "delegate review", evidence_path
+        )
+    except BaseException:
+        # Refused (nothing persisted): nothing cites the record, so it goes.
+        try:
+            os.unlink(str(evidence_path))
+        except OSError:
+            pass
+        raise
     if bundle is not None:
         # Spent: the next `record` must not be gated by, or checked against,
-        # this review. The file stays as evidence and now also holds the skip
-        # reasons, which nothing else persists.
+        # this review.
         try:
             close_bundle(
                 bundle_path, bundle, by="record", findings=written,
-                duplicates=duplicates, skipped=skipped,
+                duplicates=duplicates, skipped=skipped, record=evidence_path.name,
             )
         except OSError as exc:
             stderr("note: could not mark " + str(bundle_path) + " as recorded: " + str(exc))
@@ -1254,6 +1675,8 @@ def cmd_record(args):
             "; reviewed_files=" + str(reviewed) + " skipped_files=" + str(skipped_files)
             + " coverage: unknown (no review bundle, so paths were not checked against a diff)"
         )
+    # The file to commit with the manifest: the gaps cite it.
+    line += "; record=" + str(evidence_path)
     print(line)
     if written or duplicates:
         return EXIT_FINDINGS
@@ -1279,7 +1702,8 @@ def build_parser():
     )
     timeout_help = (
         "seconds one ocr call may run before it is stopped (default "
-        + str(DEFAULT_TIMEOUT_SECONDS) + " or ADMINWRIGHT_OCR_TIMEOUT)"
+        + str(DEFAULT_TIMEOUT_SECONDS) + " or ADMINWRIGHT_OCR_TIMEOUT; at most "
+        + str(MAX_TIMEOUT_SECONDS) + ")"
     )
 
     diff_parser = subparsers.add_parser(
@@ -1316,8 +1740,16 @@ def build_parser():
         "record", help="Persist reviewed findings as manifest gaps[]"
     )
     record_parser.add_argument("--manifest", required=True)
-    record_parser.add_argument(
-        "--findings", required=True, help="JSON, @file, or - for stdin"
+    payload = record_parser.add_mutually_exclusive_group(required=True)
+    payload.add_argument(
+        "--findings",
+        help="JSON, '@file' (quote it in PowerShell, where a bare @ is splatting), or - for"
+        " stdin (from Windows PowerShell 5.1 only with $OutputEncoding set to UTF-8)",
+    )
+    payload.add_argument(
+        "--findings-file", metavar="PATH",
+        help="read the findings JSON from a file (PowerShell-safe): UTF-8, with or without"
+        " a byte-order mark, or UTF-16 with one, as Windows PowerShell's `>` writes it",
     )
     record_parser.add_argument(
         "--bundle",
@@ -1330,12 +1762,11 @@ def build_parser():
 
 def main():
     try:
+        # Review text is arbitrary Unicode; a cp1252 console must not crash on it.
+        # stdin is not reconfigured: `record --findings -` reads its bytes and
+        # decodes them itself (findings_text), UTF-16 and byte-order marks included.
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        # utf-8-sig: `record --findings -` gets JSON from a pipe, and PowerShell
-        # 5.1 pipes it with a BOM; the console default (cp1252) would garble
-        # every non-ASCII character of the review text.
-        sys.stdin.reconfigure(encoding="utf-8-sig", errors="replace")
     except (AttributeError, ValueError):
         pass
     parser = build_parser()

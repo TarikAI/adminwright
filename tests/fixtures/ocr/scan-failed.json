@@ -1,0 +1,21 @@
+{
+  "captured_with": "open-code-review v1.12.9 (bccbc15f) windows/amd64",
+  "scenario": "every file failed: nothing on stdout, exit 1",
+  "argv": [
+    "ocr",
+    "scan",
+    "--audience",
+    "agent",
+    "--format",
+    "json",
+    "--path",
+    "src",
+    "--rule",
+    "<skill>/assets/adminwright-ocr-rules.json",
+    "--repo",
+    "<repo>"
+  ],
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "[ocr] Session: 4ab38bd7-6860-4ad5-91b7-260b8b230ecf (retry with: --resume 4ab38bd7-6860-4ad5-91b7-260b8b230ecf)\nError: scan failed: all 4 file scan(s) failed — check your LLM configuration and API key\n"
+}

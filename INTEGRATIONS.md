@@ -98,7 +98,7 @@ ocr config set model <model-id-from-the-gateway>
 |---|---|
 | `ADMINWRIGHT_OCR_BIN` | The `ocr` executable to run instead of `ocr` on PATH. A value that names no file is an error (exit 2 naming the variable), never "ocr is not on PATH". |
 | `ADMINWRIGHT_NODE_BIN` | Windows npm installs only: the `node` that runs the resolved `ocr.js` (see below). Default: the `node.exe` beside the shim, then `node` on PATH. |
-| `ADMINWRIGHT_OCR_TIMEOUT` | Seconds one `ocr` call may run before it and its child processes are stopped (default 900); `--timeout` on `diff`/`scan` overrides it. |
+| `ADMINWRIGHT_OCR_TIMEOUT` | Seconds one `ocr` call may run before it and its child processes are stopped (default 900); `--timeout` on `diff`/`scan` overrides it. Either must be a finite positive number (`inf` is refused, exit 2); a value above 86400 (a day) is lowered to 86400 with a note. |
 | `OCR_NO_UPDATE` | Set to `1` by the bridge on every `ocr` call. The npm launcher otherwise checks npm for a newer version and can run `npm i -g` in the background each time it starts. |
 
 ### The three commands
@@ -127,19 +127,31 @@ closes that agent's own earlier unrecorded bundle, and so does a `diff` that fin
 to review; bundles of other agents, or of runs without `--agent`, are never touched.
 
 Endpoint engine (`--engine ocr`, needs provider config): runs
-`ocr review --audience agent --format json` itself, keeps the raw JSON as evidence, and
-persists findings directly. A run that did not complete — `ocr` exited non-zero, the
-reply says `status: failed`, or its `terminal_state` is not `completed` — exits 2 with
-`ocr`'s own message; it is never reported as "0 finding(s) recorded". If the run
-completed but reports files it could not review (`coverage.failed`), the findings for the
-files it did review are still recorded, the unreviewed paths are listed, and the exit is 2
-so the gap list is not mistaken for full coverage. Range and commit modes:
-`--from main --to feature`, or `--commit <hash>`.
+`ocr review --audience agent --format json` itself, keeps the raw JSON as evidence
+(`.admin-console/ocr-diff-<timestamp>-<pid>.json`; `scan` writes `ocr-scan-...`), and
+persists findings directly. What happens next depends on how `ocr` says the run ended: the
+reply's `status`, which repeats the run manifest's `terminal_state` (`ocr` 1.8.5 and later).
+Replies recorded from `ocr` 1.12.9 are in `tests/fixtures/ocr/`, and CI runs the bridge
+against the real CLI at 1.9.6 and at npm's latest.
+
+| `ocr` reports | Meaning | The bridge |
+|---|---|---|
+| `complete` | every selected file was reviewed | records the findings; exit 1, or 0 when there are none |
+| `partial` (`ocr` itself exits 0) | some files failed, usually at the provider | records the findings that exist and prints every file in `coverage.failed` with its classification and reason; exit 2 |
+| `failed`, or `ocr` exits non-zero | the run failed, or every selected file did | records nothing and prints `ocr`'s own message and the failed files; exit 2. The provider set-up hint appears only when the failure is a provider or configuration one |
+| `skipped` | nothing was selected: no changes, or only excluded files changed | prints "nothing to review"; exit 0 |
+
+`scan` has no run manifest: its `status` is `success`, `completed_with_warnings` or
+`completed_with_errors`, a file it could not scan is named in `warnings[]`, and
+`completed_with_errors` is handled like `partial`. A state the bridge does not know (a newer
+`ocr`) keeps the findings but exits 2, because nothing confirms the coverage. A failed run is
+never reported as "0 finding(s) recorded". Range and commit modes: `--from main --to feature`,
+or `--commit <hash>`.
 
 **2. `record` — persist delegate findings as gaps.**
 
 ```bash
-python <skill-dir>/scripts/code_review.py record --manifest <project-root>/.admin-console/manifest.json --bundle <the bundle diff printed> --findings @findings.json
+python <skill-dir>/scripts/code_review.py record --manifest <project-root>/.admin-console/manifest.json --bundle <the bundle diff printed> --findings-file findings.json
 ```
 
 where `findings.json` is:
@@ -156,17 +168,37 @@ where `findings.json` is:
 }
 ```
 
-`--findings` accepts inline JSON, `@file` (a UTF-8 BOM is tolerated), or `-` (stdin). Prefer
-`@file`: a long inline payload can exceed the operating system's command-line limit
-(about 32k characters on Windows), and quoting JSON in PowerShell is fragile.
+Pass the payload as a file with `--findings-file <path>` (what `diff` prints), or with
+`--findings`, which takes inline JSON, `'@<path>'` or `-` for stdin. Prefer the file: a long
+inline payload can exceed the operating system's command-line limit (about 32k characters on
+Windows), and PowerShell strips the double quotes out of inline JSON. A file or stdin may be
+UTF-8, with or without a byte-order mark, or UTF-16 with one; anything else is refused with
+exit 2 and a note to re-save the file as UTF-8, never guessed at.
+
+Windows PowerShell 5.1 specifics (PowerShell 7 writes and pipes UTF-8 and needs none of this):
+
+- `ConvertTo-Json ... > findings.json` and `Out-File` write UTF-16LE with a byte-order mark:
+  accepted. Plain `Set-Content` writes the ANSI code page: refused; add `-Encoding utf8`.
+- Quote the `@` form, `--findings '@findings.json'`. A bare leading `@` is PowerShell's
+  splatting operator and the line does not parse. `--findings-file` needs no quoting.
+- A pipe into `--findings -` is encoded with `$OutputEncoding`, which is ASCII by default:
+  every non-ASCII character arrives as `?`, the record succeeds, and the gap text is wrong,
+  with nothing the script can detect. Use `--findings-file`, or set
+  `$OutputEncoding = [System.Text.UTF8Encoding]::new()` before piping.
 
 *Which bundle.* `--bundle` names it. Without the flag, `record` uses the one live bundle
 beside the manifest: not yet recorded and less than 24 hours old. Several live bundles are
 refused (exit 2, listing them), because guessing would check your findings against another
 agent's review. A bundle older than 24 hours is ignored with a notice. A successful `record`
-closes its bundle, so it neither gates nor is checked against the next `record`; the file
-stays, holds the skip reasons under `closed.skipped`, and is what the gaps cite as evidence.
-A refused `record` leaves the bundle open.
+closes its bundle, so it neither gates nor is checked against the next `record` (the file
+stays until you delete it, with the skip reasons under `closed.skipped` and the name of the
+record it produced under `closed.record`). A refused `record` leaves the bundle open and
+writes nothing.
+
+*The record.* Every successful `record` writes
+`.admin-console/ocr-record-<timestamp>-<pid>.json`: the findings and skips as submitted, and,
+when a bundle was used, the bundle's mode, refs, agent and reviewable files. That file, not
+the bundle, is what the gaps cite, and the summary line names it (`record=<path>`).
 
 *Coverage.* With a bundle, every bundled file must end in one list or the other (a skip
 entry needs a `path` and a `reason`), and only bundled paths may appear in either — silent
@@ -184,14 +216,29 @@ category is recorded as `other` with a notice) and appears in `emit --format gap
 like any other finding. Every such gap carries `source: "ocr"` and never an `entity` or
 `capability` field: the validator ignores OCR-sourced gaps when it decides whether a
 lifecycle state has an accepted escape, so review text that happens to mention a state
-name cannot silence a lifecycle check. The gap's rationale ends in `fp:<12 hex>`, a
-fingerprint of `(path, start_line, content)`: a finding that is already an open, accepted
-or blocked gap is not written again (the summary says `N already recorded`, and the exit
-stays 1 because findings still exist), while a gap marked `fixed` that comes back is
-recorded anew. Findings are written as one atomic batch, so a refused `record` leaves the
-manifest untouched and re-running after a refusal cannot duplicate gaps. Bundles and raw
-`ocr-*.json` output stay under `.admin-console/` because gaps cite them as evidence; keep
-them with the manifest.
+name cannot silence a lifecycle check. Each gap also carries `fingerprint`, 12 hex
+characters identifying `(path, start_line, content)`: a finding that is already an open,
+accepted or blocked gap is not written again (the summary says `N already recorded`, and
+the exit stays 1 because findings still exist), while a gap marked `fixed` that comes back
+is recorded anew. To accept a finding, `set` its `status` to `accepted` and write your own
+accepted-risk `rationale`; the fingerprint lives in its own field, so the next run still
+recognises it (a whole-object `set` that drops the field makes it new again). Gaps recorded
+before the field existed carry the key at the end of their rationale as `fp:<12 hex>`,
+which is honoured for as long as that text stays. Findings are written as one atomic batch,
+so a refused `record` leaves the manifest untouched and re-running after a refusal cannot
+duplicate gaps.
+
+*What to commit.* Everything the bridge writes sits beside the manifest in
+`.admin-console/`:
+
+| File | What it is | Commit it? |
+|---|---|---|
+| `ocr-bundle*.json` | one delegate review's work order, written by `diff` | No. Transient and git-ignored; delete it once recorded |
+| `ocr-record-*.json` | what a `record` submitted, with the bundle's file list | Yes: the gaps cite it |
+| `ocr-diff-*.json`, `ocr-scan-*.json` | the raw `ocr` reply of an endpoint `diff` or `scan` | Yes: the gaps cite it |
+
+Commit the evidence with the manifest, so a clone or a CI checkout can follow every OCR gap
+to the review that produced it.
 
 **3. `scan` — Audit mode.** Full-file review of code no diff covers (endpoint engine
 only; delegate mode has no full-file scan):
@@ -204,9 +251,9 @@ python <skill-dir>/scripts/code_review.py scan --manifest <project-root>/.admin-
 
 | Code | Meaning |
 |---|---|
-| 0 | Clean, or nothing reviewable, or `ocr` absent (nothing was blocked) |
+| 0 | Clean, or nothing reviewable (an endpoint review `ocr` reports as `skipped` included), or `ocr` absent (nothing was blocked) |
 | 1 | Findings recorded as gaps (or already recorded from an earlier run) — read them |
-| 2 | Usage/IO/validation failure: a refused `add` (gaps go in as one all-or-nothing batch — the manifest is left unmodified); a wrong `ADMINWRIGHT_OCR_BIN`, missing rule file or unresolvable Windows shim; a timeout; an endpoint review that failed. Also an endpoint review that could not review some files: its findings for the other files *were* recorded, and the unreviewed paths are printed |
+| 2 | Usage/IO/validation failure: a refused `add` (gaps go in as one all-or-nothing batch — the manifest is left unmodified); a wrong `ADMINWRIGHT_OCR_BIN`, missing rule file or unresolvable Windows shim; a timeout; an endpoint review or scan that failed (nothing recorded). Also one that ended `partial` (scan: `completed_with_errors`) or in a state the bridge does not know: its findings *were* recorded, and the files `ocr` could not review are printed with their reasons |
 | 3 | Intentionally unused — capability claim conflicts do not apply to this script |
 
 `--strict` flips "ocr absent" from exit 0 to exit 2, for callers that want the pass
@@ -267,20 +314,32 @@ bundle is yours alone.
   extensionless npm shell shim (`ocr` beside `ocr.cmd`), and no `ocr.cmd`/`ocr.exe`
   sibling was found. Point it at `ocr.cmd`, or unset it and let the script resolve `ocr`
   from PATH. The npm install does not create an `ocr.exe`.
-- **"endpoint engine needs `ocr config provider`"** — the endpoint review failed to start
-  or complete: you used `--engine ocr` or `scan` without configuring a provider (configure
-  it, or use the delegate default), or the provider rejected the request; the line above
-  the hint is `ocr`'s own message.
-- **"ocr could not review N file(s); coverage is incomplete"** — the endpoint run completed
-  but some files failed. Findings for the others were recorded; fix the cause (usually a
-  provider limit) and re-run — findings already recorded are not duplicated.
+- **"ocr diff did not complete (...)" / "ocr scan did not complete (...)"** — the run
+  failed and nothing was recorded; the rest of the line and any `ocr:` lines are `ocr`'s own
+  words. With **"hint: the LLM provider is missing, unreachable or refusing requests"** it
+  failed at the provider: `--engine ocr` or `scan` without a configured provider (configure
+  it, or use the delegate default), a wrong URL or key, or a gateway that is down. Without
+  the hint it is something else, such as an unknown `--from`/`--to`/`--commit` ref.
+- **"ocr could not review N file(s) of M selected; coverage is incomplete"** — the run
+  ended `partial`. Findings for the other files were recorded; each failed file is listed
+  with `ocr`'s classification (`provider`, `timeout`, `budget`, ...). A provider failure
+  while other files succeeded is usually a rate limit or an upstream error: re-run later —
+  findings already recorded are not duplicated.
+- **"ocr reported ..., a state this bridge does not know"** — a newer `ocr` uses a word the
+  bridge has not seen. Its findings were recorded; exit 2 because nothing confirms the
+  coverage. Compare `ocr --version` with the versions named under "The three commands".
 - **"ocr did not finish within N seconds"** — `ocr` and its children were stopped. Narrow the
   review, or raise `--timeout` / `ADMINWRIGHT_OCR_TIMEOUT`.
 - **"the --rule file ... does not exist" / "the shipped rules ... are missing"** — the review
   is refused rather than run without the admin-console rules. Fix the path, or restore
   `assets/adminwright-ocr-rules.json`.
-- **"nothing to review"** — the workspace has no changes; pass `--from/--to` or
-  `--commit` for a range, or use `scan`.
+- **"nothing to review"** — the workspace has no changes, or only files the rules exclude
+  (`ocr` reports that as `skipped`); pass `--from/--to` or `--commit` for a range, or use
+  `scan`.
+- **"the findings file ... is not valid UTF-8" / "standard input is not valid UTF-8"** — the
+  payload is in a legacy code page, typically from Windows PowerShell 5.1's plain
+  `Set-Content`. Write it with `Set-Content -Encoding utf8`, `Out-File` or `>` and pass
+  `--findings-file`; nothing was recorded.
 - **"several review bundles are waiting to be recorded"** — more than one live bundle sits
   beside the manifest (concurrent agents, or an abandoned run). Pass `--bundle <path>` with
   the path your `diff` printed.
@@ -295,10 +354,12 @@ bundle is yours alone.
 
 Pull requests to adminwright itself get a non-blocking OCR review via
 [.github/workflows/ocr-advisory.yml](.github/workflows/ocr-advisory.yml) — findings as
-PR comments, never a required check, skipped until the `OCR_LLM_URL`/`OCR_LLM_TOKEN`
-secrets exist (they are mapped into job `env`, because a job-level `if` cannot see the
-`secrets` context; the review step gates on `env`). The action is pinned to a release
-SHA, and its `ocr_version` input pins the npm package it installs to the same release
+PR comments, never a required check. The job always runs; its review step is skipped
+until the `OCR_LLM_URL`/`OCR_LLM_TOKEN` secrets exist. An `if` cannot read the `secrets`
+context, so the job `env` holds only `HAS_OCR`, a true/false derived from them, and the
+secret values are passed to the review step alone, in its `with:` (the composite action
+maps them into the environment of its own `ocr review` step only). The action is pinned to
+a release SHA, and its `ocr_version` input pins the npm package it installs to the same release
 (`1.9.6`), so the workflow no longer installs `latest` at run time; `OCR_NO_UPDATE=1` in
 the job environment stops the launcher's own background update, which would otherwise run
 `npm i -g` for the newest version even after this pin. Residual exposure, stated plainly:
@@ -308,5 +369,8 @@ binary comes from a per-platform optional package at the same version or, when t
 unavailable, from the release's GitHub assets checked against a checksum file published
 beside them (same origin: it detects corruption, not a compromised release); and the
 reviewed PR contents plus `OCR_LLM_TOKEN` are visible to that code and to the configured
-LLM endpoint. Bump the action SHA and `ocr_version` together, and read the release notes
-when you do. See [CONTRIBUTING.md](CONTRIBUTING.md) "Advisory OCR review".
+LLM endpoint. Bump the action SHA and `ocr_version` together, by hand, and read the release
+notes when you do: Dependabot ignores this action because it would move the SHA without the
+input, and `tests/test_code_review.py` (`AdvisoryPins`) fails when the SHA's version comment,
+`ocr_version` and the `ocr-smoke` CI pin disagree. See [CONTRIBUTING.md](CONTRIBUTING.md)
+"Advisory OCR review".

@@ -852,6 +852,10 @@
           "capability": {
             "type": "string",
             "description": "Capability id the gap is about; same role as entity."
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "Written by the code-review bridge: 12 hex characters identifying the finding (path, start line, content) across re-runs, so one that is already an open, accepted or blocked gap is not recorded again. Leave it in place when you edit the gap's status or rationale."
           }
         }
       }

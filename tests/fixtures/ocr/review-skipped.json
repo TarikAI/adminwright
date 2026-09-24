@@ -1,0 +1,19 @@
+{
+  "captured_with": "open-code-review v1.12.9 (bccbc15f) windows/amd64",
+  "scenario": "no changes: status/terminal_state skipped, exit 0",
+  "argv": [
+    "ocr",
+    "review",
+    "--audience",
+    "agent",
+    "--format",
+    "json",
+    "--rule",
+    "<skill>/assets/adminwright-ocr-rules.json",
+    "--repo",
+    "<repo>"
+  ],
+  "returncode": 0,
+  "stdout": "{\n  \"status\": \"skipped\",\n  \"llm\": {\n    \"provider\": \"fakegw\",\n    \"model\": \"fake-model\"\n  },\n  \"message\": \"Review skipped: no items were selected.\",\n  \"summary\": {\n    \"files_reviewed\": 0,\n    \"comments\": 0,\n    \"total_tokens\": 0,\n    \"input_tokens\": 0,\n    \"output_tokens\": 0,\n    \"elapsed\": \"0s\"\n  },\n  \"tool_calls\": {\n    \"total\": 0,\n    \"by_tool\": {},\n    \"failure\": 0,\n    \"failure_by_tool\": {},\n    \"failure_details\": []\n  },\n  \"comments\": [],\n  \"session_id\": \"61db67a9-9490-43ae-a735-8214b016fc3a\",\n  \"manifest\": {\n    \"schema_version\": \"ocr.run-manifest/v1\",\n    \"run_id\": \"61db67a9-9490-43ae-a735-8214b016fc3a\",\n    \"operation\": \"review\",\n    \"terminal_state\": \"skipped\",\n    \"repository\": {},\n    \"input\": {\n      \"mode\": \"workspace\",\n      \"resolved_base\": \"a3c48085a3afa3a3269f6c3f7c3cb2c85389ec77\",\n      \"source_artifact_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"\n    },\n    \"execution\": {\n      \"ocr_version\": \"v1.12.9\",\n      \"provider\": \"fakegw\",\n      \"model\": \"fake-model\",\n      \"configured_concurrency\": 8,\n      \"rule_config_sha256\": \"7dc81c90971a97a3d35126c4f9a5f94b681d4e550a4f99577e6efa6b07232497\",\n      \"runtime_config_sha256\": \"0b7012dfbe60949cf1e5531e2ee27192d43806c0d38b29547ca64d4dc58d2e41\"\n    },\n    \"coverage\": {\n      \"selected\": [],\n      \"completed\": [],\n      \"reused\": [],\n      \"failed\": [],\n      \"waived\": []\n    },\n    \"elapsed_ms\": 195\n  }\n}\n",
+  "stderr": ""
+}

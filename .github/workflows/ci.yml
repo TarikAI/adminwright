@@ -57,12 +57,24 @@ jobs:
         env:
           PYTHONIOENCODING: cp1252
 
-  # Runs the two tests that execute the real `ocr` binary. Allowed to fail: they
-  # depend on a third-party npm package and its native binary, which are not ours.
+  # Runs RealCliSmoke (tests/test_code_review.py) against the real `ocr` CLI: every
+  # subcommand and flag the bridge passes must exist in `ocr ... --help`, and real
+  # reviews, a real scan and a real delegate diff against a stand-in LLM endpoint on
+  # 127.0.0.1 must end in the verdicts the bridge promises (complete recorded, partial
+  # recorded with the failed file named). No secrets and no network beyond npm.
+  # Two legs: the version ocr-advisory.yml pins (its action SHA and ocr_version; the
+  # AdvisoryPins test keeps this leg on the same release), which must pass, and npm's
+  # latest, which may fail: it is a third-party release nobody has reviewed yet, so
+  # a red latest leg is the early warning, not a broken build.
   ocr-smoke:
-    name: real ocr smoke (allowed to fail)
+    name: real ocr smoke (${{ matrix.ocr }})
     runs-on: ubuntu-latest
-    continue-on-error: true
+    timeout-minutes: 15
+    continue-on-error: ${{ matrix.ocr == 'latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ocr: ["1.9.6", "latest"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -71,11 +83,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install -g @alibaba-group/open-code-review@1.9.6
+      - run: npm install -g "@alibaba-group/open-code-review@${{ matrix.ocr }}"
         env:
           OCR_NO_UPDATE: "1"
-      - name: Run the real-binary tests
-        run: python -m unittest discover -s tests -p "test_code_review.py" -v
+      - run: ocr --version
+        env:
+          OCR_NO_UPDATE: "1"
+      # ADMINWRIGHT_REAL_OCR makes a missing `ocr` a failure rather than a skip.
+      - name: Run the real-binary smoke tests
+        run: python -m unittest discover -s tests -p "test_code_review.py" -k RealCliSmoke -v
         env:
           ADMINWRIGHT_REAL_OCR: "1"
           OCR_NO_UPDATE: "1"
