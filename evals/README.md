@@ -12,6 +12,7 @@ always correct, and nobody notices until a user does.
 |---|---|---|
 | `saas-clean` | Multi-tenant B2B SaaS: tenants, subscriptions, a Stripe integration | Passes at every profile. Proves honest work is never blocked |
 | `logistics-gaps` | Dispatch platform with named, deliberate defects | Each defect targets one rule. If one stops firing, that guarantee has silently disappeared |
+| `gate-matrix` | One console broken on purpose | Every rule the validator advertises fires at least once. `tests/test_rule_coverage.py` fails when a rule is in `RULES` but in no expectation (or, for the few this fixture cannot reach, in no named test) |
 
 `saas-clean` is worth reading as a worked example: it is the smallest manifest that satisfies
 the `regulated` profile honestly, including a `gaps[]` entry explaining why no admin command
@@ -30,8 +31,10 @@ CI runs `evals/run.py` on every push, across the full OS and Python matrix.
 
 ## When a fixture flips
 
-The runner compares the set of rules that fire, per profile, with severity — not message
-text, so wording can improve freely.
+The runner compares the rules that fire per profile, with their severity and how many times
+each fires. It does not compare message text, so wording can improve freely. Fixtures pin
+their `platform.id` and `validatedWith` stamp, so regenerating them on any commit is
+byte-for-byte stable.
 
 A flip means one of two things is true, and you must decide which:
 

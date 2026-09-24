@@ -33,6 +33,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -169,6 +170,7 @@ PLACEHOLDER_PATTERN = re.compile(
     r"\b(?:" + _PLACEHOLDER_WORDS + r"|sample(?:s)?|random(?:ly)?)\b", re.I
 )
 FILE_PLACEHOLDER_PATTERN = re.compile(r"\b(?:" + _PLACEHOLDER_WORDS + r")\b", re.I)
+WHOLE_PLACEHOLDER_PATTERN = re.compile(r"^(?:" + _PLACEHOLDER_WORDS + r")$", re.I)
 # Framework idioms that contain a banned word and mean nothing by it.
 FRAMEWORK_CALLS = re.compile(
     r"jest\.mock\(|vi\.mock\(|sinon\.stub\(|unittest\.mock|getByPlaceholderText"
@@ -177,24 +179,133 @@ FRAMEWORK_CALLS = re.compile(
 )
 HARDCODE_PATTERN = re.compile(r"\bhard[- ]?cod(?:e|ed|ing|es)\b", re.I)
 
-# Cyrillic and Greek letters that render identically to Latin ones. Without
-# folding these, 'm<Cyrillic o>ckRepository' reads as a normal identifier to the
-# scanner while reading as "mock" to every human reviewing the diff.
-CONFUSABLES = str.maketrans(
-    {
-        "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c",
-        "\u0445": "x", "\u0443": "y", "\u0456": "i", "\u0458": "j", "\u04bb": "h",
-        "\u043a": "k", "\u0455": "s", "\u0501": "d", "\u051b": "q", "\u051d": "w",
-        "\u0261": "g", "\u0131": "i", "\u03bd": "v", "\u03c1": "p",
-        "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H",
-        "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
-        "\u03a1": "P", "\u03a4": "T", "\u03a5": "Y", "\u03a7": "X", "\u03bf": "o",
-        "\u03b1": "a",
-        "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041a": "K", "\u041c": "M",
-        "\u041d": "H", "\u041e": "O", "\u0420": "P", "\u0421": "C", "\u0422": "T",
-        "\u0425": "X", "\u0406": "I", "\u0405": "S", "\uff4f": "o", "\uff41": "a",
-    }
+# BEGIN GENERATED: confusables. scripts/maintainer/gen_confusables.py rewrites this block.
+# UTS #39 confusables.txt 18.0.0 (2026-08-06, 01:05:35 GMT) and DerivedCoreProperties.txt (2026-08-07, 16:19:42 GMT).
+# Code point -> the lower-case ASCII letter or digit it is confusable with: UTS #39 skeleton
+# equality, plus small capitals, kappa, and Cyrillic ka and em, whose own prototypes are not
+# ASCII. Entries NFKD already produces on Unicode 13.0 (Python 3.9) are left out, so the
+# table is applied after NFKD.
+CONFUSABLE_TO_ASCII = {
+    0xA1:'i',0xD7:'x',0xFE:'p',0x131:'i',0x138:'k',0x184:'b',0x18D:'g',0x192:'f',0x196:'i',
+    0x1A6:'r',0x1A7:'2',0x1B7:'3',0x1BC:'5',0x1BD:'s',0x1BF:'p',0x1C0:'l',0x21C:'3',0x222:'8',
+    0x223:'8',0x237:'j',0x24C:'r',0x251:'a',0x261:'g',0x262:'g',0x263:'y',0x269:'i',0x26A:'i',
+    0x26F:'w',0x274:'n',0x280:'r',0x284:'f',0x28B:'u',0x28D:'m',0x28F:'y',0x299:'b',0x29C:'h',
+    0x29F:'l',0x37F:'j',0x391:'a',0x392:'b',0x395:'e',0x396:'z',0x397:'h',0x399:'i',0x39A:'k',
+    0x39C:'m',0x39D:'n',0x39F:'o',0x3A1:'p',0x3A4:'t',0x3A5:'y',0x3A7:'x',0x3B1:'a',0x3B3:'y',
+    0x3B9:'i',0x3BA:'k',0x3BD:'v',0x3BF:'o',0x3C1:'p',0x3C3:'o',0x3C4:'t',0x3C5:'u',0x3DC:'f',
+    0x3E8:'2',0x3EC:'6',0x3ED:'o',0x3F3:'j',0x3F8:'p',0x3FA:'m',0x405:'s',0x406:'i',0x408:'j',
+    0x410:'a',0x412:'b',0x415:'e',0x417:'3',0x41A:'k',0x41C:'m',0x41D:'h',0x41E:'o',0x420:'p',
+    0x421:'c',0x422:'t',0x423:'y',0x425:'x',0x42C:'b',0x430:'a',0x431:'6',0x432:'b',0x433:'r',
+    0x435:'e',0x43A:'k',0x43C:'m',0x43D:'h',0x43E:'o',0x440:'p',0x441:'c',0x442:'t',0x443:'y',
+    0x445:'x',0x448:'w',0x455:'s',0x456:'i',0x458:'j',0x461:'w',0x474:'v',0x475:'v',0x4AE:'y',
+    0x4AF:'y',0x4BA:'h',0x4BB:'h',0x4BD:'e',0x4C0:'i',0x4CF:'l',0x4E0:'3',0x501:'d',0x50C:'g',
+    0x50D:'g',0x51A:'q',0x51B:'q',0x51C:'w',0x51D:'w',0x545:'3',0x54D:'u',0x54F:'s',0x555:'o',
+    0x560:'m',0x561:'w',0x563:'q',0x566:'q',0x570:'h',0x575:'j',0x578:'n',0x57C:'n',0x57D:'u',
+    0x581:'g',0x582:'i',0x584:'f',0x585:'o',0x5C0:'l',0x5D5:'l',0x5D8:'v',0x5DF:'l',0x5E1:'o',
+    0x627:'l',0x647:'o',0x661:'1',0x665:'o',0x667:'v',0x6BE:'o',0x6C1:'o',0x6D5:'o',0x6F1:'1',
+    0x6F5:'o',0x6F7:'v',0x7C0:'0',0x7CA:'l',0x7CB:'o',0x7CC:'y',0x7D3:'f',0x7D5:'b',0x7E0:'t',
+    0x840:'o',0x964:'l',0x966:'o',0x969:'3',0x9E6:'o',0x9EA:'8',0x9ED:'9',0xA66:'o',0xA67:'9',
+    0xA6A:'8',0xAE6:'o',0xAE9:'3',0xB03:'8',0xB20:'o',0xB66:'o',0xB68:'9',0xBE6:'o',0xC02:'o',
+    0xC66:'o',0xC82:'o',0xCE6:'0',0xD02:'o',0xD1F:'s',0xD20:'o',0xD66:'o',0xD6D:'9',0xD82:'o',
+    0xE50:'o',0xED0:'o',0x1004:'c',0x101D:'o',0x1040:'o',0x104A:'l',0x105A:'c',0x10B9:'h',
+    0x10BD:'s',0x10C7:'2',0x10CD:'z',0x10E7:'y',0x10FD:'s',0x10FF:'o',0x110B:'o',0x11BC:'o',
+    0x1200:'u',0x12D0:'o',0x13A0:'d',0x13A1:'r',0x13A2:'t',0x13A5:'i',0x13A9:'y',0x13AA:'a',
+    0x13AB:'j',0x13AC:'e',0x13B3:'w',0x13B7:'m',0x13BB:'h',0x13BD:'y',0x13C0:'g',0x13C2:'h',
+    0x13C3:'z',0x13CE:'4',0x13CF:'b',0x13D2:'r',0x13D4:'w',0x13D5:'s',0x13D9:'v',0x13DA:'s',
+    0x13DE:'l',0x13DF:'c',0x13E2:'p',0x13E6:'k',0x13E7:'d',0x13EE:'6',0x13F3:'g',0x13F4:'b',
+    0x13FB:'g',0x13FC:'b',0x142F:'v',0x144C:'u',0x146D:'p',0x146F:'d',0x1472:'b',0x148D:'j',
+    0x14AA:'l',0x14BF:'2',0x1541:'x',0x157C:'h',0x157D:'x',0x1587:'r',0x15AF:'b',0x15B4:'f',
+    0x15C5:'a',0x15DE:'d',0x15EA:'d',0x15F0:'m',0x15F7:'b',0x1616:'2',0x166D:'x',0x166E:'x',
+    0x16B7:'x',0x16C1:'l',0x16D0:'l',0x16D5:'k',0x16D6:'m',0x1702:'3',0x172A:'7',0x1763:'x',
+    0x17E0:'o',0x1A45:'o',0x1A80:'o',0x1A90:'o',0x1BEA:'o',0x1BEC:'x',0x1C82:'o',0x1C83:'c',
+    0x1C84:'7',0x1C95:'3',0x1CB7:'2',0x1CBD:'s',0x1CBF:'o',0x1CF5:'x',0x1D00:'a',0x1D04:'c',
+    0x1D05:'d',0x1D07:'e',0x1D0A:'j',0x1D0B:'k',0x1D0D:'m',0x1D0F:'o',0x1D11:'o',0x1D18:'p',
+    0x1D1B:'t',0x1D1C:'u',0x1D20:'v',0x1D21:'w',0x1D22:'z',0x1D26:'r',0x1D29:'p',0x1D83:'g',
+    0x1D8C:'y',0x1E9D:'f',0x1EFF:'y',0x212E:'e',0x21BF:'l',0x2223:'l',0x2228:'v',0x222A:'u',
+    0x22A4:'t',0x22C1:'v',0x22C3:'u',0x22FF:'e',0x2373:'i',0x2374:'p',0x237A:'a',0x23FD:'l',
+    0x2502:'l',0x2503:'l',0x2573:'x',0x27D9:'t',0x292B:'x',0x292C:'x',0x29E2:'w',0x2A2F:'x',
+    0x2C6B:'z',0x2C6C:'z',0x2C82:'b',0x2C83:'b',0x2C85:'r',0x2C8C:'z',0x2C8D:'z',0x2C8E:'h',
+    0x2C8F:'h',0x2C92:'i',0x2C93:'i',0x2C94:'k',0x2C95:'k',0x2C98:'m',0x2C99:'m',0x2C9A:'n',
+    0x2C9B:'n',0x2C9C:'3',0x2C9E:'o',0x2C9F:'o',0x2CA2:'p',0x2CA3:'p',0x2CA4:'c',0x2CA5:'c',
+    0x2CA6:'t',0x2CA7:'t',0x2CA8:'y',0x2CA9:'y',0x2CAC:'x',0x2CBD:'w',0x2CC4:'3',0x2CCA:'9',
+    0x2CCB:'9',0x2CCC:'3',0x2CCE:'p',0x2CCF:'p',0x2CD0:'l',0x2CD1:'l',0x2CD2:'6',0x2CD3:'6',
+    0x2CDC:'6',0x2D2D:'z',0x2D38:'v',0x2D39:'e',0x2D4A:'l',0x2D4F:'l',0x2D54:'o',0x2D55:'q',
+    0x2D5D:'x',0x3007:'o',0x3112:'t',0x311A:'y',0x4E05:'t',0x4E2B:'y',0xA4D0:'b',0xA4D1:'p',
+    0xA4D2:'d',0xA4D3:'d',0xA4D4:'t',0xA4D6:'g',0xA4D7:'k',0xA4D9:'j',0xA4DA:'c',0xA4DC:'z',
+    0xA4DD:'f',0xA4DF:'m',0xA4E0:'n',0xA4E1:'l',0xA4E2:'s',0xA4E3:'r',0xA4E6:'v',0xA4E7:'h',
+    0xA4EA:'w',0xA4EB:'x',0xA4EC:'y',0xA4EE:'a',0xA4F0:'e',0xA4F2:'l',0xA4F3:'o',0xA4F4:'u',
+    0xA50B:'t',0xA543:'6',0xA557:'b',0xA56F:'l',0xA576:'s',0xA589:'8',0xA5CB:'e',0xA644:'2',
+    0xA647:'i',0xA68D:'t',0xA6C9:'z',0xA6DF:'v',0xA6EF:'2',0xA730:'f',0xA731:'s',0xA75A:'2',
+    0xA76A:'3',0xA76E:'9',0xA76F:'9',0xA781:'l',0xA798:'f',0xA799:'f',0xA79F:'u',0xA7AB:'3',
+    0xA7AE:'i',0xA7AF:'q',0xA7B2:'j',0xA7B3:'x',0xA7B4:'b',0xA7FA:'w',0xA7FE:'l',0xA830:'l',
+    0xA8CE:'l',0xAA5D:'l',0xAB32:'e',0xAB35:'f',0xAB3D:'o',0xAB47:'r',0xAB48:'r',0xAB4E:'u',
+    0xAB52:'u',0xAB5A:'y',0xAB64:'a',0xAB70:'d',0xAB71:'r',0xAB72:'t',0xAB75:'i',0xAB7A:'a',
+    0xAB7B:'j',0xAB7C:'e',0xAB81:'r',0xAB83:'w',0xAB87:'m',0xAB8B:'h',0xAB90:'g',0xAB93:'z',
+    0xAB9E:'4',0xABA2:'r',0xABA4:'w',0xABA9:'v',0xABAA:'s',0xABAE:'l',0xABAF:'c',0xABB2:'p',
+    0xABB6:'k',0xABBE:'6',0x1017E:'f',0x1018B:'d',0x10282:'b',0x10286:'e',0x10287:'f',
+    0x1028A:'l',0x10290:'x',0x10292:'o',0x10295:'p',0x10296:'s',0x10297:'t',0x102A0:'a',
+    0x102A1:'b',0x102A2:'c',0x102A5:'f',0x102AB:'o',0x102B0:'m',0x102B1:'t',0x102B2:'y',
+    0x102B4:'x',0x102CF:'h',0x102F5:'z',0x10301:'b',0x10302:'c',0x10309:'l',0x1030F:'o',
+    0x10311:'m',0x10315:'t',0x10317:'x',0x1031A:'8',0x1031C:'b',0x10320:'l',0x10322:'x',
+    0x10404:'o',0x10415:'c',0x1041B:'l',0x10420:'s',0x1042C:'o',0x1043D:'c',0x10443:'l',
+    0x10448:'s',0x104B4:'r',0x104C2:'o',0x104CE:'u',0x104D2:'7',0x104EA:'o',0x104F6:'u',
+    0x10507:'z',0x1050E:'l',0x10513:'n',0x10516:'o',0x10518:'k',0x1051B:'c',0x1051D:'v',
+    0x10525:'f',0x10526:'l',0x10527:'x',0x10926:'l',0x1092C:'o',0x10C13:'x',0x10C17:'o',
+    0x10C1F:'v',0x10C20:'y',0x10C21:'m',0x10C3E:'l',0x10C82:'x',0x10CA5:'i',0x10CC2:'x',
+    0x10CFA:'l',0x10CFC:'x',0x10D07:'o',0x11047:'l',0x110C0:'l',0x11124:'o',0x11141:'l',
+    0x111C5:'l',0x11302:'o',0x113D4:'l',0x11445:'8',0x1144B:'l',0x114D0:'o',0x115C5:'l',
+    0x11641:'l',0x11700:'m',0x11706:'v',0x1170A:'w',0x1170E:'w',0x1170F:'w',0x118A0:'v',
+    0x118A2:'f',0x118A3:'l',0x118A4:'y',0x118A6:'e',0x118A9:'z',0x118AC:'9',0x118AE:'e',
+    0x118AF:'4',0x118B2:'l',0x118B5:'o',0x118B8:'u',0x118BB:'5',0x118BC:'t',0x118C0:'v',
+    0x118C1:'s',0x118C2:'f',0x118C3:'i',0x118C4:'y',0x118C6:'7',0x118C8:'o',0x118CA:'3',
+    0x118CC:'9',0x118D5:'6',0x118D6:'9',0x118D7:'o',0x118D8:'u',0x118DC:'y',0x118E0:'0',
+    0x118E3:'m',0x118E5:'z',0x118E6:'w',0x118E9:'c',0x118EC:'x',0x118EF:'w',0x118F2:'c',
+    0x11ABC:'z',0x11ABE:'n',0x11C41:'l',0x11DDA:'l',0x11DE0:'0',0x11DE1:'1',0x169C1:'9',
+    0x169FE:'8',0x16A19:'r',0x16AD6:'s',0x16AE9:'o',0x16D63:'l',0x16E82:'4',0x16E8A:'7',
+    0x16EAA:'i',0x16EB6:'b',0x16F08:'v',0x16F0A:'t',0x16F16:'l',0x16F28:'l',0x16F35:'r',
+    0x16F3A:'s',0x16F3B:'3',0x16F40:'a',0x16F42:'u',0x16F43:'y',0x1CCD6:'a',0x1CCD7:'b',
+    0x1CCD8:'c',0x1CCD9:'d',0x1CCDA:'e',0x1CCDB:'f',0x1CCDC:'g',0x1CCDD:'h',0x1CCDE:'i',
+    0x1CCDF:'j',0x1CCE0:'k',0x1CCE1:'l',0x1CCE2:'m',0x1CCE3:'n',0x1CCE4:'o',0x1CCE5:'p',
+    0x1CCE6:'q',0x1CCE7:'r',0x1CCE8:'s',0x1CCE9:'t',0x1CCEA:'u',0x1CCEB:'v',0x1CCEC:'w',
+    0x1CCED:'x',0x1CCEE:'y',0x1CCEF:'z',0x1CCF0:'0',0x1CCF1:'1',0x1CCF2:'2',0x1CCF3:'3',
+    0x1CCF4:'4',0x1CCF5:'5',0x1CCF6:'6',0x1CCF7:'7',0x1CCF8:'8',0x1CCF9:'9',0x1CEFC:'v',
+    0x1D100:'l',0x1D134:'c',0x1D1FE:'7',0x1D206:'3',0x1D207:'b',0x1D20C:'w',0x1D20D:'v',
+    0x1D212:'7',0x1D213:'f',0x1D216:'r',0x1D22A:'l',0x1D373:'t',0x1D377:'l',0x1DF5A:'a',
+    0x1DF6A:'a',0x1DF7D:'w',0x1DF81:'e',0x1E140:'0',0x1E141:'1',0x1E145:'v',0x1E2F0:'0',
+    0x1E2F2:'9',0x1E8C7:'l',0x1E8CB:'8',0x1ED01:'l',0x1F74C:'c',0x1F768:'t',
+}
+# Default_Ignorable_Code_Point ranges, inclusive: they render as nothing.
+DEFAULT_IGNORABLE_RANGES = (
+    (0xAD,0xAD),(0x34F,0x34F),(0x61C,0x61C),(0x115F,0x1160),(0x17B4,0x17B5),(0x180B,0x180F),
+    (0x200B,0x200F),(0x202A,0x202E),(0x2060,0x206F),(0x3164,0x3164),(0xFE00,0xFE0F),
+    (0xFEFF,0xFEFF),(0xFFA0,0xFFA0),(0xFFF0,0xFFF8),(0x1BCA0,0x1BCA3),(0x1D173,0x1D17A),
+    (0xE0000,0xE0FFF),
 )
+# END GENERATED: confusables
+
+# Not default-ignorable, but they render as an empty cell.
+BLANK_LOOKING = (0x2800, 0x1D159)  # BRAILLE PATTERN BLANK, MUSICAL SYMBOL NULL NOTEHEAD
+INVISIBLE_PATTERN = re.compile(
+    "["
+    + "".join(
+        re.escape(chr(low)) + ("" if low == high else "-" + re.escape(chr(high)))
+        for low, high in list(DEFAULT_IGNORABLE_RANGES) + [(point, point) for point in BLANK_LOOKING]
+    )
+    + "]"
+)
+# Capital look-alikes fold to capitals, so camelCase splitting still finds the hump in
+# 'mock' + Cyrillic DZE + 'ervice'.
+CONFUSABLES = {
+    point: (target.upper() if unicodedata.category(chr(point)) in ("Lu", "Lt") else target)
+    for point, target in CONFUSABLE_TO_ASCII.items()
+}
+# UTS #39 "highly restrictive" mixes: ordinary writing, not an attempt to disguise a word.
+ORDINARY_SCRIPT_MIXES = (
+    frozenset(("Latin", "Han", "Hiragana", "Katakana")),
+    frozenset(("Latin", "Han", "Bopomofo")),
+    frozenset(("Latin", "Han", "Hangul")),
+)
+_SCRIPT_ALIASES = {"CJK": "Han", "IDEOGRAPHIC": "Han", "KANGXI": "Han"}
 
 # Tokens dangerous enough that a substring match is worth the occasional false
 # positive. Word boundaries miss 'gmockRepositoryImpl' and 'usemockdata' because
@@ -228,17 +339,87 @@ def substring_hit(token):
     return SUBSTRING_PATTERN.search(SUBSTRING_EXCEPTIONS.sub("", token))
 
 
+def letter_scripts(token):
+    """The scripts of a token's letters, from the first word of each letter's Unicode name.
+
+    NFKC first, so fullwidth and mathematical letters report their base script. A name
+    that starts with no script (MODIFIER LETTER ..., SMALL ...) is script-neutral, as are
+    digits, marks and punctuation.
+    """
+    found = set()
+    for ch in unicodedata.normalize("NFKC", token):
+        if not unicodedata.category(ch).startswith("L"):
+            continue
+        try:
+            first = unicodedata.name(ch).split(" ", 1)[0]
+        except ValueError:
+            found.add("Unknown")  # newer than this interpreter's Unicode database
+            continue
+        if first not in ("MODIFIER", "SMALL", "SCRIPT", "TURNED", "REVERSED"):
+            found.add(_SCRIPT_ALIASES.get(first, first.title()))
+    return found
+
+
+def fold_token(token):
+    """One token as a reader sees it: invisibles dropped, accents split off, look-alikes mapped."""
+    token = INVISIBLE_PATTERN.sub("", token)
+    token = unicodedata.normalize("NFKD", token)
+    token = INVISIBLE_PATTERN.sub("", token)  # NFKD turns the Hangul fillers into U+1160
+    token = "".join(ch for ch in token if unicodedata.category(ch) not in ("Mn", "Me", "Cf"))
+    return token.translate(CONFUSABLES)
+
+
 def fold_confusables(text):
     """Reduce a string to what a human reads, so 'mo<ZWSP>ck' cannot hide a mock.
 
-    Format characters (zero-width space and joiner, BOM, soft hyphen, bidi marks)
-    are invisible; NFKD folds fullwidth and mathematical letters to ASCII and
-    splits accents off; the table then maps the Cyrillic and Greek look-alikes.
+    Invisible characters go (default-ignorables, the Hangul fillers, the Braille
+    blank); NFKD folds fullwidth and mathematical letters and splits accents off; a
+    table generated from Unicode's confusables data maps look-alikes to ASCII, so
+    Armenian 'm\u0585ck', Greek 'moc\u03ba' and small-capital '\u1d0d\u1d0f\u1d04\u1d0b' all read 'mock'.
+
+    A word that mixes scripts, or has Latin letters, is folded. A word written wholly in
+    one other script is left alone unless it folds to exactly a placeholder word:
+    folding Russian '\u041c\u043e\u0441\u043a\u0432\u0430' (Moscow) letter by letter gave 'Mockba' and a placeholder
+    error on an honest manifest.
     """
-    kept = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
-    decomposed = unicodedata.normalize("NFKD", kept)
-    plain = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
-    return plain.translate(CONFUSABLES)
+    if text.isascii():
+        return text
+    pieces = []
+    for piece in re.split(r"(\s+)", INVISIBLE_PATTERN.sub("", text)):
+        if not piece or piece.isspace() or piece.isascii():
+            pieces.append(piece)
+            continue
+        folded = fold_token(piece)
+        scripts = letter_scripts(piece)
+        mixed = len(scripts) > 1 and not any(scripts <= mix for mix in ORDINARY_SCRIPT_MIXES)
+        if not scripts or "Latin" in scripts or mixed:
+            pieces.append(folded)
+        elif WHOLE_PLACEHOLDER_PATTERN.match(re.sub(r"^\W+|\W+$", "", folded)):
+            pieces.append(folded)
+        else:
+            pieces.append(piece)
+    return "".join(pieces)
+
+
+def mask_prose_todo(text):
+    """Blank 'todo' where it is a word of prose rather than a to-do marker.
+
+    Spanish and Portuguese 'todo' and 'todos' mean 'all'; across a 388-language corpus
+    they were 136 of 147 placeholder hits. A marker keeps its shape: upper case
+    ('TODO'), a colon or parenthesis after it ('todo:', 'todo(ana)'), or a comment or
+    tag before it ('// todo', '# todo', '@todo').
+    """
+    def judge(match):
+        word = match.group(0)
+        if word.isupper():
+            return word
+        if text[:match.start()].rstrip().endswith(("//", "#", "@", "--", "*", ";")):
+            return word
+        if re.match(r"\s*[:(]", text[match.end():]):
+            return word
+        return " " * len(word)
+
+    return re.sub(r"\btodos?\b", judge, text, flags=re.I)
 
 
 URL_PREFIXES = ("http://", "https://")
@@ -248,6 +429,18 @@ LOCK_TIMEOUT_SECONDS = 30.0
 # Windows byte-range locks are mandatory, so the lock byte lives far past the
 # holder's pid line (see FileLock).
 _WINDOWS_LOCK_OFFSET = 1 << 20
+# The errors that mean "this filesystem cannot take OS locks", the only ones that justify
+# the soft fallback: a process on the fallback is not excluded by one holding the OS lock,
+# so falling back on any other error (EIO, EBADF) would let two writers in at once.
+_LOCK_UNSUPPORTED_ERRNOS = frozenset(
+    code for code in (
+        getattr(errno, "ENOSYS", None), getattr(errno, "ENOLCK", None),
+        getattr(errno, "EOPNOTSUPP", None), getattr(errno, "ENOTSUP", None),
+    ) if code is not None
+)
+# Opening the lock file can be refused for a moment on Windows while another process
+# creates it; a longer refusal is a real permission problem, not a holder.
+_LOCK_OPEN_GRACE_SECONDS = 0.5
 _LOCK_CONTENTION_ERRNOS = frozenset(
     code for code in (
         errno.EACCES, errno.EAGAIN, getattr(errno, "EWOULDBLOCK", errno.EAGAIN),
@@ -365,6 +558,7 @@ RULES = {
     "domain-term-unbacked": E3,
     "reviewed-with-blocking-gap": E3,
     "review-transition": E3,
+    "gate-evidence-failed": E3,
     # learning loop (round 2)
     "platform-id-missing": W3,
 }
@@ -829,8 +1023,8 @@ def _os_try_lock(fd):
     """Take the OS lock on an open file without waiting.
 
     Returns True when taken and False when another process holds it. Raises
-    OSError when this filesystem cannot take OS locks at all (ENOLCK on some
-    network mounts), which the caller answers with the soft-lock fallback.
+    OSError otherwise; the caller falls back to the soft lock only for the errors
+    in _LOCK_UNSUPPORTED_ERRNOS (ENOLCK on some network mounts).
     """
     try:
         if msvcrt is not None:
@@ -940,14 +1134,21 @@ class FileLock:
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        deadline = time.time() + self.timeout
+        started = time.monotonic()
+        deadline = started + self.timeout
         delay = 0.005
         while True:
             fd = None
             try:
-                fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o644)
-            except PermissionError:
-                fd = None  # Windows: the file is mid-creation elsewhere; retry
+                # O_BINARY: in Windows text mode the holder line was written as CRLF.
+                fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+            except PermissionError as exc:
+                if time.monotonic() - started > _LOCK_OPEN_GRACE_SECONDS:
+                    raise LockError(
+                        "Cannot open lock " + str(self.path) + ": " + str(exc) + ". Nothing holds "
+                        "it; the file or its folder is not writable by this user."
+                    )
+                fd = None  # Windows: another process is creating it this instant
             except OSError as exc:
                 raise LockError("Cannot open lock " + str(self.path) + ": " + str(exc))
             if fd is not None:
@@ -955,6 +1156,11 @@ class FileLock:
                     taken = _os_try_lock(fd)
                 except OSError as exc:
                     os.close(fd)
+                    unsupported = exc.errno in _LOCK_UNSUPPORTED_ERRNOS or (
+                        msvcrt is not None and exc.errno == errno.EINVAL
+                    )
+                    if not unsupported:
+                        raise LockError("Cannot lock " + str(self.path) + ": " + str(exc))
                     return self._enter_soft(deadline, exc)
                 if taken and self._same_file(fd):
                     self.fd = fd
@@ -966,21 +1172,24 @@ class FileLock:
                     except OSError:
                         pass
                 os.close(fd)
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 raise LockError(
                     "Manifest lock " + str(self.path) + " is " + self.describe_holder()
                     + "; waited " + ("%g" % self.timeout) + "s. The lock is released "
                     "automatically when that process exits; if it is still running, wait "
                     "for it or stop it."
                 )
-            time.sleep(delay)
+            # Jitter keeps a crowd of waiters from polling in lockstep.
+            time.sleep(delay * (0.5 + random.random()))
             delay = min(delay * 2, 0.1)
 
     def _enter_soft(self, deadline, reason):
         soft = self.soft_path
         while True:
             try:
-                handle = os.open(str(soft), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                handle = os.open(
+                    str(soft), os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o644
+                )
             except (FileExistsError, PermissionError):
                 handle = None
             except OSError as exc:
@@ -993,7 +1202,7 @@ class FileLock:
                 os.close(handle)
                 self.soft = soft
                 return self
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 raise LockError(
                     "Manifest lock " + str(soft) + " is " + self.describe_holder() + ". This "
                     "filesystem cannot take operating-system locks (" + str(reason) + "), so "
@@ -1335,11 +1544,11 @@ def non_evidence_reason(candidate, role):
 # log line 'tenant.suspend ok (12 ms)' counted as an assertion, and Kotlin's
 # stdlib `check(...)` made a production service pass as its own test.
 ASSERTION_PATTERN = re.compile(
-    r"\bassert\w*\s*[(!]"                       # assert(x), assertEqual(..), assert_eq!(..), $this->assertSame(
+    r"(?<!console\.)\bassert\w*\s*[(!]"        # assert(x), assertEqual(..), assert_eq!(..), $this->assertSame(
     r"|\b[Aa]ssert\.\w+"                         # node:assert, chai assert.equal, testify, xUnit/NUnit Assert.X
     r"|^\s*assert\s+\S"                         # Python, ExUnit: assert x == y
     r"|\brefute\w*\b"                           # ExUnit refute
-    r"|\b[Ee]xpect\s*[({]"                       # jest/vitest/chai/RSpec expect(..) and expect { }, Gomega Expect(
+    r"|(?<![\w.$])expect\s*[({]|\bExpect\s*\("   # jest/vitest/chai/RSpec expect(..), expect { }; Gomega Expect(
     r"|#(?:expect|require)\s*\("                 # swift-testing
     r"|\bis_expected\b"                          # RSpec one-liner
     r"|\.[Ss]hould\b|\bshould\s*\("               # chai should, FluentAssertions .Should(), Gomega
@@ -1358,6 +1567,9 @@ ASSERTION_PATTERN = re.compile(
     re.M,
 )
 
+# console.assert logs and carries on, and Rust's `.expect("...")` unwraps an Option: neither
+# is a test assertion, and both were counted as one.
+#
 # An assertion about constants proves nothing about the code: `expect(true).toBe(true)`
 # satisfied every test rule. These are removed before assertions are counted.
 _LITERAL = r"""(?:true|false|True|False|null|nil|None|undefined|-?\d+(?:\.\d+)?|'[^'\n]*'|"[^"\n]*")"""
@@ -1394,7 +1606,25 @@ TEST_NAME_PATTERN = re.compile(
     r"|(?:^|/)test_[^/]*\.py$"                                     # test_user.py
     r"|(?:^|/)[^/]*(?:Test|Tests|Spec|Specs|IT|Suite)\.(?:php|java|kt|kts|cs|swift|scala|groovy)$"
     r"|(?:^|/)__tests__/[^/]+\." + _TEST_SOURCE_EXT + r"$"
+    r"|\.Tests\.ps1$"                                              # Pester
     r")"
+)
+# Looser names a runner still picks up inside the right folder or with the right call:
+# mocha's test/*.js, node:test's test-*.js and *_test.js, unittest's tests.py.
+WEAK_TEST_NAME_PATTERN = re.compile(
+    r"(?:^|/)test[-_][^/]*\.[cm]?[jt]sx?$|[-_]test\.[cm]?[jt]sx?$|(?:^|/)tests?\.py$|(?:^|/)test[^/]*\.py$"
+)
+# The only files a test runner executes. A log, a note or a report is never a test,
+# whatever its name or content: 'suspend.test.log' holding 'tenant.suspend ok (12 ms)'
+# was accepted as the capability's test.
+TEST_CAPABLE_PATTERN = re.compile(r"\.(?:" + _TEST_SOURCE_EXT + r"|ps1)$", re.I)
+# Runner configuration, shared fixtures and helpers sit beside tests and use the same
+# calls, but prove nothing on their own.
+NEVER_TEST_PATTERN = re.compile(
+    r"(?:^|/)(?:conftest\.py|spec_helper\.rb|rails_helper\.rb|test_helper\.(?:rb|exs|php)"
+    r"|TestCase\.php|setup(?:Tests)?\.[cm]?[jt]s|[\w.-]*\.config\.[cm]?[jt]s)$"
+    r"|(?:^|/)(?:__fixtures__|__mocks__|fixtures|helpers|support)/",
+    re.I,
 )
 TEST_RUNNER_PATTERN = re.compile(
     r"(?<![\w.])(?:test|it|describe|suite|context|specify)\s*(?:\.\w+\s*)*\("   # jest/vitest/mocha/node:test/Pest
@@ -1409,6 +1639,7 @@ TEST_RUNNER_PATTERN = re.compile(
     r"|:\s*(?:FunSpec|StringSpec|BehaviorSpec|DescribeSpec|ShouldSpec|WordSpec)\s*\("
     r"|\bRSpec\.describe\b"
     r"|^\s*(?:describe|context|it|specify|feature|scenario)\s+['\"\w:]"          # RSpec bare describe
+    r"|^\s*(?:Describe|Context|It)\s+['\"]"                                       # Pester
     r"|^\s*test\s+['\"]",                                                       # ExUnit / minitest
     re.M,
 )
@@ -1455,14 +1686,36 @@ def has_assertion(body):
     return assertion_count(body) > 0
 
 
-def looks_like_test_file(candidate, body):
-    name = str(candidate).replace("\\", "/")
-    if TEST_NAME_PATTERN.search(name):
-        return True
+def looks_like_test_file(candidate, body, relative=None):
+    """Whether a runner would execute this file as a test.
+
+    The file needs an extension a runner executes, a name or folder the runner picks
+    up, and a test call inside it. A name alone let a production 'ABTest.kt' or
+    'test_mode.py' pass as a test. JVM, .NET and Swift runners select by annotation,
+    so there the call is required with a test name or a test folder. Rust unit tests
+    live in src/, so a Rust file needs only the call.
+
+    Folders are judged on `relative`, the path as the project cites it: on the
+    absolute path, a checkout under ~/work/tests/ put every file in a test folder,
+    and one under evals/fixtures/ made every file a fixture.
+    """
+    name = (relative if relative else str(candidate)).split("#", 1)[0].strip().replace("\\", "/")
+    lowered = name.lower()
+    if not TEST_CAPABLE_PATTERN.search(name) or NEVER_TEST_PATTERN.search(name):
+        return False
+    named = bool(TEST_NAME_PATTERN.search(name))
+    in_test_dir = bool(TEST_DIR_PATTERN.search(name))
+    strict = lowered.endswith(STRICT_TEST_SUFFIXES)
+    if not body.strip():
+        return named  # nothing to read (a deleted file): the name is all there is
     runner = bool(TEST_RUNNER_PATTERN.search(strip_comments(body)))
-    if name.lower().endswith(STRICT_TEST_SUFFIXES):
-        return runner and bool(TEST_DIR_PATTERN.search(name))
-    return runner
+    if not runner:
+        return False
+    if strict:
+        return named or in_test_dir
+    if lowered.endswith(".rs"):
+        return True
+    return named or in_test_dir or bool(WEAK_TEST_NAME_PATTERN.search(name))
 
 
 def is_uninformative(body):
@@ -1592,12 +1845,13 @@ def check_evidence_list(
             # A test file is not placeholder-scanned: fabricated fixtures, mocks
             # and stubs are what tests are made of. The boundary is enforced by
             # where the path appears (references/test-data.md), not by content.
-            if not looks_like_test_file(candidate, body):
+            if not looks_like_test_file(candidate, body, raw):
                 findings.add(
                     "test-file-shape",
                     entry_path,
-                    "'" + raw.strip() + "' does not look like a test: it has no test-file "
-                    "name (*.spec.*, *.test.*, test_*.py, *_test.go ...) and no test-runner call",
+                    "'" + raw.strip() + "' does not look like a test a runner would run: it "
+                    "needs a test-file name or test folder for its language (*.spec.ts, test_*.py, "
+                    "*_test.go, *Test.php ...) and a test call inside (test(...), def test_..., @Test)",
                 )
                 continue
             if not has_assertion(body):
@@ -1923,9 +2177,15 @@ def without_domain_terms(text, terms):
     return cleaned
 
 
-def placeholder_match(text, terms=()):
-    """Return the placeholder token found in a manifest string, or None."""
+def placeholder_match(text, terms=(), prose=False):
+    """Return the placeholder token found in a manifest string, or None.
+
+    `prose` is for fields that describe rather than implement: there 'todo' counts only
+    as a to-do marker (see mask_prose_todo).
+    """
     folded = fold_confusables(text)
+    if prose:
+        folded = mask_prose_todo(folded)
     scannable = split_identifiers(folded)
     if terms:
         scannable = without_domain_terms(scannable, terms)
@@ -1949,7 +2209,7 @@ def scan_file_placeholder(body, terms=()):
     Declared domain nouns ('TodoRepository: 12 passed') are vocabulary here too.
     """
     for number, line in enumerate(body.splitlines(), 1):
-        cleaned = split_identifiers(FRAMEWORK_CALLS.sub(" ", fold_confusables(line)))
+        cleaned = split_identifiers(FRAMEWORK_CALLS.sub(" ", mask_prose_todo(fold_confusables(line))))
         if terms:
             cleaned = without_domain_terms(cleaned, terms)
         hit = FILE_PLACEHOLDER_PATTERN.search(cleaned)
@@ -1992,7 +2252,7 @@ def run_placeholder_scan(manifest, findings, release):
                         else "register it in declaredStatic[] with a reason and approver or replace it"
                     ),
                 )
-            token = placeholder_match(text, findings.domain_terms)
+            token = placeholder_match(text, findings.domain_terms, prose=not implementation)
             if token:
                 findings.add(
                     "placeholder-scan",
@@ -3109,6 +3369,15 @@ def validate_gates(manifest, findings, release, project_root):
                     role="gate",
                     owner=gid,
                 )
+                failed = recorded_failure(gate.get("evidence"), project_root)
+                if failed:
+                    findings.add(
+                        "gate-evidence-failed",
+                        path + ".status",
+                        "is 'passed', but " + failed[0] + " records exit code " + failed[1]
+                        + " for the command it ran; set the gate to 'failed', or fix the cause and "
+                        "capture a passing run",
+                    )
             if not nonempty(gate.get("threshold")):
                 findings.add("required-field-empty", path + ".threshold", "a passed gate needs a measurable threshold")
         if status == "not-applicable" and not nonempty(gate.get("rationale")):
@@ -3151,6 +3420,24 @@ def validate_gates(manifest, findings, release, project_root):
                     entry[0] + ".status",
                     "the " + gid + " gate must pass at this profile; not-applicable is only allowed at profile internal",
                 )
+
+
+# The frame references/verification.md's capture recipe writes after the command's output.
+EXIT_FRAME_PATTERN = re.compile(r"^# exit code: (-?\d+)\s*$", re.M)
+
+
+def recorded_failure(entries, project_root):
+    """(entry, code) for the first cited log whose last recorded exit code is not 0, or None."""
+    for value in str_items(entries):
+        if evidence_kind(value) != "path":
+            continue
+        candidate = evidence_path(value, project_root)
+        if candidate is None or not candidate.is_file():
+            continue
+        codes = EXIT_FRAME_PATTERN.findall(read_head(candidate))
+        if codes and codes[-1] != "0":
+            return value.strip(), codes[-1]
+    return None
 
 
 def decision_kind(decision):
@@ -6827,10 +7114,10 @@ def cmd_review_scope(args):
             continue
         if role == "qa" and rel in created:
             body = read_head(candidate) if candidate.is_file() else ""
-            if looks_like_test_file(candidate, body) or TEST_DIR_PATTERN.search(rel):
+            if looks_like_test_file(candidate, body, rel) or TEST_DIR_PATTERN.search(rel):
                 continue
         if role == "qa" and rel not in created and candidate.is_file() and looks_like_test_file(
-            candidate, read_head(candidate)
+            candidate, read_head(candidate), rel
         ):
             violations.append(rel + "  (an existing test: qa adds tests, an implementer changes them)")
             continue

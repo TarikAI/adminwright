@@ -81,7 +81,7 @@ that was factually wrong.**
 For each accepted candidate, record the lesson:
 
 ```text
-python <skill>/scripts/admin_console_manifest.py lesson add --title "<rule>" --category <gap|friction|incorrect-guidance|new-pattern|tooling> --scope <the candidate's scope> --trigger "<what happened>" --rule "<the durable rule>" --date <YYYY-MM-DD>
+python <skill>/scripts/admin_console_manifest.py lesson add --title "<rule>" --category <gap|friction|incorrect-guidance|new-pattern|tooling> --scope <candidate-scope> --trigger "<what happened>" --rule "<the durable rule>" --date <YYYY-MM-DD>
 ```
 
 A lesson's scope is the file whose guidance failed, and that includes the agents: a pass that

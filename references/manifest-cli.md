@@ -59,7 +59,7 @@ Keys the schema does not declare are reported as `unknown-field`; prefix a key w
 - Write the JSON with your harness's file tool to `.admin-console/<agent-id>.payload.tmp`, then pass `--json-file` (or `set --value-file`). This works in every shell, and `init`'s `.gitignore` already ignores `*.tmp`.
 - For a list, prefer comma-separated text with `--append`: `--value evidence/a.log,evidence/b.log`.
 - PowerShell 5.1 strips the double quotes inside single-quoted JSON and splits values containing spaces, so inline `--json '{...}'` fails there. `--json '@file.json'` also works, but quote the `@` argument: unquoted, PowerShell reads `@file` as splatting. Piping JSON into `--json -` loses non-ASCII text unless `$OutputEncoding = [System.Text.UTF8Encoding]::new()` is set first; a file avoids the question.
-- In PowerShell 5.1, capture a log with `<command> 2>&1 | Out-File -Encoding utf8 <log>`. Plain `>` writes UTF-16, which most tools and reviewers misread.
+- Capture a gate's log with the recipe in [verification.md](verification.md#capturing-gate-output) (`gate_run` in bash, `Invoke-Gate` in PowerShell). It records the command and its exit code, which is what a gate is judged on. In PowerShell 5.1, `>` writes UTF-16 and `Out-File -Encoding utf8` garbles non-ASCII output and adds error records, so use neither.
 
 <!-- doc-test: skip -->
 ```text

@@ -124,13 +124,36 @@ Service accounts and autonomous agents are subjects, not exceptions.
 An admin console lets operators register endpoints that the server then calls: provider base URLs, webhook targets, import-from-URL, "test connection", OAuth token endpoints, link and file fetchers. Each is a server-side request forgery (SSRF) primitive, and the credentials the server attaches make it worse: an operator, or an attacker holding an operator session, can aim the server at the cloud metadata service, an internal admin port or a host they control.
 
 - **Allowlist first.** Prefer choosing from registered providers or an allowlist of hosts the organization owns. Where an arbitrary URL is the product (a custom provider), permit `https` only, validate scheme, port and host, and treat a denylist as a last resort, never the only control.
-- **Resolve, check, then connect to the address you checked.** Resolve the name server-side, reject every resolved address that is loopback (`127.0.0.0/8`, `::1`), private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`, which holds the cloud metadata address `169.254.169.254`) or multicast, and reject `metadata.google.internal`. Also reject IPv4-mapped IPv6 and decimal, octal or hex spellings of the same addresses. Pin the connection to the checked address: resolving again between check and connect is the DNS-rebinding hole. Re-validate on every request, because DNS answers change after the URL was saved.
+- **Parse once, strictly.** Accept `http` and `https` only. Refuse userinfo (`user@host`), backslashes, control characters and ports outside an allowlist. IDNA-encode the host and parse again, and treat any disagreement between parsers as a refusal: Python's `urlsplit` reads `http://example.com\@evil.com/` as host `evil.com`.
+- **Resolve, check every address, then connect to the address you checked.**
+  - Refuse the metadata names before resolving: `metadata.google.internal`, `metadata.amazonaws.com`, `metadata`, `instance-data`, `metadata.azure.com`, `kubernetes.default.svc`.
+  - Resolve every A and AAAA record, and refuse the request if any of them falls in the table below.
+  - Unwrap an IPv4 address carried inside IPv6 and check it too: IPv4-mapped (`::ffff:0:0/96`), IPv4-compatible (`::/96`), NAT64 (`64:ff9b::/96`), 6to4 (`2002::/16`) and Teredo (`2001::/32`).
+  - Validate the resolved address, never the string: resolvers accept `127.1`, octal and hex forms, and even ideographic full stops.
+  - Connect to the checked address, and send the original name as `Host` and as the TLS server name. A second lookup between check and connect is the DNS-rebinding hole.
+  - Re-validate on every request, because DNS answers change after the URL was saved.
+  - Do not use a language's "is private" helper as the policy: Python's `ipaddress.is_private` is false for Alibaba's metadata address `100.100.100.200`, `is_global` is true for Azure's `168.63.129.16`, and both changed meaning in Python 3.13.
+
+  | Refuse | Why |
+  |---|---|
+  | `0.0.0.0/8`, `127.0.0.0/8`, `::/128`, `::1/128` | this host |
+  | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` | private; AWS `fd00:ec2::254`, GCP `fd20:ce::254` and OCI metadata sit in `fc00::/7` |
+  | `100.64.0.0/10` | shared address space, which holds Alibaba's metadata address `100.100.100.200` |
+  | `169.254.0.0/16`, `fe80::/10` | link-local: the metadata address `169.254.169.254` on AWS, GCP, Azure and OCI, and AWS container credentials at `169.254.170.2` and `169.254.170.23` |
+  | `168.63.129.16/32` | Azure's platform endpoint, a public address that no private-range check catches |
+  | `192.0.0.0/24`, `192.0.2.0/24`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `240.0.0.0/4`, `2001::/23`, `2001:db8::/32`, `fec0::/10` | protocol assignments, documentation, benchmarking and reserved space |
+  | `224.0.0.0/4`, `ff00::/8` | multicast |
 - **Do not follow redirects** automatically; if a flow needs them, apply every rule above to each hop.
 - **Egress control outside the application.** Send outbound calls through an egress proxy or a network policy that reaches only intended destinations, and run the fetcher where the metadata service is unreachable (on AWS, require IMDSv2).
 - **Return the failure class, not the response.** "Test connection" reports DNS failure, refused, timeout, TLS or authentication error; it never echoes the upstream body, headers or redirect target, and it caps time and size. An echo turns a fetcher into a read primitive.
 - **Changing a URL that carries a credential is a privileged command.** Editing the base URL of a provider that holds an API key redirects the key to a new host. Require step-up authentication, reason capture and an audit event for that edit, and never attach a stored credential to a URL changed since the credential was last authorized.
 
-Source: [OWASP SSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html) (allowlist preferred, redirects off, egress filtering, minimum denylist ranges, IMDSv2). Test with base URLs of `http://169.254.169.254/`, `http://localhost:<admin port>`, a name that resolves to a private address, a name that flips between a public and a private address, and a public URL that redirects to a private one: each must be refused and audited.
+Sources: the [OWASP SSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html) (allowlist preferred, redirects off, egress filtering, its minimum denylist, IMDSv2); the IANA [IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry/) and [IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry/) special-purpose registries it cites, for the rest of the table; and each cloud's metadata documentation. Test with these base URLs, each of which must be refused and audited:
+
+- `http://169.254.169.254/`, `http://[::ffff:169.254.169.254]/`, `http://100.100.100.200/`;
+- `http://localhost:<admin port>`, and `http://example.com@127.0.0.1/`;
+- a name that resolves to a private address, and a name that flips between a public and a private address;
+- a public URL that redirects to a private one.
 
 ## CSRF by stack family
 

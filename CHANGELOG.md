@@ -15,6 +15,55 @@ therefore says which rule set judged it, even on an install that updated in betw
 
 ### Added
 
+- **Review state machine** (round 2). Tightening, so breaking by this project's definition:
+  - `reviewed-with-blocking-gap`, an error at every profile: a capability cannot be `reviewed`
+    while an open or blocked critical/high gap targets it.
+  - `review-transition`: the write guard refuses `contested` -> `reviewed`; the implementer
+    returns a contest to `unreviewed` after the fix.
+  - `contested-needs-gap` is an error at every profile (it warned at `internal`), so "file the
+    gap, then contest" is enforced when the status is written.
+  - `contest-self-cleared` (new capability field `contestedBy`): the contester cannot clear its
+    own contest.
+  - A rule that judges one field against other entries refuses only the write that changed
+    that field: filing a gap against a reviewed capability, including the OCR bridge's batch,
+    and marking a contest's gap `fixed` warn instead of being refused.
+- **`review-scope`**: checks from git what a reviewer pass changed. `--start` at dispatch
+  records work already uncommitted, and the check lists every file a reviewer changed outside
+  its write surface. That surface is the manifest and working files, its own worklog, cited
+  non-source evidence, `docs/admin-*.md`, and new tests for qa. It exits 1 otherwise. Tool
+  restrictions are advisory in Claude Code and absent elsewhere; this works in every harness.
+- **`set --append`**: adds items to a list under the manifest lock, so agents adding evidence
+  at the same time keep each other's entries. Also `set --value-file`, `--delete`, `--replace`
+  (objects now merge by default), and `x-` extension keys.
+- **`gate-evidence-failed`**, an error at every profile: a `passed` gate whose log ends with a
+  non-zero `# exit code:` line. `references/verification.md` has a verified capture recipe for
+  bash (`gate_run`) and Windows PowerShell 5.1 (`Invoke-Gate`), which records the command and
+  its exit code. The old advice, `2>&1 | Out-File -Encoding utf8`, garbled non-ASCII output and
+  added error records.
+- **Round-2 rules**, each tightening:
+  - `profile-decision-mismatch`, `profile-decision-missing` and `profile-below-regulated-data`;
+    `set --path profile` updates the decision and warns when it lowers the profile;
+  - `project-root-outside`;
+  - `gate-always-required`: `tests` and `security` are never not-applicable;
+  - `gate-not-applicable-undecided`: other required gates need a confirmed decision of kind
+    `not-applicable`;
+  - `evidence-not-output`: project, configuration and (for gates) source files are not evidence;
+  - `domain-term-unbacked`, with the new `platform.domainTerms`;
+  - `platform-id-missing`, a warning.
+- `references/manifest-cli.md`: every command form, shell-safe JSON passing, the write guard,
+  claims and locks, `review-scope`, what to commit, and monorepo layouts.
+- `tests/test_agent_protocol.py`: every command the docs tell an agent to run must parse with
+  the CLI's own parser; shorthand commands in prose may use only options that exist; and a
+  walk of the documented role protocol asserts each step's exit code. It found three doc lines
+  the CLI refused.
+- `scripts/maintainer/gen_confusables.py` regenerates the confusables table from Unicode's data
+  (`--check` reports whether the embedded block is current).
+- The OCR bridge (from `round2/ocr`):
+  - `record --findings-file`, safe in PowerShell;
+  - `gaps[].fingerprint` for its dedupe key;
+  - recorded replies from the real ocr 1.12.9, and a real-CLI smoke test driven by the bridge's
+    own flag list;
+  - CI smoke jobs against the pinned and the latest ocr.
 - Two evidence-rigor rules, both `warn` at `internal` and `error` at `standard` and
   `regulated`. Tightening, so it is breaking by this project's definition — a manifest that
   passed on empty tests or hollow evidence now fails:
@@ -172,8 +221,9 @@ therefore says which rule set judged it, even on an install that updated in betw
   every stack), `django_triggers.sql` and `prisma_raw.sql` (the triggers, functions, CHECKs and
   partial or expression indexes those two variants cannot express), a database-owned audit hash
   chain (`audit_event_chain_link` trigger) with `verify_audit_chain()`, `scrub_audit_payload()`
-  as the one permitted payload update, and `tests/test_core_schema*.py` plus a CI job that
-  applies `postgres.sql` on PostgreSQL 14 and 16.
+  as the sanctioned payload update (a drop must name the row's `audit.scrub_payload` event),
+  and `tests/test_core_schema*.py` plus a CI job that applies `postgres.sql` on PostgreSQL
+  14, 16 and 18.
 - `install_agents.py` writes native agent files where each harness discovers them today:
   `.codex/agents/*.toml`, `.gemini/agents/*.md`, `.cursor/agents/*.md`,
   `.agents/agents/<name>/agent.md`; `.adminwright/agents/` stays as the harness-neutral copy.
@@ -189,6 +239,80 @@ therefore says which rule set judged it, even on an install that updated in betw
   extension, audit, repair) and each agent prompt costs to load.
 ### Changed
 
+- **SKILL.md** is about 4,600 estimated tokens, down from 6,300. Claude Code re-attaches
+  only the first 5,000 tokens of a skill after compaction, and the cut fell inside Phase 8, so
+  long builds lost the agent roster and the completion report. A test now pins the ceiling.
+  - The completion report and a copyable phase checklist moved up.
+  - CLI mechanics moved to `references/manifest-cli.md`.
+  - The description is 616 characters and adds `license` and `compatibility`.
+- **The six agents**:
+  - explicit inputs, entry and exit checks, and a `STATUS: DONE | DONE_WITH_CONCERNS |
+    BLOCKED | NEEDS_CONTEXT` return line;
+  - `disallowedTools: Agent` for every agent but the architect, because a self-spawned reviewer
+    defeats independence; reviewers keep Write for worklogs and evidence;
+  - `color` for each;
+  - qa is the only writer of `reviewStatus`; ux-reviewer and security file blocking or
+    advisory gaps;
+  - security proposes risk acceptances as `assumed` decisions plus a `blocked` gap, because a
+    dispatched agent cannot ask the human;
+  - the architect runs `init` once, claims nothing on a first pass, and records file
+    ownership;
+  - the harvester needs a conversation digest and a real checkout.
+- **`references/multi-agent.md`** is split into a protocol part that agents load by section
+  and an orchestration part. New: the review state machine, severity calibration, the dispatch
+  template, per-pass verification by the orchestrator, when a run stops, and a
+  rationalizations table.
+- **Confusables**: the fold table is generated from UTS #39 18.0.0 (685 entries and the
+  default-ignorable ranges). Armenian, Greek-kappa, small-capital, Hangul-filler, Braille-blank,
+  all-Cyrillic and Cherokee spellings of placeholder words are caught. A word wholly in one other
+  script is folded only when it becomes exactly a placeholder word.
+- **Prose `todo`**: in prose fields and evidence logs, `todo` counts only as a to-do marker
+  (`TODO`, `todo:`, `// todo`, `@todo`). Spanish and Portuguese "todo" means "all".
+- **Test files are what a runner would run**:
+  - a log or a note is never a test, and helpers and configs (`conftest.py`,
+    `*.config.ts`, `fixtures/`) never are;
+  - a test name also needs a test call inside, so a production `ABTest.kt` or `test_mode.py`
+    no longer passes;
+  - folders are judged on the cited path, not the checkout's location;
+  - Pester `*.Tests.ps1` is recognised;
+  - `console.assert` and Rust's `.expect()` are not assertions.
+- **The write lock** (`FileLock`) is an OS lock (`flock` / `msvcrt.locking`) on a file that is
+  never deleted. It falls back to the soft lock only when the filesystem cannot lock, fails
+  fast on a permission error, and uses a monotonic deadline with jittered polling.
+- **The agent installer** (from `round2/installer`):
+  - installed copies hold no machine path (the path lives in the git-ignored
+    `.adminwright/skill-dir`);
+  - harnesses that share `AGENTS.md` keep separate sections;
+  - Codex, Gemini and Cursor dispatch to their native subagents;
+  - Gemini gets `max_turns: 200` and `timeout_mins: 120`;
+  - a skill in the versioned plugin cache is recorded as its marketplace clone.
+- **The learning loop** (from `round2/learning`):
+  - the skill counts as a checkout only when its work tree starts at the skill root;
+  - projects are counted by `platform.id`;
+  - clustering needs three specific shared words;
+  - the scrubber knows more token shapes;
+  - `store sync` commits only store files;
+  - outbox lessons never overwrite each other.
+- **Core schema pack** (from `round2/schema`). Breaking for existing installs: the new CHECK,
+  the RESTRICT foreign key and the `approval_request` trigger refuse writes an older install
+  accepted, so resolve violating rows before adopting them.
+  - Security: a payload drop from `audit_event` must name the row's `audit.scrub_payload`
+    event, which `scrub_audit_payload()` writes first. A payload is dropped once, and
+    `verify_audit_chain()` reports a payload dropped without its event.
+  - Security: every function that reads a table pins `search_path` with `pg_temp` last. In the
+    Django, Prisma, Laravel and Rails copies, a session could shadow `approval_request` with a
+    temporary table and approve its own request.
+  - Security: `approval_request` is immutable except `state`, `executed_at` and
+    `execution_result`.
+  - Payload hashes are always derived on insert.
+  - `data_subject_request` enforces the legal hold and links its export and job.
+  - `admin_job_failure.job_id` is `ON DELETE RESTRICT`.
+  - `grants.sql` exits 3 without `-v app_role`.
+  - Django keeps caller-supplied business timestamps.
+  - Drizzle inserts compile without the trigger-owned columns.
+  - The README verification accepts PostgreSQL 18's SQLSTATE 23001.
+  - CI runs Django 5.2 on PostgreSQL 14 and adds a PostgreSQL 18 leg, and the drift test
+    compares index definitions, CHECK expressions and column types.
 - The `ux-reviewer` agent now reviews what the validator provably cannot: that every control
   actually does something when pressed, that the screen renders without visual defects, and
   that the console is structurally coherent across a domain. It mentioned design, layout,
@@ -280,8 +404,8 @@ therefore says which rule set judged it, even on an install that updated in betw
   `(key, environment, tenant)`; `feature_flag` and `config_change` gain `tenant_id`;
   `impersonation_session` gains `read_only`, a maximum-duration CHECK and one live session per
   actor; `audit_event.effective_actor_id` is `text` with no FK; `postgres.sql` creates
-  `citext` and names every CHECK `<table>_<column>_check`. Django: `condition=` for Django 6,
-  23 CHECKs, `db_column` names, `db_default`. Prisma: valid on Prisma 7, explicit `onDelete`,
+  `citext` and names every CHECK `<table>_<column>_check`. Django: `condition=` (Django 5.1+),
+  24 CHECKs, `db_column` names, `db_default`. Prisma: valid on Prisma 7, explicit `onDelete`,
   canonical enum strings, raw SQL written out.
 - `code_review.py`: OCR bundles are per-run files closed by a successful `record` and ignored
   after 24 hours; `record` without a bundle reports `coverage: unknown`; findings already
@@ -307,6 +431,29 @@ therefore says which rule set judged it, even on an install that updated in betw
   lock file, states that the harvester is a pass, and uses one pass order (security before qa).
 ### Fixed
 
+- **The write lock**: waiters reading the lock file made the holder's delete fail on Windows,
+  and 15 of 16 parallel writers timed out after 30 s. 24 parallel `add`s now all land in about
+  2 s.
+- **Monorepos**: `init --manifest apps/admin/console.json` no longer refuses every test and log
+  of the app. `init` anchors and merges its `.gitignore`.
+- **Headless consoles**: a console with no screens, or a role acting only through
+  api/cli/job/chat, is no longer failed on UI checks.
+- **Robustness**:
+  - a reader that closes early (`| head -1`) no longer turns a finished command into exit 120;
+  - a BOM followed by invalid bytes is exit 2, not a traceback;
+  - UTF-16 gate logs are decoded.
+- **`remove` and `rename`**:
+  - `remove` lists every reference that blocks it;
+  - `rename` moves locks and rewrites `separationOfDuties` and research sources;
+  - `claim --force-steal` works on a fresh clone;
+  - reviewers of different roles review one capability in parallel.
+- **Two branches defined a top-level `git_paths`**, and the later one silently broke
+  `review-scope`. A test now fails on any top-level name defined twice in `scripts/`.
+- **The OCR bridge**:
+  - every successful endpoint review used to exit 2 and record nothing;
+  - partial reviews lost their findings;
+  - `--timeout inf` crashed and left ocr running;
+  - Windows messages named a nonexistent `ocr.exe`.
 - `promote` grouped observations by an exact hash of their wording while its docstring
   promised it "groups observations that say the same thing in different words". It could
   only ever group a record with itself, so the "seen on two or more distinct projects"

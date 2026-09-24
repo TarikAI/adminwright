@@ -930,7 +930,7 @@
           },
           "scope": {
             "type": "string",
-            "description": "The one thing this would change in the skill: a references/<file>.md path, SKILL.md, scripts, or agents. Observations are grouped by scope and category, so an unscoped entry can never corroborate the same finding from another project."
+            "description": "The one file or area of the skill this would change, as an existing path from the skill root: SKILL.md, references/<file>.md, scripts, agents, assets/admin-core-schema, lessons, INTEGRATIONS.md. `lesson add --scope` accepts the same values. Observations are grouped by scope and category, so an unscoped entry can never corroborate the same finding from another project."
           },
           "proposedChange": {
             "type": "string"

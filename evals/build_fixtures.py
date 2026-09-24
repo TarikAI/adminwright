@@ -607,7 +607,10 @@ def build_matrix():
     gates["browser"].update({"status": "passed", "threshold": "critical flows pass",
                              "evidence": ["tests/alpha.spec.ts"]})              # evidence-not-output (source code)
     gates["security"].update({"status": "passed", "threshold": "0 findings",   # gate-evidence-unrelated
-                              "evidence": ["evidence/shared.log"]})
+                              "evidence": ["evidence/shared.log", "evidence/audit-run.log"]})
+    write(root, "evidence/audit-run.log",                                       # gate-evidence-failed
+          "$ npm audit --omit=dev\n# started: 2026-09-24T09:00:00Z\n"
+          "3 vulnerabilities (1 high)\n\n# exit code: 1\n")
     m["decisions"] = [
         {"id": "dec.profile", "decision": "Profile", "reason": "",             # decision-reason-missing
          "evidence": [], "status": "confirmed", "appliesTo": ["nonexistent"]}, # decision-applies-to-unknown

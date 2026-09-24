@@ -76,10 +76,14 @@ Structural completeness, not vibes:
 - Every capability links to a screen whose route it actually declares
 - Every high-risk command has safeguards, recovery, and idempotency
 - Every evidence path exists and is non-empty; at `regulated` the capability's test files must mention it
+- A cited test is a file a test runner would run, and it asserts something other than a constant
+- A passed gate's own log does not record a failed run
+- No capability is marked reviewed by its implementer, or while a critical or high finding against it is open
 - No placeholder anywhere in the release path
 
-The placeholder scanner is deliberately hard to slip past. It folds Unicode homoglyphs
-(`mоck` with a Cyrillic о), splits camelCase and snake_case, catches tokens with no case
+The placeholder scanner is deliberately hard to slip past. It strips invisible characters,
+folds look-alike letters using Unicode's own confusables data (a Cyrillic о, an Armenian օ, a
+Greek κ, small capitals), splits camelCase and snake_case, catches tokens with no case
 boundary (`gmockRepositoryImpl`), recurses into nested arrays, and reads the *contents* of
 evidence files — an evidence file reading "TODO: replace with real results" is a defect, not
 proof. The one sanctioned exception is `declaredStatic[]`, where a genuinely static value is
@@ -96,10 +100,11 @@ across machines on a shared checkout.
 ... claim --agent impl-1 --role implementer --capability user.suspend
 ```
 
-Five roles with defined boundaries: `architect`, `implementer`, `ux-reviewer`, `qa`,
-`security`. One rule matters most — **the agent that implements a capability never marks it
-reviewed.** A single agent runs the roles in sequence, re-reading the code rather than
-recalling it.
+Five roles with defined boundaries, in pass order: `architect`, `implementer`, `ux-reviewer`,
+`security`, `qa`. One rule matters most — **the agent that implements a capability never marks
+it reviewed.** The validator enforces the review states, and `review-scope` checks from git
+that a review pass changed only what a reviewer may, in every harness. A single agent runs
+the roles in sequence, re-reading the code rather than recalling it.
 
 The roles ship as ready-to-dispatch agents in [`agents/`](agents/) — the five above plus
 `adminwright-harvester`, the learning pass that runs last on every mode. The harvester is a
@@ -111,8 +116,9 @@ python scripts/install_agents.py --harness antigravity --project-root /path/to/p
 ```
 
 Supported: `claude-code`, `opencode`, `codex`, `antigravity`, `gemini`, `cursor`, `pi`,
-`generic`. The installer bakes the skill path into each prompt, writes the files where that
-harness discovers agents, and adds harness-specific dispatch guidance — for Antigravity, for
+`generic`. The installer writes the files where that harness discovers agents, keeps this
+machine's paths out of every file a project commits, and adds harness-specific dispatch
+guidance — for Antigravity, for
 example, that a user-supplied plan is the plan of record and must not be replaced by a
 freshly generated one. See [agents/README.md](agents/README.md) for the dispatch order.
 
@@ -172,10 +178,11 @@ validate  structure, evidence, placeholders, coverage        (0 clean / 1 findin
 report    coverage summary: counts by status, kind, risk, review, gates; declared static values
 coverage  structural gap audit on its own
 emit      authz-matrix | test-plan | nav-map | seed-plan | operator-handbook | gap-report | rule-matrix
-add/set   safe partial writes under a lock (never rewrite the whole file)
+add/set   safe partial writes under a lock (never rewrite the whole file); set --append for lists
 remove/rename  delete an item, or change an id and every reference to it
 claim     multi-agent capability ownership                    (3 = conflict)
 release-claim  give a claim back when you stop or hand off    (3 = not yours to release)
+review-scope   check from git what a reviewer pass changed    (1 = outside its write surface)
 harvest   move this project's feedback into the cross-project store
 promote   list what clears the promotion bar; --export to share, --include-community to weigh
 store     init | sync | status for the cross-device observation store
@@ -201,16 +208,17 @@ SKILL.md                    the spine — phase-gated, routes to everything
 INTEGRATIONS.md             optional DesignArchitect + Open Code Review wiring
 agents/                     six dispatchable role agents (architect, implementer,
                             ux-reviewer, qa, security, harvester) + cross-harness docs
-references/                 14 files: discovery, archetypes, architecture, security,
+references/                 16 files: discovery, archetypes, architecture, security,
                             experience, verification, build order, stack adapters,
-                            buy-vs-build, data model, multi-agent, test data, evolution
+                            buy-vs-build, data model, multi-agent, manifest CLI, test
+                            data, evolution, resource index, rule matrix
 assets/admin-core-schema/   audit log, RBAC with scopes, impersonation, approvals,
                             jobs, exports, DSARs — Postgres + Prisma, Drizzle, Django,
                             Laravel, Rails
 assets/adminwright-ocr-rules.json   admin-console review rules for the OCR pass
 assets/agent-contract.template.md   drop into your repo as AGENTS.md / CLAUDE.md
 scripts/                    the validator, the agent installer, and the optional
-                            OCR bridge (stdlib only)
+                            OCR bridge (stdlib only); maintainer/ regenerates data
 tests/                      regression tests, every one from a real defect
 evals/                      golden fixtures pinning validator behaviour in CI
 lessons/                    durable lessons, version-controlled and shared
@@ -243,7 +251,9 @@ model reach for it. To pick up new commits later, run
 `claude plugin marketplace update tarikai` followed by `claude plugin update adminwright`,
 or enable auto-update for the `tarikai` marketplace (`/plugin`, **Marketplaces**, `tarikai`,
 **Enable auto-update**). `python scripts/admin_console_manifest.py --version` prints the
-commit you are running, and every `validate` summary line carries it together with the
+commit you are running (a plugin install reports the commit its cache folder is named after;
+a copied or vendored skill reports `unknown`), and every `validate` summary line carries it
+together with the
 rule-set hash, so a stale copy is visible in any transcript.
 
 ### Every other harness

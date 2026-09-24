@@ -56,7 +56,7 @@ Read the authoritative documentation for this stack before implementing against 
 `<STACK>`, `<VERSIONS>`. Record what you consulted in the manifest's
 `platform.researchSources[]`. Do not guess a framework's authorization, policy, or job idiom.
 
-## No mock data, no hard-coded values
+## Real data only, no hard-coded values
 
 No fabricated data, simulated response, or literal constant standing in for a real source may
 reach the release path. A value that is genuinely static by design must be registered in the manifest's
@@ -111,7 +111,7 @@ Do not report completion until all of these hold:
 - `<LINT COMMAND>` succeeds
 - `<TEST COMMAND>` succeeds
 - `<E2E COMMAND>` passes the critical workflow for every supported role
-- No unexplained TODO, placeholder route, or disconnected control remains
+- No unexplained to-do marker, stand-in route, or disconnected control remains
 - No browser console errors on any admin route
 - Every destructive operation has a safeguard and a recovery path
 - Every privileged operation emits an audit event

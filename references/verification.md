@@ -56,10 +56,17 @@ Evidence paths are repository-relative and resolve against the manifest's `proje
 | `auditEvents` | `kind` is `command`, `job` or `export` | at least one event |
 | `safeguards`, `recovery` | `risk` is `high` or `critical` | non-empty |
 | `implementedBy` | `status: implemented` | who built it; stamped by `claim --role implementer`, never cleared by `release-claim` |
-| `reviewStatus`, `reviewedBy` | release | `reviewed` needs a `reviewedBy` that is not the implementer (an error at `regulated`, a warning at `standard`); set `reviewedBy` before `reviewStatus` |
+| `reviewStatus`, `reviewedBy` | release | `reviewed` needs a `reviewedBy` that is not the implementer (an error at `regulated`, a warning at `standard`); set `reviewedBy` before `reviewStatus`. At every profile, `reviewed` is refused while an open critical or high gap targets the capability, `contested` needs an open gap naming it, and `contested` never becomes `reviewed` directly |
+| `contestedBy` | a reviewer contested it | the contester may not also be the `reviewedBy` that clears it (`contest-self-cleared`) |
 | `rationale` | `status` is `blocked`, `deferred` or `not-applicable` | a `not-applicable` capability needs nothing else; a command, job or export also needs a confirmed decision that names it |
 
 `implementedBy` is compared with `reviewedBy` together with `owner` and every implementer that ever held the capability (`agents[].previouslyOwned`), so releasing a claim never launders self-review.
+
+Elsewhere in the manifest:
+
+- **`platform.domainTerms`** declares domain nouns that read like placeholders, such as a lab's `Sample`, a task app's `Todo` or an exam product's `Mock exam`. Each term must name an entity by its id or name (`domain-term-unbacked`), so `mock` cannot be declared away without modelling a Mock.
+- **`decisions[].kind`** is one of `profile`, `not-applicable`, `risk-acceptance`, `buy-vs-build`, `design` or `other`. A `not-applicable` gate other than `tests` and `security` (which never are), and a `not-applicable` command, job or export, each need a confirmed decision of kind `not-applicable` whose `appliesTo` names it.
+- **Keys the schema does not declare** are `unknown-field`, except keys beginning `x-`, which hold project-specific data.
 
 ## The completeness test
 
@@ -106,7 +113,7 @@ Two rules keep lower tiers honest:
 
 Escalate the profile when any of these becomes true: `regulatedData` is non-empty, tenancy is multi-tenant with external customers, a command moves money or grants access, or an external audit obligation applies.
 
-`validate --profile OVERRIDE` previews a stricter tier before committing to it. At `--phase release` an override lower than `manifest.profile` is refused (exit 2) unless `--allow-lower-profile` is passed, in which case the output says `evaluated at <x>; manifest profile is <y>`. Every summary line names the effective profile.
+`validate --profile <profile>` previews a stricter tier before committing to it. At `--phase release` an override lower than `manifest.profile` is refused (exit 2) unless `--allow-lower-profile` is passed, in which case the output says `evaluated at <x>; manifest profile is <y>`. Every summary line names the effective profile.
 
 ### What evidence may point at
 
@@ -114,11 +121,13 @@ A gate is only as strong as the file it cites, so the validator judges the whole
 
 - `tests`, `evidence` and `policyTests` are arrays of strings. Any other shape is `manifest-type`, an error at every profile.
 - Nothing under `.admin-console/` counts as evidence (`evidence-inside-manifest-dir`): the manifest is the claim, not proof of it.
-- A file cited as a test must be shaped like one (a `*.spec.*`, `*.test.*`, `test_*.py`, `*_test.go` name, or a test-runner call) and contain a real assertion. Comments and `import { assert }` do not count. At `regulated` a spec cited by N capabilities needs at least N assertions.
+- A file cited as a test must be shaped like one and contain a real assertion. The shape is the runner's own convention for the file's language, such as `*.spec.ts`, `test_*.py`, `*_test.go`, `*_spec.rb` or `*Test.php`, or a runner's marker inside a source file that runner executes. JVM, .NET and Swift files also need a test annotation and a test name or test folder. A log or a note is never a test, whatever its name. Comments, `import { assert }`, `console.assert`, Kotlin `check()` and Rust `.expect()` are not assertions, and a tautology such as `expect(true).toBe(true)` does not count. At `regulated` a spec cited by N capabilities needs at least N assertions, unless it is parametrised (`it.each`, `@pytest.mark.parametrize`, `[Theory]`, a Go table loop).
 - Test files are not placeholder-scanned; the boundary is where a path appears, not what the file contains.
 - A test file is not gate evidence (`evidence-is-test-file`), one file may not be the evidence for more than two gates or for a gate and a `crossCutting` section (`evidence-shared`), and one spec may not be the test for more than three capabilities, or for capabilities, screens and `policyTests` at once (`test-file-shared`).
 - A cited test must name its capability (`evidence-token-match`): the capability id or one of its `serverOperations`, never a `uiRoute`, because every capability on a screen shares the route. A warning at `standard`, an error at `regulated`.
 - A gate's evidence must mention the gate id or a word from the gate's optional `command` field (`gate-evidence-unrelated`, a warning at `standard`, an error at `regulated`): record `command: "tsc --noEmit"` and the log of that command qualifies.
+- Evidence is the output of a run (`evidence-not-output`): project and configuration files (`package.json`, lockfiles, `*.config.ts`, CI workflows) are never evidence, and source code is never gate evidence.
+- A `passed` gate whose log ends with a non-zero `# exit code:` line is `gate-evidence-failed`, an error at every profile: the run the log records failed.
 - `declaredStatic[].path` may name a value, never a claim about the implementation: `dataBinding`, `sourceOfTruth`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `tests`, `evidence`, `dataSources`, `policyTests` and `uiRoutes` are refused (`declared-static-forbidden-path`). An `approvedBy` that names an agent, or the capability's own implementer or reviewer, is `declared-static-self-approved`. `emit --format gap-report` and `report` list every exemption with its reason and approver.
 - A `not-applicable` command, job or export must be named by a confirmed `decisions[].appliesTo` (`not-applicable-undecided`); the validate summary prints `not-applicable: N`.
 
@@ -284,6 +293,51 @@ Release validation must fail when any of these apply:
 - Known critical/high gap is unresolved without an accepted-risk decision
 
 Never report completion with a non-zero gate and a narrative explanation.
+
+### Capturing gate output
+
+A gate log is accepted on what it records: the command, and the exit code it returned. A phrase such as "0 errors" corroborates it but is not required, because honest success output is often empty or goes to stderr. `tsc --noEmit` and `eslint` print nothing at all; pip-audit, semgrep and Lighthouse CI summarise on stderr. Capture both streams, and frame the output with the command line and the exit code:
+
+```bash
+gate_run() {   # gate_run <gate> <command...>: writes evidence/<gate>.log, returns the command's exit code
+  local gate=$1 log rc; shift
+  mkdir -p evidence; log="evidence/$gate.log"
+  { printf '$ %s\n' "$*"; printf '# started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$log"
+  NO_COLOR=1 PYTHONUTF8=1 "$@" >> "$log" 2>&1
+  rc=$?; printf '\n# exit code: %d\n' "$rc" >> "$log"; return "$rc"
+}
+```
+
+Windows PowerShell 5.1 has no redirection that keeps a tool's output intact. `>` writes UTF-16. `Out-File -Encoding utf8` writes a byte-order mark, garbles every non-ASCII character (`✓` becomes `Γ£ô`) and wraps each stderr line in `NativeCommandError` records. Let `cmd.exe` append the raw bytes instead:
+
+```powershell
+function Invoke-Gate([string]$Gate, [string]$Command) {
+    $null = New-Item -ItemType Directory -Force -Path evidence
+    $log = Join-Path (Resolve-Path evidence).Path ($Gate + '.log')
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [IO.File]::WriteAllText($log, '$ ' + $Command + "`n", $utf8)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $env:ComSpec
+    $psi.Arguments = '/d /s /c "' + $Command + ' >> "' + $log + '" 2>&1"'
+    $psi.UseShellExecute = $false
+    $psi.EnvironmentVariables['NO_COLOR'] = '1'
+    $p = [Diagnostics.Process]::Start($psi); $p.WaitForExit()
+    [IO.File]::AppendAllText($log, "`n# exit code: $($p.ExitCode)`n", $utf8)
+    return $p.ExitCode
+}
+```
+
+`cmd.exe` interprets the command line, so escape `& | < > ^ %`, or put a complex command in a script. Set `NO_COLOR=1`, never `FORCE_COLOR=0`, which turns colour on in picocolors-based tools such as vite.
+
+Some tools exit 0 when they found problems. Record the flag that makes them fail, and read the log rather than trusting the exit code alone:
+
+| Tool | Exit 0 despite findings unless |
+|---|---|
+| `semgrep scan` | `--error` |
+| `@axe-core/cli` | `--exit` |
+| `npm audit --audit-level=<level>` | the level is low enough: findings below it are hidden |
+| `pytest` | exit 5 means no test was collected, which is not a pass |
+| `k6` | exit 99 means a threshold failed |
 
 ## What the validator cannot check
 

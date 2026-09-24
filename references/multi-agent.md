@@ -43,7 +43,7 @@ Never rewrite the manifest as a whole file. A whole-file write serializes the co
 
 Five claimable roles, in pass order: `architect`, `implementer`, `ux-reviewer`, `security`, `qa`. Each is a distinct pass, whether five agents run them or one agent runs them in sequence. `qa` runs last because it owns the release gate.
 
-The `harvester` is a sixth pass, not a role. It never registers in `agents[]` and never claims a capability (`claim --role harvester` is refused, and `add --kind agent` rejects the role). It runs after `qa` and writes only `feedback[]`, the cross-project store and, in a checkout of the skill, lessons. See [skill-evolution.md](skill-evolution.md).
+The `harvester` is a sixth pass, not a role. It never registers in `agents[]` and never claims a capability: `claim` and `add --kind agent` both refuse the harvester role. It runs after `qa` and writes only `feedback[]`, the cross-project store and, in a checkout of the skill, lessons. See [skill-evolution.md](skill-evolution.md).
 
 | Role | Owns | Must not |
 |---|---|---|

@@ -1,0 +1,5 @@
+$ npm audit --omit=dev
+# started: 2026-09-24T09:00:00Z
+3 vulnerabilities (1 high)
+
+# exit code: 1

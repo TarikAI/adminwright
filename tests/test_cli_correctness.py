@@ -320,6 +320,33 @@ class TestFileLock(unittest.TestCase):
             self.assertIn("delete", str(caught.exception))
         self.assertFalse(self.path.with_name(".lock.soft").exists())
 
+    def test_only_unsupported_locking_falls_back(self):
+        # A process on the soft fallback is not excluded by one holding the OS lock, so
+        # an I/O error must not quietly let a second writer in.
+        original = acm._os_try_lock
+
+        def broken(fd):
+            raise OSError(errno.EIO, "Input/output error")
+
+        acm._os_try_lock = broken
+        self.addCleanup(setattr, acm, "_os_try_lock", original)
+        with self.assertRaises(acm.LockError) as caught:
+            with acm.FileLock(self.path, timeout=5):
+                pass
+        self.assertIn("Cannot lock", str(caught.exception))
+        self.assertFalse(self.path.with_name(".lock.soft").exists())
+
+    def test_an_unopenable_lock_path_fails_fast_instead_of_waiting(self):
+        # A directory where the lock file belongs used to look like a holder for the
+        # whole 30-second timeout.
+        self.path.mkdir()
+        started = time.monotonic()
+        with self.assertRaises(acm.LockError) as caught:
+            with acm.FileLock(self.path, timeout=30):
+                pass
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("Cannot open lock", str(caught.exception))
+
 
 class TestCrashes(TempProject):
     """6.9 -- wrong shapes and IO failures must never be tracebacks."""

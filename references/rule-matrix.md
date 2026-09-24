@@ -49,6 +49,7 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `gap-rationale-missing` | error | error | error |
 | `gap-unresolved` | error | error | error |
 | `gate-always-required` | warn | error | error |
+| `gate-evidence-failed` | error | error | error |
 | `gate-evidence-missing` | error | error | error |
 | `gate-evidence-path` | warn | error | error |
 | `gate-evidence-unrelated` | off | warn | error |

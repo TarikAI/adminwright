@@ -58,8 +58,10 @@ and localized text, missing optionals, conflicts, partial job failures, cross-te
 neighbours. `emit --format seed-plan` and `emit --format test-plan` give the worklist.
 
 **Run everything.** Run the project's build, type check, lint, tests and security checks,
-capturing real output as evidence files. In PowerShell 5.1, use
-`2>&1 | Out-File -Encoding utf8 <log>`, never `>`.
+capturing each with verification.md's recipe (`gate_run` in bash, `Invoke-Gate` in
+PowerShell) so the log records the command and its exit code. A passed gate whose log
+records a failure is refused, and some tools exit 0 on findings unless told otherwise
+(`semgrep --error`, axe `--exit`).
 
 **Permission matrix.** From `emit --format authz-matrix`, every role and operation needs two
 tests: one that the permitted path works, and a negative test that the server, not the UI,

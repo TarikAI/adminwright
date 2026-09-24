@@ -26,6 +26,16 @@ Everything below has shipped; see [CHANGELOG.md](CHANGELOG.md) for detail.
 - ~~The 2026-09-23 audit~~ — 289 verified findings across the gates, false blocks, Windows
   and PowerShell, the learning loop, the core schema and the agents; each has a regression
   test, and `gate-matrix` plus `tests/test_rule_coverage.py` keep every rule pinned.
+- ~~Round two (2026-09-24)~~ — an independent verification of those fixes, then:
+  - an OS-level write lock;
+  - the review state machine and `review-scope`;
+  - `SKILL.md` inside Claude Code's post-compaction limit;
+  - agents with inputs, exit checks and a return contract;
+  - Unicode confusables from UTS #39;
+  - a verified evidence capture recipe;
+  - a test that every documented command parses;
+  - core-schema fixes, including a separation-of-duties bypass through a temporary table
+    that shadowed `approval_request`.
 
 ## Next: field test and case study
 
@@ -37,6 +47,18 @@ The field tests so far were short and mostly audits. What is still missing is on
 on a real codebase, read closely: where an agent following `SKILL.md` was tempted to deviate
 is exactly the data the learning loop was built to capture, and a published case study is
 the evidence that the gates certify something a reader can check.
+
+Two recommendations from the round-two research are not built yet:
+
+- **Behavioral evals.** A `claude plugin eval` suite in its own folder (`evals/` holds the
+  validator fixtures), run on Sonnet and Opus. It would check that a back-office request
+  triggers the skill and a near miss does not, that the implementer claims before it edits,
+  that reviewers make no edits, and that the harvester without a digest returns
+  `NEEDS_CONTEXT`. This waits on the command being generally available.
+- **Plugin hooks for the reviewer write surface.** A `PreToolUse` hook in Claude Code that
+  refuses reviewer writes outside their surface, and one on `SubagentStop` that runs each
+  role's exit check. It would fail open when Python is missing. `review-scope` already
+  covers every harness after the fact.
 
 ## Then: release and distribution
 

@@ -86,8 +86,8 @@ For each capability, in order:
    recovery path before they get a button.
 10. Record real `dataBinding`, `serverOperations`, `authorizationPolicies`, `auditEvents`,
     `safeguards`, `tests` and `evidence` through `set`. Every referenced file exists and is
-    non-empty. Capture command output as evidence files; in PowerShell 5.1 use
-    `2>&1 | Out-File -Encoding utf8 <log>`, never `>`.
+    non-empty. Capture command output with verification.md's recipe (`gate_run` in bash,
+    `Invoke-Gate` in PowerShell), which records the command and its exit code.
 
 ## When a capability comes back contested
 

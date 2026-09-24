@@ -624,7 +624,8 @@
       "status": "passed",
       "threshold": "0 findings",
       "evidence": [
-        "evidence/shared.log"
+        "evidence/shared.log",
+        "evidence/audit-run.log"
       ],
       "rationale": ""
     },
