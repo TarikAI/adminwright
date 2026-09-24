@@ -43,12 +43,15 @@ placeholder <skill-dir>, and this machine's absolute path goes to
 .adminwright/skill-dir, which the installer adds to the project's .gitignore.
 Every agent's "Locate the skill" section reads that file before its search list.
 
-For harnesses without native subagent support, the pointer block instructs the
-main agent to run the passes sequentially with distinct agent ids, per the
-single-agent degradation rules in references/multi-agent.md. `--append-pointer`
-writes the block into the harness's instruction file; the block is delimited by
-marker comments, so a reinstall replaces it in place instead of duplicating or
-skipping it. Without the flag the block is printed for manual paste.
+The pointer block tells the main agent where the passes are and in what order;
+where a harness cannot spawn subagents it runs the passes sequentially with
+distinct agent ids, per the single-agent degradation rules in
+references/multi-agent.md. Codex, Antigravity and Pi all read AGENTS.md, so the
+block carries one marked section per harness installed into that file, and a
+reinstall in any order keeps every section. `--append-pointer` writes the block
+into the instruction file and replaces it in place on a reinstall; without the
+flag the block is printed for manual paste. Cursor's rule file is a dedicated
+document and is rewritten on every install.
 
 Exit codes: 0 success, 2 usage or IO failure.
 """
@@ -76,6 +79,9 @@ GITIGNORE_COMMENT = "# adminwright: this machine's skill path, written by instal
 
 MARKER_START = "<!-- adminwright-agents:start -->"
 MARKER_END = "<!-- adminwright-agents:end -->"
+# Opens one harness's section inside the pointer block, so a later install into
+# the same instruction file knows which harnesses already share it.
+SECTION_MARK = "<!-- adminwright-harness: {} -->"
 
 # Harness-neutral fallback copy, written for every harness that has no complete
 # native story of its own.
@@ -150,6 +156,14 @@ HARNESSES = {
     # Any other harness: the neutral copy and a printed pointer block. Nothing
     # to verify, so no docs.
     "generic": Harness(None, None, None, True, (), CHECKED),
+}
+
+# How the pointer block names a harness that discovers the prompts natively.
+LABELS = {
+    "codex": "Codex",
+    "antigravity": "Antigravity",
+    "gemini": "Gemini CLI",
+    "cursor": "Cursor",
 }
 
 # Instruction files that are a whole rule document rather than a shared file to
@@ -438,9 +452,11 @@ def report_machine_path(project_root, skill_dir, needed):
 
 # --- pointer block --------------------------------------------------------------
 
-# Extra dispatch guidance per harness, appended inside the pointer block. Each
-# entry exists because that harness's default behavior fought the skill in the
-# field; keep entries short and behavioral.
+# Extra dispatch guidance per harness, inside that harness's section of the
+# pointer block. Each entry exists because that harness's default behavior fought
+# the skill in the field; keep entries short and behavioral. Every entry opens
+# with "<Name> note", which is how blocks written before section marks existed
+# are recognized.
 HARNESS_NOTES = {
     "antigravity": [
         "Antigravity note — respect existing plans: this harness drafts its own",
@@ -452,17 +468,26 @@ HARNESS_NOTES = {
         "record.",
     ],
     "codex": [
-        "Codex note: run the passes sequentially in one session, adopting one role file at",
-        "a time. Announce each pass switch in one line (role, agent id, exit condition)",
-        "before continuing, so the transcript shows where one role's authority ended.",
+        "Codex note: Codex spawns subagents when these instructions ask. Run each pass as the",
+        "custom agent of the same name (for example `adminwright-architect`), and let a pass",
+        "finish, with its exit condition checked, before starting one the order above puts",
+        "after it. Subagents inherit this session's sandbox, so a read-only sandbox stops",
+        "every pass (each one writes the manifest). Where subagents are off (`[agents]",
+        "enabled = false`), run the passes sequentially in this session instead and announce",
+        "each switch in one line (role, agent id, exit condition), so the transcript shows",
+        "where one role's authority ended.",
     ],
     "gemini": [
-        "Gemini note: run the passes sequentially, one role file at a time, and re-read the",
-        "manifest from disk at each pass switch — do not carry a cached copy across passes.",
+        "Gemini note: dispatch each pass to the subagent of the same name; subagents cannot",
+        "call each other, so this session orchestrates them. Whether a pass runs as a",
+        "subagent or here, re-read the manifest from disk at each pass switch — do not carry",
+        "a cached copy across passes.",
     ],
     "cursor": [
-        "Cursor note: keep this file loaded as a rule; adopt one role file at a time and",
-        "make the current role explicit in each response so review independence is visible.",
+        "Cursor note: keep this file loaded as a rule. Dispatch each pass to the subagent of",
+        "the same name; when you run a pass yourself instead, adopt one role file at a time",
+        "and make the current role explicit in each response so review independence is",
+        "visible.",
     ],
     "pi": [
         "Pi note: run the passes sequentially, one role file at a time, with a distinct",
@@ -471,12 +496,25 @@ HARNESS_NOTES = {
 }
 
 
-def pointer_block(agent_dir, skill_rel, harness=None, native_dir=None):
+def harness_section(name):
+    """One harness's lines inside the pointer block, opened by its section mark;
+    empty for a harness with nothing to say."""
+    lines = []
+    native_dir = HARNESSES[name].native_dir
+    if native_dir and name in LABELS:
+        lines.append(LABELS[name] + " discovers these prompts natively in `" + native_dir + "/`.")
+    lines += HARNESS_NOTES.get(name, [])
+    return [SECTION_MARK.format(name)] + lines if lines else []
+
+
+def pointer_block(agent_dir, skill_rel, harnesses=()):
     """The marker-delimited block that points a harness at the skill and agents.
 
     `skill_rel` is the skill's path relative to the project root, or None when
     the skill lives outside the project; the block then sends the reader to the
-    git-ignored MACHINE_PATH_FILE, so it never holds a machine's path.
+    git-ignored MACHINE_PATH_FILE, so it never holds a machine's path. Each of
+    `harnesses` gets its own marked section, in HARNESSES order, whatever order
+    they were installed in.
     """
     lines = [MARKER_START, "## Adminwright agent passes", ""]
     if skill_rel is not None:
@@ -498,12 +536,6 @@ def pointer_block(agent_dir, skill_rel, harness=None, native_dir=None):
         "each file as one. If not, run them yourself sequentially, adopting one file at a",
         "time as your instructions, with a distinct agent id per pass — the single-agent",
         "degradation rules in the skill's `references/multi-agent.md` apply.",
-    ]
-    if native_dir:
-        lines += [
-            "This harness also discovers the same prompts natively in `" + native_dir + "/`.",
-        ]
-    lines += [
         "",
         "Order: architect (always first; plan-validate must exit 0), implementer for the",
         "auth/authz/tenancy/audit spine (serialized), implementers per entity slice,",
@@ -524,9 +556,12 @@ def pointer_block(agent_dir, skill_rel, harness=None, native_dir=None):
         "remains deferred or blocked with the reason. Never claim 'production-ready'",
         "without those exit codes at 0.",
     ]
-    notes = HARNESS_NOTES.get(harness or "")
-    if notes:
-        lines += [""] + notes
+    wanted = set(harnesses)
+    for name in HARNESSES:
+        if name in wanted:
+            section = harness_section(name)
+            if section:
+                lines += [""] + section
     lines.append(MARKER_END)
     return "\n".join(lines) + "\n"
 
@@ -536,6 +571,39 @@ BLOCK_RE = re.compile(re.escape(MARKER_START) + r".*?" + re.escape(MARKER_END) +
 # pasted without its markers) is migrated rather than duplicated.
 LEGACY_HEADING = re.compile(r"^## Adminwright agent passes[ \t]*$", re.MULTILINE)
 NEXT_HEADING = re.compile(r"^#{1,2}[ \t]+\S", re.MULTILINE)
+SECTION_RE = re.compile(r"<!-- adminwright-harness: ([a-z0-9_-]+) -->")
+# The first words of every HARNESS_NOTES entry since the first release.
+LEGACY_NOTE = re.compile(r"^(Antigravity|Codex|Gemini|Cursor|Pi) note\b", re.MULTILINE)
+
+
+def adminwright_text(existing):
+    """The adminwright part of an instruction file: every marked block, or else
+    an unmarked section under the block's heading; "" when there is none."""
+    blocks = [match.group(0) for match in BLOCK_RE.finditer(existing)]
+    if blocks:
+        return "".join(blocks)
+    legacy = LEGACY_HEADING.search(existing)
+    if legacy:
+        following = NEXT_HEADING.search(existing, legacy.end())
+        return existing[legacy.start():following.start() if following else len(existing)]
+    return ""
+
+
+def harnesses_in(block_text):
+    """Harnesses with a section in an existing block: its section marks, plus the
+    notes that identified each harness in blocks written before the marks."""
+    names = set(SECTION_RE.findall(block_text))
+    names.update(label.lower() for label in LEGACY_NOTE.findall(block_text))
+    return names
+
+
+def pointer_harnesses(harness, instruction_file, existing):
+    """The harnesses the block in `instruction_file` should carry after this
+    install: `harness` plus every harness already there that uses the same file."""
+    kept = {name for name in harnesses_in(adminwright_text(existing))
+            if name in HARNESSES and HARNESSES[name].instruction_file == instruction_file}
+    kept.add(harness)
+    return kept
 
 
 def merge_pointer(existing, block):
@@ -596,36 +664,46 @@ def read_instruction_file(path):
     return raw, "\n"
 
 
-def append_pointer(instruction_path, block, dedicated=False):
-    """Write the pointer block into a harness instruction file; returns the status.
+def plan_pointer(spec, harness, project_root, skill_rel):
+    """Everything about the pointer decided before any file is written, so a
+    refusal (unbalanced markers, an undecodable file) leaves the project as it
+    was. None for a harness with no instruction file.
 
-    A dedicated rule file (Cursor's .mdc) is the whole document, so it is written
-    wholesale and refreshed on every install. A shared file (AGENTS.md, GEMINI.md)
-    keeps everything outside the marked block untouched.
+    A dedicated rule file (Cursor's .mdc) is the whole document, written
+    wholesale on every install. A shared file (AGENTS.md, GEMINI.md) keeps
+    everything outside the marked block untouched, and the block keeps the
+    section of every other harness installed into the same file.
     """
-    if dedicated:
-        write_text(instruction_path, MDC_FRONTMATTER + block)
-        return "appended"
+    if not spec.instruction_file:
+        return None
+    path = project_root / spec.instruction_file
+    dedicated = spec.instruction_file in DEDICATED_RULE_FILES
     existing, newline = ("", "\n")
-    if instruction_path.exists():
-        existing, newline = read_instruction_file(instruction_path)
-    merged, status = merge_pointer(existing, block)
-    if status != "unchanged":
-        instruction_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(str(instruction_path), "w", encoding="utf-8", newline="") as handle:
+    if not dedicated and path.exists():
+        existing, newline = read_instruction_file(path)
+    names = {harness} if dedicated else pointer_harnesses(
+        harness, spec.instruction_file, existing)
+    block = pointer_block(NEUTRAL_DIR, skill_rel, names)
+    plan = {"path": path, "name": spec.instruction_file, "block": block,
+            "dedicated": dedicated, "has_block": False}
+    if not dedicated:
+        merged, status = merge_pointer(existing, block)
+        plan.update(merged=merged, status=status, newline=newline,
+                    has_block=bool(adminwright_text(existing)))
+    return plan
+
+
+def write_pointer(plan):
+    """Carry out a planned --append-pointer (or a dedicated rule); returns the status."""
+    if plan["dedicated"]:
+        write_text(plan["path"], MDC_FRONTMATTER + plan["block"])
+        return "appended"
+    if plan["status"] != "unchanged":
+        merged, newline = plan["merged"], plan["newline"]
+        plan["path"].parent.mkdir(parents=True, exist_ok=True)
+        with open(str(plan["path"]), "w", encoding="utf-8", newline="") as handle:
             handle.write(merged.replace("\n", newline) if newline != "\n" else merged)
-    return status
-
-
-def pointer_status(instruction_path, block):
-    """Read-only: what --append-pointer would do to an existing shared file, or
-    None when the file does not exist or carries no adminwright block."""
-    if not instruction_path.exists():
-        return None
-    existing, _newline = read_instruction_file(instruction_path)
-    if MARKER_START not in existing and not LEGACY_HEADING.search(existing):
-        return None
-    return merge_pointer(existing, block)[1]
+    return plan["status"]
 
 
 # --- main -----------------------------------------------------------------------
@@ -648,16 +726,15 @@ def run_install(args):
     spec = HARNESSES[args.harness]
     skill_text, skill_rel = skill_reference(skill_dir, project_root)
     agents = [load_agent(source, skill_text) for source in sources]
+    native = [render_native(spec.native_format, agent) for agent in agents] if spec.native_format else []
+    pointer = plan_pointer(spec, args.harness, project_root, skill_rel)
 
     if spec.native_format:
         native_dir = project_root / spec.native_dir
-        installed = []
-        for agent in agents:
-            relative, text = render_native(spec.native_format, agent)
+        for relative, text in native:
             write_text(native_dir / relative, text)
-            installed.append(relative)
-        print("Installed " + str(len(installed)) + " agents to " + str(native_dir))
-        for relative in installed:
+        print("Installed " + str(len(native)) + " agents to " + str(native_dir))
+        for relative, _text in native:
             print("  " + relative)
 
     neutral_dir = project_root / NEUTRAL_DIR
@@ -672,41 +749,34 @@ def run_install(args):
 
     report_machine_path(project_root, skill_dir, skill_rel is None)
 
-    if spec.instruction_file or args.harness == "generic":
-        block = pointer_block(NEUTRAL_DIR, skill_rel, args.harness, spec.native_dir)
-    if spec.instruction_file:
-        instruction_name = spec.instruction_file
-        instruction_path = project_root / instruction_name
-        dedicated = instruction_name in DEDICATED_RULE_FILES
-        if args.append_pointer or dedicated:
+    if pointer is not None:
+        where = str(pointer["path"])
+        if args.append_pointer or pointer["dedicated"]:
             # A dedicated rule file is ours alone, so writing it is not the
             # intrusion that changing someone's AGENTS.md would be.
-            status = append_pointer(instruction_path, block, dedicated)
+            status = write_pointer(pointer)
             if status == "unchanged":
-                print("Pointer block already present in " + str(instruction_path)
-                      + " and current; unchanged")
+                print("Pointer block already present in " + where + " and current; unchanged")
             elif status == "updated":
-                print("Updated pointer block in " + str(instruction_path))
+                print("Updated pointer block in " + where)
             elif status == "migrated":
-                print("Replaced an older unmarked adminwright section in "
-                      + str(instruction_path) + " with the marked pointer block")
+                print("Replaced an older unmarked adminwright section in " + where
+                      + " with the marked pointer block")
             else:
-                print("Wrote pointer block to " + str(instruction_path))
-        else:
-            status = pointer_status(instruction_path, block)
-            if status == "unchanged":
-                print("Pointer block already present in " + str(instruction_path)
-                      + " and current; unchanged")
-            elif status is not None:
-                print(str(instruction_path) + " has an out-of-date adminwright pointer block; "
+                print("Wrote pointer block to " + where)
+        elif pointer["has_block"]:
+            if pointer["status"] == "unchanged":
+                print("Pointer block already present in " + where + " and current; unchanged")
+            else:
+                print(where + " has an out-of-date adminwright pointer block; "
                       "rerun with --append-pointer to replace it in place, or paste this one:\n")
-                print(block)
-            else:
-                print("\nAdd this to " + instruction_name + " (or rerun with --append-pointer):\n")
-                print(block)
+                print(pointer["block"])
+        else:
+            print("\nAdd this to " + pointer["name"] + " (or rerun with --append-pointer):\n")
+            print(pointer["block"])
     elif args.harness == "generic":
         print("\nPoint your harness at the installed files; dispatch order is in each name:")
-        print(block)
+        print(pointer_block(NEUTRAL_DIR, skill_rel))
     return 0
 
 

@@ -270,9 +270,10 @@ class TestInstall(InstallBase):
         self.assertIn("plan of record", text)
 
     def test_every_pointer_carries_plan_and_report_rules(self):
-        block = ia.pointer_block("/agents", "/skill", None)
-        self.assertIn("plan of record", block)
-        self.assertIn("completion report", block)
+        for block in (ia.pointer_block(".adminwright/agents", "vendor/adminwright"),
+                      ia.pointer_block(".adminwright/agents", None, ("codex", "pi"))):
+            self.assertIn("plan of record", block)
+            self.assertIn("completion report", block)
 
     def test_missing_project_root_fails_with_exit_2(self):
         code, _out, err = run("--harness", "generic", "--project-root",
@@ -524,7 +525,9 @@ class TestPointerPaths(InstallBase):
         text = (self.project / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("`.claude/skills/adminwright`", text)
         self.assertNotIn(ia.TOKEN, text)
-        self.assertNotIn("<!--", text.replace(ia.MARKER_START, "").replace(ia.MARKER_END, ""),
+        markers_removed = re.sub(r"<!-- adminwright-harness: [a-z0-9_-]+ -->", "",
+                                 text.replace(ia.MARKER_START, "").replace(ia.MARKER_END, ""))
+        self.assertNotIn("<!--", markers_removed,
                          "no absolute-path comment is needed when the path is relative")
         for absolute in self.absolutes(self.project):
             self.assertNotIn(absolute, text.lower().replace("\\", "/"))
@@ -695,6 +698,144 @@ class TestPointerPaths(InstallBase):
         self.assertIn("UTF-8", err)
         self.assertNotIn("Traceback", err)
         self.assertEqual(agents_md.read_bytes(), b"caf\xe9 rules\n")
+
+
+def harness_sections(text):
+    """{harness: section text} for every section inside the one pointer block."""
+    block = text[text.index(ia.MARKER_START):text.index(ia.MARKER_END)]
+    parts = re.split(r"<!-- adminwright-harness: ([a-z0-9_-]+) -->\n", block)
+    return dict(zip(parts[1::2], parts[2::2]))
+
+
+# The field-tested line each harness's note must keep, wherever the block moves.
+NOTE_PROOF = {
+    "antigravity": "Do not author a competing plan",
+    "codex": "custom agent of the same name",
+    "pi": "Pi note: run the passes sequentially",
+}
+
+
+class TestSharedInstructionFiles(InstallBase):
+    """Codex, Antigravity and Pi all read AGENTS.md: one block, a section each,
+    and no install order loses a section (ocr-installer#9)."""
+
+    def install(self, harness, project, extra=("--append-pointer",)):
+        code, out, err = run(*(["--harness", harness, "--project-root", project] + list(extra)))
+        self.assertEqual(code, 0, out + err)
+        return out
+
+    def assert_sections(self, text, harnesses):
+        self.assertEqual(text.count(ia.MARKER_START), 1)
+        self.assertEqual(text.count(ia.MARKER_END), 1)
+        sections = harness_sections(text)
+        self.assertEqual(sorted(sections), sorted(harnesses))
+        for name in harnesses:
+            self.assertEqual(text.count(NOTE_PROOF[name]), 1, name)
+            self.assertIn(NOTE_PROOF[name], sections[name])
+
+    def test_every_install_order_keeps_every_section(self):
+        orders = (
+            ("codex", "antigravity", "codex"),          # the reported loss
+            ("antigravity", "codex", "antigravity"),
+            ("pi", "codex", "antigravity", "pi"),
+            ("antigravity", "pi", "codex"),
+            ("codex", "pi"),
+        )
+        finals = {}
+        for order in orders:
+            with self.subTest(order=order):
+                project = Path(tempfile.mkdtemp(prefix="adminwright-shared-"))
+                self.addCleanup(shutil.rmtree, str(project), ignore_errors=True)
+                (project / "AGENTS.md").write_bytes(b"# Team rules\n\nBe kind.\n")
+                for harness in order:
+                    self.install(harness, project)
+                text = (project / "AGENTS.md").read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("# Team rules\n\nBe kind.\n"))
+                self.assert_sections(text, set(order))
+                finals.setdefault(frozenset(order), set()).add(text)
+                for harness in set(order):  # a rerun of any of them changes nothing
+                    out = self.install(harness, project)
+                    self.assertIn("already present", out, harness)
+                    self.assertEqual((project / "AGENTS.md").read_text(encoding="utf-8"), text)
+        for harnesses, texts in finals.items():
+            self.assertEqual(len(texts), 1, "install order changed the block for "
+                             + ", ".join(sorted(harnesses)))
+
+    def test_a_block_written_before_section_marks_keeps_its_harness(self):
+        # A d6c64a8-era Antigravity block has no section marks; the next Codex
+        # install used to replace it wholesale and drop the Antigravity note.
+        legacy = "\n".join([
+            ia.MARKER_START,
+            "## Adminwright agent passes",
+            "",
+            "The role prompts in `.adminwright/agents/` define six passes.",
+            "This harness also discovers the same prompts natively in `.agents/agents/`.",
+            "",
+        ] + ia.HARNESS_NOTES["antigravity"] + [ia.MARKER_END]) + "\n"
+        agents_md = self.project / "AGENTS.md"
+        agents_md.write_bytes(("# Rules\n\n" + legacy).encode("utf-8"))
+        out = self.install("codex", self.project)
+        self.assertIn("Updated pointer block", out)
+        text = agents_md.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# Rules\n\n" + ia.MARKER_START))
+        self.assert_sections(text, {"antigravity", "codex"})
+        self.assertNotIn("This harness also discovers", text)
+
+    def test_an_unmarked_section_keeps_its_harness_too(self):
+        agents_md = self.project / "AGENTS.md"
+        agents_md.write_bytes(
+            b"## Adminwright agent passes\n\nOld text.\n\nPi note: old wording.\n\n## Next\n\nKeep.\n")
+        out = self.install("antigravity", self.project)
+        self.assertIn("older unmarked", out)
+        text = agents_md.read_text(encoding="utf-8")
+        self.assert_sections(text, {"antigravity", "pi"})
+        self.assertNotIn("old wording", text)
+        self.assertTrue(text.endswith(ia.MARKER_END + "\n\n## Next\n\nKeep.\n"))
+
+    def test_without_the_flag_the_printed_block_keeps_the_other_sections(self):
+        self.install("antigravity", self.project)
+        before = (self.project / "AGENTS.md").read_bytes()
+        out = self.install("codex", self.project, extra=())
+        self.assertEqual((self.project / "AGENTS.md").read_bytes(), before)
+        self.assertIn("out-of-date", out)
+        self.assertIn(NOTE_PROOF["antigravity"], out)
+        self.assertIn(NOTE_PROOF["codex"], out)
+
+    def test_the_codex_section_dispatches_its_native_custom_agents(self):
+        # Codex spawns the .codex/agents custom agents when AGENTS.md asks; the
+        # old note ("run the passes sequentially in one session") contradicted
+        # the block's own "discovers the same prompts natively" line.
+        self.install("codex", self.project)
+        codex = harness_sections((self.project / "AGENTS.md").read_text(encoding="utf-8"))["codex"]
+        self.assertIn("`.codex/agents/`", codex)
+        self.assertIn("custom agent of the same name", codex)
+        self.assertNotIn("run the passes sequentially in one session", codex)
+        self.assertIn("enabled = false", codex, "the sequential fallback names its condition")
+
+    def test_each_native_harness_section_names_its_directory(self):
+        for harness in ("codex", "antigravity", "gemini", "cursor"):
+            with self.subTest(harness=harness):
+                project = Path(tempfile.mkdtemp(prefix="adminwright-section-"))
+                self.addCleanup(shutil.rmtree, str(project), ignore_errors=True)
+                self.install(harness, project)
+                spec = ia.HARNESSES[harness]
+                text = (project / spec.instruction_file).read_text(encoding="utf-8")
+                sections = harness_sections(text)
+                self.assertEqual(sorted(sections), [harness])
+                self.assertIn("`" + spec.native_dir + "/`", sections[harness])
+                self.assertNotIn("run the passes sequentially, one role file at a time, and",
+                                 sections[harness], "native harnesses dispatch subagents first")
+
+    def test_a_refused_pointer_writes_nothing(self):
+        # Unbalanced markers are refused; the refusal must come before any agent
+        # file is written, not after.
+        agents_md = self.project / "AGENTS.md"
+        agents_md.write_bytes(b"top\n" + ia.MARKER_START.encode("utf-8") + b"\n")
+        code, _out, err = run("--harness", "codex", "--project-root", self.project,
+                              "--append-pointer")
+        self.assertEqual(code, 2)
+        self.assertIn("unbalanced", err)
+        self.assertEqual(sorted(p.name for p in self.project.iterdir()), ["AGENTS.md"])
 
 
 def locate_section(text):

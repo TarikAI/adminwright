@@ -69,7 +69,10 @@ python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <pr
 Native files carry only the fields that harness documents (`tools` and `model` from the
 Claude Code files are not carried over); `.adminwright/agents/` is the harness-neutral copy
 of the source files. The pointer block is delimited by marker comments, so rerunning with
-`--append-pointer` after the skill moves replaces it in place.
+`--append-pointer` after the skill moves replaces it in place. Codex, Antigravity and Pi all
+read `AGENTS.md`, so the block there carries one marked section per harness installed into
+it: installing them one after another, in any order, keeps every harness's notes, and a
+rerun changes nothing.
 
 No file the installer writes for the project to commit holds a machine's absolute path.
 When the skill lives inside the project, every copy and the pointer block name it relative
@@ -100,9 +103,12 @@ harness-specific notes where a harness's default behavior fights the skill:
   plain-language paragraph (what operators can now do, what was found, whether it is safe),
   and the run closes with the skill's completion-report format with validate/coverage exit
   codes as evidence — never "production-ready" without them.
-- **Sequential harnesses announce pass switches** (Codex/Gemini/Cursor/Pi notes), so the
-  transcript shows where one role's authority ended and the manifest is re-read from disk
-  rather than carried across passes.
+- **Native subagents first, sequential passes as the fallback.** Codex, Gemini CLI, Cursor
+  and Antigravity discover the installed agents, so their notes say to dispatch each pass
+  to the agent of the same name (Codex spawns subagents when `AGENTS.md` asks it to). A
+  pass run in the main session instead, and every pass in Pi, announces the switch and
+  re-reads the manifest from disk, so the transcript shows where one role's authority
+  ended.
 
 Learning transfers across harnesses the same way: conversation history stays in one tool,
 so each agent banks session learnings into the manifest's `feedback[]`, and the harvester
