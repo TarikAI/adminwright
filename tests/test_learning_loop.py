@@ -416,17 +416,25 @@ class TestStoreSync(unittest.TestCase):
             self.assertEqual(code, 0, out + err)
 
     def record(self, ident):
-        return {"id": ident, "project": ident.split(":")[0], "category": "gap",
-                "scope": "SKILL.md", "observation": "o " + ident, "proposedChange": "c " + ident,
-                "date": "2026-09-23"}
+        # The shape of a harvested record, as the verifier's sync harness wrote it.
+        return {"project": ident.split(":")[0], "category": "gap", "observation": "obs " + ident,
+                "proposedChange": "change " + ident, "scope": "SKILL.md", "evidence": [],
+                "date": "2026-09-23", "id": ident, "fingerprint": ident.replace(":", "")}
 
-    def append(self, store, ids):
+    def append(self, store, ids, compact=False):
+        """Append the way a harvest does; `compact` is the separators older tools wrote."""
         with open(str(store / "observations.jsonl"), "a", encoding="utf-8", newline="\n") as handle:
             for ident in ids:
-                handle.write(json.dumps(self.record(ident)) + "\n")
+                if compact:
+                    handle.write(json.dumps(self.record(ident), separators=(",", ":")) + "\n")
+                else:
+                    handle.write(json.dumps(self.record(ident)) + "\n")
 
     def ids(self, text):
         return {json.loads(line)["id"] for line in text.splitlines() if line.strip()}
+
+    def store_ids(self, store):
+        return self.ids((store / "observations.jsonl").read_bytes().decode("utf-8"))
 
     def sync(self, store):
         code, out, err = run("store", "sync", "--store", store, "--date", "2026-09-23")
@@ -437,17 +445,33 @@ class TestStoreSync(unittest.TestCase):
         return self.ids(self.git("show", "main:observations.jsonl", cwd=self.remote))
 
     def test_the_same_records_in_a_different_order_are_never_deleted(self):
-        self.append(self.a, ["p1:x1", "p1:x2", "p1:x3"])
-        self.append(self.b, ["p1:x3", "p1:x1", "p1:x2", "p2:y1"])
-        everything = {"p1:x1", "p1:x2", "p1:x3", "p2:y1"}
-        self.sync(self.a)
-        self.sync(self.b)
-        self.sync(self.a)
-        self.sync(self.b)
-        for store in (self.a, self.b):
-            self.assertEqual(self.ids((store / "observations.jsonl").read_text(encoding="utf-8")),
-                             everything)
-        self.assertEqual(self.remote_ids(), everything)
+        """Seed 126 of the verifier's 3-device harness, shrunk to the steps that lose data.
+
+        Device C harvests two records (compact lines, as older tools wrote them)
+        and syncs. Then A and C both harvest S2:fb0 -- one project's feedback seen
+        from two devices -- each at a different position among its own records.
+        At d4e6f27 the following rounds of syncs deleted D0:fb2, S2:fb0 and S2:fb2
+        from every store and from the remote: the line merge re-applied one
+        device's ordering as a deletion of the other's records.
+        """
+        c = self.tmp / "c"
+        code, out, err = run("store", "init", "--store", c, "--remote", self.remote)
+        self.assertEqual(code, 0, out + err)
+        self.append(c, ["S0:fb2", "S2:fb1"], compact=True)
+        self.sync(c)
+        self.append(self.a, ["S2:fb2", "D0:fb2", "S2:fb0"])
+        self.append(c, ["S2:fb0", "D2:fb7"])
+        everything = {"S0:fb2", "S2:fb1", "S2:fb2", "D0:fb2", "S2:fb0", "D2:fb7"}
+        for _round in range(2):
+            for store in (self.a, self.b, c):
+                self.sync(store)
+        # Ids first: a byte mismatch (line endings, key order) must never mask
+        # which records went missing, or where.
+        for name, store in (("a", self.a), ("b", self.b), ("c", c)):
+            self.assertEqual(self.store_ids(store), everything, "store " + name + " lost records")
+        self.assertEqual(self.remote_ids(), everything, "the remote lost records")
+        self.assertEqual(len({(s / "observations.jsonl").read_bytes() for s in (self.a, self.b, c)}), 1,
+                         "every device must hold identical bytes")
 
     def test_interleaved_appends_converge_to_identical_bytes(self):
         seen = set()
@@ -461,11 +485,12 @@ class TestStoreSync(unittest.TestCase):
         self.sync(self.a)
         self.sync(self.b)
         self.sync(self.a)
+        self.assertEqual(self.store_ids(self.a), seen)
+        self.assertEqual(self.store_ids(self.b), seen)
+        self.assertEqual(self.remote_ids(), seen)
         text_a = (self.a / "observations.jsonl").read_bytes()
         text_b = (self.b / "observations.jsonl").read_bytes()
         self.assertEqual(text_a, text_b, "both devices must hold identical bytes")
-        self.assertEqual(self.ids(text_a.decode("utf-8")), seen)
-        self.assertEqual(self.remote_ids(), seen)
 
     def test_only_the_store_files_are_committed(self):
         self.append(self.a, ["p1:x1"])
