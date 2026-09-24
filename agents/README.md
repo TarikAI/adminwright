@@ -57,14 +57,17 @@ python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <pr
 
 | `--harness` | Native agent files | Also writes | Notes |
 |---|---|---|---|
-| `claude-code` | `.claude/agents/<name>.md` | — | For non-plugin installs; the plugin needs no installer |
-| `opencode` | `.opencode/agents/<name>.md` | — | Frontmatter is rebuilt as `description` + `mode: subagent` |
-| `codex` | `.codex/agents/<name>.toml` | `.adminwright/agents/` | TOML with `name`, `description`, `developer_instructions`. Prints a pointer block for `AGENTS.md`; add `--append-pointer` to write it |
-| `antigravity` | `.agents/agents/<name>/agent.md` | `.adminwright/agents/` | Frontmatter `name` + `description`. Pointer block for `AGENTS.md`, same flag |
-| `gemini` | `.gemini/agents/<name>.md` | `.adminwright/agents/` | Frontmatter `name` + `description`, plus `max_turns: 200` and `timeout_mins: 120`: Gemini CLI's defaults (30 turns, 10 minutes) stop a pass partway. Pointer block for `GEMINI.md`, same flag |
-| `cursor` | `.cursor/agents/<name>.md` | `.adminwright/agents/`, `.cursor/rules/adminwright.mdc` | The `.mdc` is a project rule, always applied |
-| `pi` | none — Pi has no built-in subagents | `.adminwright/agents/` | Pointer block for `AGENTS.md`, same flag |
+| `claude-code` | `.claude/agents/<name>.md` | — | The source files, frontmatter included. For non-plugin installs; the plugin needs no installer |
+| `opencode` | `.opencode/agents/<name>.md` | — | Frontmatter rebuilt as `description` + `mode: subagent` |
+| `codex` | `.codex/agents/<name>.toml` | `.adminwright/agents/`, `AGENTS.md` block | TOML with `name`, `description`, `developer_instructions`. The block is printed; add `--append-pointer` to write it |
+| `antigravity` | `.agents/agents/<name>/agent.md` | `.adminwright/agents/`, `AGENTS.md` block | Frontmatter `name` + `description`. Same flag |
+| `gemini` | `.gemini/agents/<name>.md` | `.adminwright/agents/`, `GEMINI.md` block | Frontmatter `name` + `description`, plus `max_turns: 200` and `timeout_mins: 120`: Gemini CLI's defaults (30 turns, 10 minutes) stop a pass partway. Same flag |
+| `cursor` | `.cursor/agents/<name>.md` | `.adminwright/agents/`, `.cursor/rules/adminwright.mdc` | The `.mdc` is a project rule, always applied, rewritten on every install |
+| `pi` | none — Pi has no built-in subagents | `.adminwright/agents/`, `AGENTS.md` block | Same flag |
 | `generic` | none | `.adminwright/agents/` | Any other harness: point it at the files, in the printed order |
+
+With the skill outside the project, every harness also gets `.adminwright/skill-dir` (this
+machine's skill path) and a `/.adminwright/skill-dir` line in `.gitignore`; see below.
 
 Native files carry only the fields their harness documents; `.adminwright/agents/` is the
 harness-neutral copy of the source files. Everything else in the source frontmatter is
@@ -198,10 +201,11 @@ standard library only.
 | Harness | Install as |
 |---|---|
 | Claude Code, claude.ai | Copy the skill directory into `~/.claude/skills/` or the project's `.claude/skills/`, or ship it inside a plugin |
-| OpenAI Codex | Copy into `.agents/skills/adminwright/` and reference it from the repository's `AGENTS.md` |
-| Cursor | Copy into the project and point a rule at `SKILL.md` |
-| Gemini CLI | Copy into the project and reference `SKILL.md` from `GEMINI.md` |
+| OpenAI Codex, Gemini CLI, Cursor, opencode, Antigravity, Pi | Copy into the project's `.agents/skills/adminwright/`: every one of them discovers project skills there. Their own directories work too (`.gemini/skills/`, `.cursor/skills/`, `.opencode/skills/`) |
 | Any other harness | Point the agent at `SKILL.md` directly; it routes to everything else |
+
+A skill inside the project also keeps the installed agents portable: they name it by its
+project-relative path, which is the same on every machine that checks the project out.
 
 `openai.yaml` is an optional interface descriptor for harnesses that read one. Its absence
 changes nothing — no file in this skill requires it, and no guidance depends on it.

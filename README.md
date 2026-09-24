@@ -257,12 +257,12 @@ python /path/to/adminwright/scripts/install_agents.py --harness <name> --project
 | Harness | Skill entry point | Agents land in |
 |---|---|---|
 | Claude Code / claude.ai (manual copy) | `~/.claude/skills/adminwright/` or the project's `.claude/skills/` | `.claude/agents/` |
-| opencode | point the agent at `SKILL.md` | `.opencode/agents/` (as subagents) |
-| OpenAI Codex | `.agents/skills/adminwright/`, referenced from `AGENTS.md` | `.adminwright/agents/` + `AGENTS.md` block |
-| Google Antigravity | reference `SKILL.md` from `AGENTS.md` | `.adminwright/agents/` + `AGENTS.md` block |
-| Gemini CLI | reference `SKILL.md` from `GEMINI.md` | `.adminwright/agents/` + `GEMINI.md` block |
-| Cursor | point a rule at `SKILL.md` | `.adminwright/agents/` + `.cursor/rules/adminwright.mdc` |
-| Pi, anything else | point the agent at `SKILL.md` | `.adminwright/agents/` (harness `pi` or `generic`) |
+| opencode | the project's `.agents/skills/adminwright/` (or `.opencode/skills/`) | `.opencode/agents/` (as subagents) |
+| OpenAI Codex | the project's `.agents/skills/adminwright/` | `.codex/agents/*.toml` + `.adminwright/agents/` + `AGENTS.md` block |
+| Google Antigravity | the project's `.agents/skills/adminwright/` | `.agents/agents/<name>/agent.md` + `.adminwright/agents/` + `AGENTS.md` block |
+| Gemini CLI | the project's `.agents/skills/adminwright/` (or `.gemini/skills/`) | `.gemini/agents/` + `.adminwright/agents/` + `GEMINI.md` block |
+| Cursor | the project's `.agents/skills/adminwright/` (or `.cursor/skills/`) | `.cursor/agents/` + `.adminwright/agents/` + `.cursor/rules/adminwright.mdc` |
+| Pi, anything else | Pi: the project's `.agents/skills/adminwright/`; otherwise point the agent at `SKILL.md` | `.adminwright/agents/` (harness `pi` adds the `AGENTS.md` block; `generic` prints it) |
 
 Nothing here is vendor-specific. See [agents/README.md](agents/README.md).
 

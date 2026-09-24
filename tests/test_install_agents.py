@@ -1136,6 +1136,23 @@ class TestInstallDocs(unittest.TestCase):
         self.assertEqual([label for label, state in rows.items() if state == "Enforced"],
                          ["Claude Code"], "only Claude Code enforces disallowedTools")
 
+    def test_both_install_tables_name_what_the_installer_writes(self):
+        # README.md kept listing only .adminwright/agents/ for Codex, Antigravity,
+        # Gemini and Cursor after the installer wrote each one's native directory.
+        tables = {
+            "README.md": readme_section(SKILL_ROOT / "README.md", "### Every other harness"),
+            "agents/README.md": self.install_section(),
+        }
+        for label, section in tables.items():
+            for harness, spec in ia.HARNESSES.items():
+                with self.subTest(table=label, harness=harness):
+                    if spec.native_dir:
+                        self.assertIn("`" + spec.native_dir + "/", section)
+                    if spec.instruction_file:
+                        self.assertIn("`" + spec.instruction_file + "`", section)
+                    if spec.neutral_copy:
+                        self.assertIn("`" + ia.NEUTRAL_DIR + "/`", section)
+
 
 class TestLineEndingsAndConsole(InstallBase):
     def test_every_written_file_uses_lf_only(self):
