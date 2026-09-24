@@ -150,13 +150,12 @@ COLLECTION_KEYS = (
 )
 
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
-# The one file or area of the skill a feedback entry would change. Clustering
-# buckets observations by it, so an entry without one lands in "unassigned" and
-# can never group with anything.
-FEEDBACK_SCOPE_PATTERN = re.compile(
-    r"^(?:SKILL\.md|references/[A-Za-z0-9_.-]+\.md|scripts(?:/[A-Za-z0-9_./-]+)?"
-    r"|agents(?:/[A-Za-z0-9_./-]+)?)$"
-)
+# The one file or area of the skill a feedback entry (or a lesson) would change.
+# Clustering buckets observations by it, so an entry without one lands in
+# "unassigned" and can never group with anything. This is only the SHAPE -- a
+# relative path with '/' and no '.', '..' or hidden segment; skill_scope_problem
+# also requires it to exist in the skill.
+FEEDBACK_SCOPE_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$")
 _PLACEHOLDER_WORDS = (
     r"mock(?:s|ed|ing)?|fake(?:s|d)?|stub(?:s|bed|bing)?|dumm(?:y|ies)"
     r"|placeholder(?:s)?|lorem|demo-only|todo(?:s)?|tbd|fixme|coming-soon|wip|xxx+"
@@ -349,8 +348,8 @@ RULES = {
     "test-file-shared": STRICT_ONLY,
     "implementer-unrecorded": LATE,
     "not-applicable-undecided": STRICT_ONLY,
-    # The write guard refuses `contested` without its gap at standard and above,
-    # which is what the agents' contest protocol says happens.
+    # The write guard refuses `contested` without its gap at every profile, which is
+    # what the agents' contest protocol says happens.
     "contested-needs-gap": E3,
     "contest-self-cleared": LATE,
     # round 2: monorepo and headless layouts
@@ -366,6 +365,8 @@ RULES = {
     "domain-term-unbacked": E3,
     "reviewed-with-blocking-gap": E3,
     "review-transition": E3,
+    # learning loop (round 2)
+    "platform-id-missing": W3,
 }
 
 # Rules that describe an UNFINISHED model rather than a malformed one.
@@ -423,20 +424,20 @@ _SKILL_VERSION = []
 
 
 def skill_version():
-    """The installed commit: `git rev-parse` in a checkout, else the plugin cache's sha dir."""
+    """The installed commit: HEAD in a checkout of the skill, else the plugin cache's sha dir.
+
+    Only a checkout whose work-tree top IS the skill root reports HEAD. A copy
+    vendored into a project repository (<project>/.claude/skills/adminwright) or a
+    plugin cache under a git-tracked home sits inside SOMEONE ELSE'S repository,
+    whose HEAD says nothing about the skill and changes with every project commit.
+    """
     if _SKILL_VERSION:
         return _SKILL_VERSION[0]
     version = "unknown"
-    if any((c / ".git").exists() for c in [SKILL_ROOT] + list(SKILL_ROOT.parents)):
-        try:
-            done = subprocess.run(
-                ["git", "-C", str(SKILL_ROOT), "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
-            )
-            if done.returncode == 0 and done.stdout.strip():
-                version = done.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
+    if skill_is_checkout():
+        done = skill_git("rev-parse", "--short", "HEAD")
+        if done is not None and done.returncode == 0 and done.stdout.strip():
+            version = done.stdout.strip()
     if version == "unknown" and re.fullmatch(r"[0-9a-f]{7,40}", SKILL_ROOT.name):
         version = SKILL_ROOT.name[:12]
     _SKILL_VERSION.append(version)
@@ -3266,14 +3267,17 @@ def validate_gaps(manifest, findings, release):
         check_required(item, ("id", "observation", "category", "proposedChange", "evidence", "status"), path, findings)
         check_enum(item.get("category"), FEEDBACK_CATEGORIES, path + ".category", findings, "category")
         check_enum(item.get("status"), FEEDBACK_STATUSES, path + ".status", findings, "status")
-        if item.get("status") == "open" and not FEEDBACK_SCOPE_PATTERN.match(text_of(item.get("scope"))):
+        scope_problem = skill_scope_problem(item.get("scope")) if item.get("status") == "open" else None
+        if scope_problem:
             findings.add(
                 "feedback-scope",
                 path + ".scope",
-                "name the one thing this would change: a references/<file>.md path, SKILL.md, "
-                "scripts, or agents; an unscoped entry cannot be grouped with the same finding "
-                "from another project",
+                scope_problem + "; " + SKILL_SCOPE_HINT + ". An entry without a valid scope "
+                "cannot be grouped with the same finding from another project",
             )
+    # With the feedback checks because only `harvest` reads it: it is how the
+    # promotion bar tells one project from another.
+    check_platform_id(manifest, findings)
 
 
 def validate_agents(manifest, findings):
@@ -4688,20 +4692,49 @@ def slugify(value):
     return (slug[:60].rstrip("-")) or "lesson"
 
 
-# Patterns scrubbed before an observation can leave the machine. Deliberately
-# aggressive: a false scrub costs a little readability, a missed one leaks a
-# customer name or an internal hostname into a public pull request.
-SCRUB_PATTERNS = (
+# Scrubbing runs in three passes before an observation can leave the machine.
+# Deliberately aggressive: a false scrub costs a little readability, a missed one
+# leaks a customer name, an internal hostname or a credential into a public pull
+# request.
+#
+# 1. SECRET_PATTERNS: credentials and identities, whatever they sit next to.
+#    Token shapes follow the issuers' published formats: GitHub's prefixes
+#    (ghp_, gho_, ghu_, ghs_, ghr_, github_pat_), AWS unique-id prefixes (AKIA
+#    access keys, ASIA temporary keys, AIDA users, AROA roles, ...), Google API
+#    keys (AIza + 35), JWTs including unsigned ones whose signature is empty.
+# 2. The skill's own vocabulary is set aside: its files (SKILL.md,
+#    references/discovery.md), stack names (Next.js, package.json) and manifest
+#    ids (tenant.suspend) are what a maintainer needs in order to act.
+# 3. LOCATION_PATTERNS: paths, hosts and any other dotted name.
+SECRET_PATTERNS = (
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.S),
+     "<secret>"),
+    # Any scheme, so redis://:pw@cache and postgres://user:pw@db go whole.
+    (re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S+"), "<url>"),
+    # user:password@host without a scheme, before the email pattern keeps "user:".
+    (re.compile(r"[^\s:/@<>]+:[^\s:/@<>]+@[\w.-]+"), "<secret>"),
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "<email>"),
-    (re.compile(r"\bhttps?://\S+"), "<url>"),
-    # Credential shapes, before the generic path and domain patterns can eat half
-    # of them: cloud, source-host and JWT tokens.
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b"), "<secret>"),
-    (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "<secret>"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]*){1,4}"), "<secret>"),
+    (re.compile(r"\b(?:ABIA|ACCA|AGPA|AIDA|AIPA|AKIA|ANPA|ANVA|APKA|AROA|ASCA|ASIA)[A-Z0-9]{16,}\b"),
+     "<secret>"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "<secret>"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "<secret>"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35,}"), "<secret>"),
     (re.compile(r"\b(?:sk|pk|ghp|gho|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b"), "<secret>"),
+    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)"
+                r"(\s*[=:]\s*)(?=\S*[0-9!@#$%^&*])\S{6,}"), r"\1\2<secret>"),
+    (re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}"), r"\1 <secret>"),
+    (re.compile(r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b"), "<id>"),
     (re.compile(r"\b[A-Fa-f0-9]{32,}\b"), "<hash>"),
+    # Any other long run that mixes upper case, lower case and digits: an API key
+    # of a shape not listed above, or a secret access key.
+    (re.compile(r"(?<![A-Za-z0-9_+/=-])(?=[A-Za-z0-9_+/-]*[0-9])(?=[A-Za-z0-9_+/-]*[a-z])"
+                r"(?=[A-Za-z0-9_+/-]*[A-Z])[A-Za-z0-9_+/-]{32,}={0,2}"), "<secret>"),
     (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
+    (re.compile(r"(?<![\w:.])(?=[0-9A-Fa-f:]*(?:[A-Fa-f]|::))[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}"
+                r"(?![\w:])"), "<ip>"),
+)
+LOCATION_PATTERNS = (
     # Hostnames including every leading label: db-prod-eu1.acme.internal must not
     # survive as db-prod-eu1.<host>, which still names the machine.
     (re.compile(r"\b[\w-]+(?:\.[\w-]+)*\.(?:internal|local|corp|lan|test|intranet)\b", re.I), "<host>"),
@@ -4716,6 +4749,108 @@ SCRUB_PATTERNS = (
     (re.compile(r"\b[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}\b", re.I), "<domain>"),
 )
 
+# A dotted or slashed token that pass 2 may keep.
+VOCABULARY_CANDIDATE = re.compile(r"(?<![\w/\\.@<-])[\w-]+(?:[./][\w-]+)+")
+# Stack names and well-known file names, compared lowercased.
+STACK_TOKENS = frozenset("""
+next.js node.js nuxt.js vue.js react.js express.js nest.js ember.js alpine.js solid.js d3.js
+three.js chart.js socket.io asp.net ado.net package.json package-lock.json tsconfig.json
+jsconfig.json composer.json composer.lock pyproject.toml requirements.txt setup.py setup.cfg
+go.mod go.sum cargo.toml cargo.lock gemfile.lock pnpm-lock.yaml yarn.lock docker-compose.yml
+docker-compose.yaml next.config.js next.config.mjs next.config.ts vite.config.js vite.config.ts
+tailwind.config.js tailwind.config.ts schema.prisma manifest.json settings.py urls.py models.py
+views.py admin.py routes.php web.php api.php appsettings.json application.yml
+application.properties
+""".split())
+# Slashed words that are prose, not paths.
+PROSE_PAIRS = frozenset("""
+and/or either/or read/write input/output i/o yes/no on/off true/false client/server
+frontend/backend front-end/back-end allow/deny accept/reject start/stop open/close get/set
+create/update add/remove show/hide enable/disable import/export upload/download before/after
+pass/fail success/failure request/response
+""".split())
+# Last labels that make a dotted name a host rather than a manifest id: every
+# label of three letters or fewer (com, io, dev, de, co.uk), the private
+# suffixes, and the longer public suffixes a company domain commonly uses.
+HOST_LABELS = frozenset("""
+internal local corp lan test intranet localhost home example invalid arpa onion
+info tech cloud online site store shop bank finance financial money capital fund ventures
+partners digital agency company group network systems solutions software studio design media
+news blog live life world global zone space today team tools works center health care
+clinic insurance legal energy email services support consulting engineering expert codes
+computer technology directory exchange estate realty homes properties travel jobs careers
+academy education school university mobi asia name museum aero coop click link website host
+hosting wiki games social chat market markets marketing trade trading loans credit cash
+invest investments holdings industries international enterprises business city club plus
+family fitness auto cars delivery express logistics shipping security guru ninja rocks
+""".split())
+
+# Admin verbs and nouns common in capability ids that the guidance happens not to use.
+ID_WORDS = frozenset("invoice invoices void unlock unarchive unsuspend reinstate deactivate reactivate".split())
+
+_SKILL_FILE_NAMES = []
+_SKILL_WORDS = []
+
+
+def skill_file_names():
+    """Base names of the skill's own files, so 'code_review.py' survives a scrub."""
+    if not _SKILL_FILE_NAMES:
+        names = set()
+        try:
+            names.update(p.name for p in SKILL_ROOT.iterdir() if p.is_file())
+            for area in ("scripts", "references", "agents", "assets", "lessons"):
+                names.update(p.name for p in (SKILL_ROOT / area).rglob("*") if p.is_file())
+        except OSError:
+            pass
+        _SKILL_FILE_NAMES.append(frozenset(n for n in names if not n.startswith(".")))
+    return _SKILL_FILE_NAMES[0]
+
+
+def skill_words():
+    """Every word the skill's guidance uses: the vocabulary a manifest id is built from.
+
+    A customer or product name is, almost by definition, not in it -- which is
+    what separates tenant.suspend (keep) from wiki.acme or acmepay.refund
+    (scrub), two shapes no pattern can tell apart.
+    """
+    if not _SKILL_WORDS:
+        words = set(ID_WORDS)
+        sources = [SKILL_ROOT / "SKILL.md"]
+        for area in ("references", "agents"):
+            try:
+                sources.extend(sorted((SKILL_ROOT / area).glob("*.md")))
+            except OSError:
+                pass
+        for source in sources:
+            try:
+                words.update(re.findall(r"[a-z][a-z0-9]*", source.read_text(encoding="utf-8").lower()))
+            except (OSError, UnicodeDecodeError):
+                continue
+        _SKILL_WORDS.append(frozenset(words))
+    return _SKILL_WORDS[0]
+
+
+def skill_vocabulary(token):
+    """Whether a dotted or slashed token is the skill's vocabulary rather than a project's."""
+    lowered = token.lower()
+    if lowered in STACK_TOKENS or lowered in PROSE_PAIRS:
+        return True
+    if FEEDBACK_SCOPE_PATTERN.match(token) and skill_path_exists(SKILL_ROOT, token):
+        return True
+    if "/" in token:
+        return False
+    if token in skill_file_names():
+        return True
+    # A manifest id (tenant.suspend, gap.subscription-active): lowercase, built
+    # only from words the guidance uses, and not ending in a label a host could.
+    if not ID_PATTERN.fullmatch(token) or "." not in token:
+        return False
+    last = token.rsplit(".", 1)[-1]
+    if len(last) <= 3 or last in HOST_LABELS:
+        return False
+    parts = [part for part in re.split(r"[.-]", token) if not part.isdigit()]
+    return all(part in skill_words() for part in parts)
+
 # Stacks coarsened to a family, so "PostgreSQL 16.2 on prod-eu-1" becomes "postgres".
 STACK_FAMILIES = (
     "next.js", "remix", "react", "vue", "svelte", "angular",
@@ -4726,10 +4861,30 @@ STACK_FAMILIES = (
 
 
 def scrub_text(value):
-    """Remove anything that could identify a project, person, or host."""
-    text = text_of(value)
-    for pattern, replacement in SCRUB_PATTERNS:
+    """Remove anything that could identify a project, person, host or credential.
+
+    The skill's own vocabulary is set aside between the secret pass and the
+    location pass, so "Next.js and Node.js with package.json and SKILL.md" or
+    "the tenant.suspend capability" survive instead of becoming a row of
+    <domain> markers; a secret is removed before anything is set aside, so a
+    kept token can never shelter one.
+    """
+    text = text_of(value).replace("\x00", " ")
+    for pattern, replacement in SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
+    kept = []
+
+    def keep(match):
+        token = match.group(0)
+        if not skill_vocabulary(token):
+            return token
+        kept.append(token)
+        return "\x00" + str(len(kept) - 1) + "\x00"
+
+    text = VOCABULARY_CANDIDATE.sub(keep, text)
+    for pattern, replacement in LOCATION_PATTERNS:
+        text = pattern.sub(replacement, text)
+    text = re.sub("\x00([0-9]+)\x00", lambda match: kept[int(match.group(1))], text)
     return " ".join(text.split())
 
 
@@ -4792,11 +4947,17 @@ def global_store_dir(override=None):
 
 
 def run_git(store, *args, check=True):
-    """Run git inside the store. Only the store subcommand needs git."""
+    """Run git inside the store. Only the store subcommand needs git.
+
+    Without the inherited GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE: run from a
+    project's git hook, those point at the PROJECT's repository, and `-C store`
+    would then commit the store into it.
+    """
+    environment = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARIABLES}
     try:
         completed = subprocess.run(
             ["git", "-C", str(store)] + list(args),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment,
         )
     except FileNotFoundError:
         raise ManifestError(
@@ -4854,6 +5015,23 @@ STOPWORDS = frozenset("""
 a an and are as at be been but by for from had has have in into is it its of on or so than
 that the then there these they this to was were will with without would should must can not
 no nor own too very s t just don now
+when which what why how all each every any some also only more most other same like even
+still yet via per after before during while where because onto upon over under about
+against between through does did doing done them their our your
+""".split())
+
+# The skill's own vocabulary of complaint. Nearly every observation says that a
+# manifest failed validation, an agent's build broke, or something is missing,
+# so sharing these words is no evidence of sharing a finding: they count toward
+# a note's length but never toward the shared-word minimum. Reviewer probe:
+# "Manifest validation failed on the audit event" and "...failed on screens"
+# scored 0.75 and merged on exactly these three words, although they name
+# different defects. The OBJECTS of a complaint (audit, screens, roles, export)
+# are never listed here.
+GENERIC_WORDS = frozenset("""
+manifest manifests validation validate validates validated validating validator validators
+skill skills agent agents build builds session sessions project projects run runs ran
+fail fails failed failing failure failures error errors reject rejects rejected missing
 """.split())
 
 # Two agents describing one problem rarely choose the same words, so exact
@@ -4862,6 +5040,15 @@ no nor own too very s t just don now
 SIMILARITY_THRESHOLD = 0.45
 # Denominator floor for the overlap coefficient: see observation_similarity.
 SIMILARITY_FLOOR = 4
+# A match needs at least this many shared words outside GENERIC_WORDS. Two
+# short notes that share a bigram ("audit log export missing filters" / "audit
+# log retention too short") scored 0.5 and merged.
+MIN_SHARED_WORDS = 3
+# ...and the shared words must be at least this share of the LONGER note, or a
+# three-word note is absorbed by any paragraph that happens to contain its words
+# (reviewer probe: "validator rejected screens" scored 0.75 against an
+# unrelated paragraph about build order).
+MIN_LONGER_SHARE = 0.2
 
 
 def content_words(*texts):
@@ -4875,6 +5062,13 @@ def content_words(*texts):
     return words
 
 
+def observation_text(record):
+    """An observation's whole wording, normalised for an exact comparison."""
+    return " ".join(
+        (text_of(record.get("observation")) + " " + text_of(record.get("proposedChange"))).lower().split()
+    )
+
+
 def observation_similarity(left, right):
     """Overlap of two observations' content words, 0.0 to 1.0.
 
@@ -4882,13 +5076,45 @@ def observation_similarity(left, right):
     a paragraph about the same defect, and Jaccard punishes that difference in
     length even when the shorter text is wholly contained in the longer. The
     denominator has a floor, though: without one, two-word notes sharing a single
-    word scored 0.5 and merged with anything that mentioned it.
+    word scored 0.5 and merged with anything that mentioned it. Identical wording
+    scores 1.0 however short it is.
     """
+    if observation_text(left) and observation_text(left) == observation_text(right):
+        return 1.0
     a = content_words(left.get("observation"), left.get("proposedChange"))
     b = content_words(right.get("observation"), right.get("proposedChange"))
     if not a or not b:
         return 0.0
     return len(a & b) / float(max(min(len(a), len(b)), SIMILARITY_FLOOR))
+
+
+def observations_match(left, right, threshold=SIMILARITY_THRESHOLD):
+    """Whether two observations may be one finding.
+
+    Identical wording always is. Otherwise all three must hold: the overlap
+    reaches the threshold, at least MIN_SHARED_WORDS of the shared words are not
+    GENERIC_WORDS, and the shared words are at least MIN_LONGER_SHARE of the
+    longer note. A false merge fabricates the second project the promotion bar
+    asks for; a false split only waits for another sighting, and both reports
+    stay in the store.
+    """
+    if observation_text(left) and observation_text(left) == observation_text(right):
+        return True
+    a = content_words(left.get("observation"), left.get("proposedChange"))
+    b = content_words(right.get("observation"), right.get("proposedChange"))
+    if not a or not b:
+        return False
+    shared = a & b
+    if len(shared - GENERIC_WORDS) < MIN_SHARED_WORDS:
+        return False
+    if len(shared) < MIN_LONGER_SHARE * max(len(a), len(b)):
+        return False
+    return len(shared) / float(max(min(len(a), len(b)), SIMILARITY_FLOOR)) >= threshold
+
+
+def members_needed(cluster):
+    """How many members a record must match to join: all of a small cluster, else a majority."""
+    return len(cluster) if len(cluster) <= 3 else len(cluster) // 2 + 1
 
 
 def cluster_observations(records, threshold=SIMILARITY_THRESHOLD):
@@ -4897,13 +5123,17 @@ def cluster_observations(records, threshold=SIMILARITY_THRESHOLD):
     Scope and category must match exactly -- they are the coordinates of what
     the rule would change, and a friction note about SKILL.md is not the same
     finding as a tooling bug in the validator however similar the wording.
-    Within a bucket, greedy AVERAGE-link clustering: a record joins the cluster
-    whose members it resembles on average, best cluster first.
+    Within a bucket, a record joins a cluster only if it MATCHES (see
+    observations_match) every member of a cluster of up to three, or a majority
+    of a larger one; among the clusters it may join it takes the one it
+    resembles most on average.
 
     Single-link let one shared word chain unrelated findings into one cluster:
     A resembled B, B resembled C, so A and C were "the same finding" although
-    they shared nothing. Average-link needs the record to resemble the cluster,
-    not merely one member of it.
+    they shared nothing. Average-link still admitted a strong bridge: a note
+    that repeats two unrelated findings scores 1.0 against each, so the mean
+    (0.0 + 1.0) / 2 let the second finding in. Requiring a match with the
+    members themselves closes both.
 
     Field-tested: two projects reported "modelled entities and screens but no
     roles or capabilities" in different words. Exact fingerprint matching filed
@@ -4930,9 +5160,11 @@ def cluster_observations(records, threshold=SIMILARITY_THRESHOLD):
         for record in members:
             best = None
             for cluster in local:
-                scores = [observation_similarity(record, other) for other in cluster]
-                mean = sum(scores) / float(len(scores))
-                if mean >= threshold and (best is None or mean > best[0]):
+                matched = sum(1 for other in cluster if observations_match(record, other, threshold))
+                if matched < members_needed(cluster):
+                    continue
+                mean = sum(observation_similarity(record, other) for other in cluster) / float(len(cluster))
+                if best is None or mean > best[0]:
                     best = (mean, cluster)
             if best is not None:
                 best[1].append(record)
@@ -4972,11 +5204,21 @@ def read_community_observations(skill_root=None):
     if not directory.exists():
         return records
     for path in sorted(directory.glob("*.json")):
+        # Decoded like every other file this tool reads: a bundle re-saved on
+        # Windows with a BOM was silently dropped, and one with a stray invalid
+        # byte crashed promote for the maintainer. A bundle that cannot be read
+        # is skipped by name; it never stops the others from counting.
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            payload = json.loads(decode_text_bytes(path.read_bytes(), path, allow_utf16=True))
+        except (OSError, ManifestError, ValueError, RecursionError) as exc:
+            stderr("NOTE: skipped community bundle " + str(path) + ": "
+                   + (str(exc).splitlines() or [type(exc).__name__])[0][:200])
             continue
-        for index, record in enumerate(as_list(payload.get("observations"))):
+        if not isinstance(payload, dict) or not isinstance(payload.get("observations"), list):
+            stderr("NOTE: skipped community bundle " + str(path)
+                   + ": not a bundle written by `promote --export` (no observations list)")
+            continue
+        for index, record in enumerate(payload["observations"]):
             if not isinstance(record, dict):
                 continue
             record["community"] = True
@@ -4985,12 +5227,15 @@ def read_community_observations(skill_root=None):
             # observations, or group with unrelated ones -- and grouping is what
             # decides whether something clears the bar.
             record["fingerprint"] = observation_fingerprint(record)
-            # One contributor may report the same idea from several projects;
-            # keep them distinct so projectCount stays meaningful.
+            # A contributed record counts as ONE project, its first fingerprint.
+            # The bundle's `projects` list cannot be verified, so it may not
+            # multiply one contribution into several sightings, and a projectKey
+            # written into the bundle is never believed.
+            record.pop("projectKey", None)
             contributors = as_list(record.get("projects"))
             record["project"] = (
-                text_of(contributors[0]) if contributors
-                else "community:" + path.stem + ":" + str(index)
+                (text_of(contributors[0]) if contributors else "")
+                or "community:" + path.stem + ":" + str(index)
             )
             records.append(record)
     return records
@@ -5058,22 +5303,29 @@ def parse_frontmatter_value(raw):
 
 
 def read_lesson_frontmatter(path):
-    fields = {}
+    """The fields between a first line '---' and the next line that is exactly '---'.
+
+    Line by line, never by splitting the text on '---': a title such as
+    "Use A --- B split" is valid quoted YAML, and splitting on it cut the
+    frontmatter short, dropping the lesson's status from the index and from the
+    guidance level.
+    """
     try:
         text = decode_text_bytes(path.read_bytes(), path)
     except (OSError, ManifestError):
-        return fields
-    if not text.startswith("---"):
-        return fields
-    body = text.split("---", 2)
-    if len(body) < 3:
-        return fields
-    for line in body[1].splitlines():
+        return {}
+    lines = text.splitlines()
+    if not lines or lines[0].rstrip() != "---":
+        return {}
+    fields = {}
+    for line in lines[1:]:
+        if line.rstrip() == "---":
+            return fields
         if ":" not in line:
             continue
         key, _sep, value = line.partition(":")
         fields[key.strip()] = parse_frontmatter_value(value)
-    return fields
+    return {}  # never closed: not frontmatter
 
 
 def lesson_files(lessons_dir):
@@ -5088,7 +5340,7 @@ LESSON_INDEX_PREAMBLE = (
     "procedure are in [README.md](README.md). The promotion bar is in\n"
     "[../references/skill-evolution.md](../references/skill-evolution.md).\n"
     "\n"
-    "`scope` is skill-root-relative and names the single reference file the rule lands in.\n"
+    "`scope` is skill-root-relative and names the one file or area the rule lands in.\n"
 )
 # `platforms` carries the promotion bar: "seen on two or more distinct
 # projects" is unreadable from an index that does not name the projects.
@@ -5668,10 +5920,11 @@ def cmd_add(args):
                 raise ManifestError(kind + " '" + entry_id + "' already exists" + duplicate_where)
             if entry_id in batch_ids:
                 raise ManifestError(kind + " '" + entry_id + "' appears twice in this batch")
-            if kind == "feedback" and not FEEDBACK_SCOPE_PATTERN.match(text_of(entry.get("scope"))):
+            if kind == "feedback" and skill_scope_problem(entry.get("scope")):
                 raise ManifestError(
-                    "feedback '" + entry_id + "' needs a scope: the one thing it would change, "
-                    "as a references/<file>.md path, SKILL.md, scripts, or agents"
+                    "feedback '" + entry_id + "' needs a scope: its scope "
+                    + json.dumps(entry.get("scope")) + " " + skill_scope_problem(entry.get("scope"))
+                    + "; " + SKILL_SCOPE_HINT
                 )
             batch_ids.add(entry_id)
         collection.extend(entries)
@@ -6435,7 +6688,7 @@ def git_text(cwd, *args):
     return done.stdout.decode("utf-8", "replace")
 
 
-def git_paths(cwd, *args):
+def scope_paths(cwd, *args):
     """NUL-separated path output: no quoting of non-ASCII names, no newline ambiguity."""
     return {entry.replace("\\", "/") for entry in git_text(cwd, *args).split("\0") if entry}
 
@@ -6506,12 +6759,12 @@ def cmd_review_scope(args):
         return 2
     root = Path(args.project_root).resolve() if args.project_root else project_root_of(manifest_path, manifest)
     top = Path(git_text(root, "rev-parse", "--show-toplevel").strip()).resolve()
-    untracked = git_paths(top, "ls-files", "--others", "--exclude-standard", "-z")
+    untracked = scope_paths(top, "ls-files", "--others", "--exclude-standard", "-z")
     baseline_file = scope_baseline_path(manifest_path, args.agent)
 
     if args.start:
         head = git_text(top, "rev-parse", "HEAD").strip()
-        dirty = git_paths(top, "diff", "--name-only", "--no-renames", "-z", head, "--") | untracked
+        dirty = scope_paths(top, "diff", "--name-only", "--no-renames", "-z", head, "--") | untracked
         baseline = {"head": head, "paths": {rel: working_hash(top / rel) for rel in sorted(dirty)}}
         baseline_file.parent.mkdir(parents=True, exist_ok=True)
         write_json(baseline_file, baseline)
@@ -6537,8 +6790,8 @@ def cmd_review_scope(args):
             base, before = stored["head"], dict(stored["paths"])
         except (ValueError, KeyError, TypeError, OSError) as exc:
             raise ManifestError("unreadable review-scope baseline " + str(baseline_file) + ": " + str(exc))
-    changed_since = git_paths(top, "diff", "--name-only", "--no-renames", "-z", base, "--") | untracked
-    added_since = git_paths(top, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", base, "--")
+    changed_since = scope_paths(top, "diff", "--name-only", "--no-renames", "-z", base, "--") | untracked
+    added_since = scope_paths(top, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", base, "--")
     touched = []
     for rel in sorted(changed_since | set(before)):
         now = working_hash(top / rel)
@@ -6608,20 +6861,41 @@ def feedback_content_hash(item):
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
 
 
-def project_key_of(manifest, manifest_path, override=None):
-    """The identity a project is counted by: an explicit id, else its name.
+def project_key_of(manifest, manifest_path):
+    """The identity a project is counted by: `platform.id`, else its name.
 
     A bare display name is a poor key -- two unrelated projects both called
     'admin' were one, and one project renamed was two. `platform.id` is the
-    stable handle; the name is the fallback.
+    stable handle; the name is only the fallback for manifests that predate it.
+    `harvest --project` is deliberately NOT an input here: it renames the
+    project in the output, and letting it re-key the project meant one codebase
+    harvested once with the flag and once without counted as two projects.
     """
     platform = as_dict(manifest.get("platform"))
     return (
-        text_of(override)
-        or text_of(platform.get("id"))
+        text_of(platform.get("id"))
         or text_of(platform.get("name"))
         or project_root_of(manifest_path, manifest).name
     )
+
+
+PLATFORM_ID_HINT = (
+    "add a stable id once and never change it: `set --manifest <path> --path platform.id "
+    "--value <name>-<6 random hex digits>` (the form `init` writes, e.g. acme-portal-3f9a2c)"
+)
+
+
+def check_platform_id(manifest, findings):
+    """The learning loop's identity check: without platform.id a project is its name."""
+    platform = manifest.get("platform")
+    if isinstance(platform, dict) and not text_of(platform.get("id")):
+        findings.add(
+            "platform-id-missing",
+            "platform.id",
+            "is missing, so `harvest` counts this console by its display name: renaming it "
+            "makes it a second project, and two consoles that share a name count as one; "
+            + PLATFORM_ID_HINT,
+        )
 
 
 def cmd_harvest(args):
@@ -6633,7 +6907,12 @@ def cmd_harvest(args):
         text_of(args.project) or text_of(platform.get("name"))
         or project_root_of(manifest_path, manifest).name
     )
-    key = project_key_of(manifest, manifest_path, args.project)
+    key = project_key_of(manifest, manifest_path)
+    if not text_of(platform.get("id")):
+        stderr(
+            "WARN: platform.id is missing, so this project is counted by its name '" + key
+            + "': a rename will count as a new project. To fix it, " + PLATFORM_ID_HINT
+        )
     stack = as_dict(platform.get("stack"))
     stack_summary = ", ".join(
         text_of(stack.get(name)) for name in ("frontend", "backend", "database") if text_of(stack.get(name))
@@ -6711,12 +6990,71 @@ STORE_README = (
 
 
 def commit_store(store, message):
-    run_git(store, "add", "--", *[name for name in STORE_FILES if (store / name).exists()])
-    if run_git(store, "status", "--porcelain", "--", *STORE_FILES, check=False).stdout.strip():
+    """Commit the store files and nothing else, whatever else is staged.
+
+    `commit --only -- <paths>` records exactly those paths from the working
+    tree; anything another tool (or an interrupted older sync's `add -A`) left
+    staged stays out of the commit, so it can never be pushed.
+    """
+    present = [name for name in STORE_FILES if (store / name).exists()]
+    if not present:
+        return False
+    run_git(store, "add", "--", *present)
+    if run_git(store, "status", "--porcelain", "--", *present, check=False).stdout.strip():
         run_git(store, "-c", "user.name=adminwright", "-c", "user.email=adminwright@localhost",
-                "commit", "-q", "-m", message)
+                "commit", "-q", "--only", "-m", message, "--", *present)
         return True
     return False
+
+
+def git_paths(store, *args):
+    """NUL-separated path output of a git command, as a list; empty when git refuses."""
+    done = run_git(store, *args, check=False)
+    if done.returncode != 0:
+        return []
+    return [path for path in done.stdout.split("\0") if path]
+
+
+def unstage_foreign_paths(store):
+    """Unstage anything that is not a store file, and say so.
+
+    `commit --only` already keeps such a path out of the commit, but it stays in
+    the index, and the `-s ours` merge refuses an index that differs from HEAD:
+    sync would then fail with "Merge with strategy ours failed". Unstaging
+    touches nothing on disk.
+    """
+    foreign = [path for path in git_paths(store, "diff", "--cached", "--name-only", "-z")
+               if path not in STORE_FILES]
+    if foreign:
+        run_git(store, "reset", "-q", "--", *foreign, check=False)
+        stderr(
+            "WARN: " + str(len(foreign)) + " file(s) that are not store files were staged in "
+            + str(store) + ": " + ", ".join(foreign[:10]) + (" ..." if len(foreign) > 10 else "")
+            + ". They were unstaged (the files are untouched) and are not committed or pushed."
+        )
+    return foreign
+
+
+def foreign_tracked_paths(store):
+    """Paths the store's HEAD tracks that are not store files (an older `add -A` sync)."""
+    return [path for path in git_paths(store, "ls-tree", "-r", "--name-only", "-z", "HEAD")
+            if path not in STORE_FILES]
+
+
+def warn_foreign_tracked(store):
+    foreign = foreign_tracked_paths(store)
+    if foreign:
+        listed = " ".join(json.dumps(path) for path in foreign[:10])
+        stderr(
+            "WARN: the store's history tracks files that are not store files: "
+            + ", ".join(foreign[:10]) + (" ..." if len(foreign) > 10 else "")
+            + ". An earlier sync committed them, and every push sends them to the remote. "
+            "To stop tracking them (the files stay on disk): git -C \"" + str(store)
+            + "\" rm --cached -q -- " + listed + ", then git -C \"" + str(store)
+            + "\" commit -m \"untrack\" -- " + listed + ", then store sync. They stay in the "
+            "remote's history until you rewrite it."
+        )
+    return foreign
 
 
 def sync_store(store, args):
@@ -6730,6 +7068,7 @@ def sync_store(store, args):
     # The whole sync runs under the store lock: append_observations takes it, so
     # a harvest can no longer write between our read and our rewrite.
     with FileLock(store / ".lock"):
+        unstage_foreign_paths(store)
         # Normalise first, so what we commit is already the canonical union.
         write_observations(local_path, merge_observation_files(local_path))
         print(
@@ -6738,6 +7077,7 @@ def sync_store(store, args):
             else "Nothing new to commit."
         )
         if not has_remote:
+            warn_foreign_tracked(store)
             print("No remote configured; nothing to push.")
             return 0
         fetched = run_git(store, "fetch", "-q", "origin", check=False)
@@ -6777,6 +7117,7 @@ def sync_store(store, args):
                     + (joined.stderr or joined.stdout).strip()
                     + "\nThe local store is unchanged. Resolve by hand in " + str(store)
                 )
+        warn_foreign_tracked(store)
         pushed = run_git(store, "push", "-q", "origin", "HEAD:" + args.branch, check=False)
         if pushed.returncode != 0:
             raise ManifestError("push failed:\n" + (pushed.stderr or pushed.stdout).strip())
@@ -6787,6 +7128,19 @@ def sync_store(store, args):
 def cmd_store(args):
     store = global_store_dir(args.store)
     action = args.action
+    if args.remote and action != "init":
+        # `store sync --remote <url>` looked like it synced with <url>; it pushed
+        # to whatever `store init` had configured, and said nothing.
+        configured = "none configured"
+        if (store / ".git").exists():
+            existing = run_git(store, "remote", "get-url", "origin", check=False)
+            if existing.returncode == 0 and existing.stdout.strip():
+                configured = existing.stdout.strip()
+        stderr(
+            "WARN: --remote is used only by `store init`; `store " + action + "` ignores it and "
+            "uses the configured remote (" + configured + "). To change the remote, run "
+            "`store init --remote <url>`."
+        )
 
     if action == "status":
         records = read_observations(store)
@@ -6804,6 +7158,7 @@ def cmd_store(args):
             head = run_git(store, "log", "-1", "--format=%h %ci", check=False)
             print("Git remote: " + url)
             print("Last commit: " + (head.stdout.strip() or "(none)"))
+            warn_foreign_tracked(store)
         else:
             print("Git: not initialised. Run `store init` to sync across devices.")
         return 0
@@ -6856,11 +7211,20 @@ def cmd_store(args):
 
 
 def sanitise_candidate(candidate, salt=""):
-    """Strip a promotion candidate down to what is safe to publish."""
+    """Strip a promotion candidate down to what is safe to publish.
+
+    No fingerprint of the observation text is exported: the local one is an
+    unsalted hash of the UNSCRUBBED wording, so anyone who suspected the
+    scrubbed host or customer could confirm the guess by hashing it -- the
+    attack the project salt exists to stop -- and read_community_observations
+    recomputes fingerprints on load anyway. The scope travels only when it
+    names a file or area of the skill; a hand-set private path does not.
+    """
+    scope = candidate["scope"]
+    category = candidate["category"]
     return {
-        "fingerprint": candidate["fingerprint"],
-        "category": candidate["category"],
-        "scope": candidate["scope"],
+        "category": category if category in FEEDBACK_CATEGORIES else "unassigned",
+        "scope": scope if skill_scope_problem(scope) is None else "unassigned",
         "observation": scrub_text(candidate["observation"]),
         "proposedChange": scrub_text(candidate["proposedChange"]),
         "archetypes": sorted({scrub_text(a) for a in candidate["archetypes"] if a}),
@@ -6879,12 +7243,18 @@ def record_project_key(record):
 
 def cmd_promote(args):
     store = global_store_dir(args.store)
-    records = read_observations(store)
+    local_records = read_observations(store)
+    records = list(local_records)
     community_count = 0
+    exporting = bool(getattr(args, "export", None))
     if getattr(args, "include_community", False):
-        community = read_community_observations(getattr(args, "skill_root", None))
-        community_count = len(community)
-        records = records + community
+        if exporting:
+            stderr("NOTE: --include-community is ignored with --export: a bundle carries this "
+                   "store's own observations, never someone else's contribution")
+        else:
+            community = read_community_observations(getattr(args, "skill_root", None))
+            community_count = len(community)
+            records = records + community
     if not records:
         print("No observations in " + str(store) + ". Run `harvest` after a build.")
         return 0
@@ -6898,12 +7268,34 @@ def cmd_promote(args):
         key = min(text_of(item.get("fingerprint")) for item in cluster)
         groups.setdefault(key, []).extend(cluster)
 
+    # A bundle this store exported names its projects by fingerprints salted
+    # with this store's salt. Map them back, so a contribution that came from
+    # here cannot corroborate its own source. (Bundles from another store use
+    # another salt and cannot be matched: see PRIVACY.md.)
+    salt = store_salt(store, create=False)
+    own_fingerprints = {}
+    for item in local_records:
+        key = record_project_key(item)
+        if not key:
+            continue
+        if salt:
+            own_fingerprints[project_fingerprint(key, salt)] = key
+        # Bundles exported before stores had a salt hashed the bare name.
+        for name in (key, text_of(item.get("project"))):
+            if name:
+                own_fingerprints.setdefault(project_fingerprint(name), key)
+
+    def counted_key(item):
+        key = record_project_key(item)
+        return own_fingerprints.get(key, key) if item.get("community") else key
+
     candidates = []
+    community_only = []
     for fingerprint, items in groups.items():
         # The bar counts distinct projects, not distinct name strings: a project
         # is its stable key (platform.id, else name), so a renamed project is
         # still one and two unrelated projects that share a name are still two.
-        keys = sorted({record_project_key(item) for item in items if record_project_key(item)})
+        keys = sorted({counted_key(item) for item in items if counted_key(item)})
         names = sorted({text_of(item.get("project")) for item in items if text_of(item.get("project"))})
         archetypes = sorted({a for item in items for a in as_list(item.get("archetypes"))})
         stacks = sorted({text_of(item.get("stack")) for item in items if text_of(item.get("stack"))})
@@ -6911,43 +7303,53 @@ def cmd_promote(args):
         # A correction of wrong guidance promotes on first sighting; everything
         # else waits for corroboration from a second, distinct project.
         immediate = category == "incorrect-guidance"
-        if len(keys) >= args.min_projects or immediate:
-            candidates.append(
+        if not (len(keys) >= args.min_projects or immediate):
+            continue
+        candidate = {
+            "fingerprint": fingerprint,
+            "projects": names,
+            "projectKeys": keys,
+            "projectCount": len(keys),
+            "archetypes": archetypes,
+            "stacks": stacks,
+            "category": category,
+            "scope": text_of(items[0].get("scope")),
+            "proposedChange": text_of(items[0].get("proposedChange")),
+            "observation": text_of(items[0].get("observation")),
+            "evidence": sorted({e for item in items for e in as_list(item.get("evidence"))}),
+            "reason": "correction" if immediate else "seen on " + str(len(keys)) + " projects",
+            "communityEvidence": sum(1 for item in items if item.get("community")),
+            # Who was merged into this cluster, so a bad merge is visible.
+            "members": [
                 {
-                    "fingerprint": fingerprint,
-                    "projects": names,
-                    "projectKeys": keys,
-                    "projectCount": len(keys),
-                    "archetypes": archetypes,
-                    "stacks": stacks,
-                    "category": category,
-                    "scope": text_of(items[0].get("scope")),
-                    "proposedChange": text_of(items[0].get("proposedChange")),
-                    "observation": text_of(items[0].get("observation")),
-                    "evidence": sorted({e for item in items for e in as_list(item.get("evidence"))}),
-                    "reason": "correction" if immediate else "seen on " + str(len(keys)) + " projects",
-                    "communityEvidence": sum(1 for item in items if item.get("community")),
-                    # Who was merged into this cluster, so a bad merge is visible.
-                    "members": [
-                        {
-                            "id": observation_key(item),
-                            "project": text_of(item.get("project")),
-                            "date": text_of(item.get("date")),
-                            "observation": text_of(item.get("observation"))[:160],
-                        }
-                        for item in items
-                    ],
+                    "id": observation_key(item),
+                    "project": text_of(item.get("project")),
+                    "date": text_of(item.get("date")),
+                    "observation": text_of(item.get("observation"))[:160],
                 }
-            )
+                for item in items
+            ],
+        }
+        # Community records corroborate a sighting in this store; a group made
+        # of contributions alone never clears the bar, however many there are
+        # or whatever their category says.
+        if any(not item.get("community") for item in items):
+            candidates.append(candidate)
+        else:
+            candidate["reason"] = "community only: not eligible without a sighting in this store"
+            community_only.append(candidate)
     candidates.sort(key=lambda c: (-c["projectCount"], c["scope"], c["fingerprint"]))
+    community_only.sort(key=lambda c: (-c["projectCount"], c["scope"], c["fingerprint"]))
 
-    if getattr(args, "export", None):
+    if exporting:
         salt = store_salt(store)
         bundle = {
             "bundleVersion": "1",
             "generatedFor": "adminwright community observations",
-            "note": "Sanitised. Project names are salted one-way fingerprints; paths, hosts, "
-                    "emails, URLs, credentials and evidence references are removed.",
+            "note": "Sanitised. Project names are one-way fingerprints salted per store, so they "
+                    "count as one project only within bundles from the same store; paths, hosts, "
+                    "emails, URLs, credentials and evidence references are removed; scope is kept "
+                    "only when it names a file or area of the skill.",
             "observations": [sanitise_candidate(c, salt) for c in candidates],
         }
         out_path = Path(args.export).resolve()
@@ -6969,9 +7371,18 @@ def cmd_promote(args):
 
     if args.json:
         print(json.dumps(
-            {"store": str(store), "communityRecords": community_count, "candidates": candidates},
+            {"store": str(store), "communityRecords": community_count, "candidates": candidates,
+             "communityOnly": community_only},
             indent=2, ensure_ascii=False))
         return 0
+
+    def one_line(value):
+        # Contributed text is untrusted: a newline in it could forge a heading, or
+        # end a heredoc that captures this output (the weekly review workflow).
+        return " ".join(text_of(value).split()) if isinstance(value, str) else str(value)
+
+    def joined(values, separator=", "):
+        return separator.join(one_line(value) for value in values)
 
     print("# Promotion candidates")
     print()
@@ -6982,30 +7393,41 @@ def cmd_promote(args):
         print("Community records included: " + str(community_count)
               + " (corroborating only; they never adopt guidance on their own)")
     print()
+    if community_only:
+        print("## Community only (not eligible)")
+        print()
+        print("These reach the bar on contributed records alone. A contribution corroborates a")
+        print("sighting in this store; it never promotes anything by itself.")
+        print()
+        for candidate in community_only:
+            print("- " + one_line(candidate["scope"]) + " (" + one_line(candidate["category"]) + ", "
+                  + str(candidate["projectCount"]) + " contributed project(s)): "
+                  + one_line(candidate["observation"])[:160])
+        print()
     if not candidates:
         print("Nothing clears the bar yet. Keep harvesting.")
         return 0
     for candidate in candidates:
-        print("## " + candidate["scope"] + " (" + candidate["reason"] + ")")
+        print("## " + one_line(candidate["scope"]) + " (" + candidate["reason"] + ")")
         print()
-        print("- Category: " + candidate["category"])
-        print("- Projects: " + ", ".join(candidate["projects"]))
+        print("- Category: " + one_line(candidate["category"]))
+        print("- Projects: " + joined(candidate["projects"]))
         if candidate.get("communityEvidence"):
             print("- Community-sourced records: " + str(candidate["communityEvidence"])
                   + " (weigh separately; unverified)")
         if candidate["archetypes"]:
-            print("- Archetypes: " + ", ".join(candidate["archetypes"]))
+            print("- Archetypes: " + joined(candidate["archetypes"]))
         if candidate["stacks"]:
-            print("- Stacks: " + "; ".join(candidate["stacks"]))
-        print("- Observation: " + candidate["observation"])
-        print("- Proposed: " + candidate["proposedChange"])
+            print("- Stacks: " + joined(candidate["stacks"], "; "))
+        print("- Observation: " + one_line(candidate["observation"]))
+        print("- Proposed: " + one_line(candidate["proposedChange"]))
         if candidate["evidence"]:
-            print("- Evidence: " + ", ".join(candidate["evidence"]))
+            print("- Evidence: " + joined(candidate["evidence"]))
         print("- Merged from " + str(len(candidate["members"])) + " observation(s); if two of "
               "these are not the same finding, do not adopt them as one:")
         for member in candidate["members"]:
-            print("    - " + member["id"] + " (" + (member["date"] or "undated") + "): "
-                  + member["observation"])
+            print("    - " + one_line(member["id"]) + " (" + (one_line(member["date"]) or "undated") + "): "
+                  + one_line(member["observation"]))
         print()
     print("Record each accepted candidate with `lesson add`, then edit the reference it")
     print("names and open a pull request. Promotion is a judgement call: read")
@@ -7018,16 +7440,65 @@ def in_plugin_cache(path):
     return any(parts[i] == "plugins" and parts[i + 1] == "cache" for i in range(len(parts) - 1))
 
 
+# Variables that point git at a repository other than the one around its -C
+# directory. A validate run from a project's git hook inherits GIT_DIR, and the
+# skill must not read the PROJECT's repository as its own.
+GIT_LOCATION_VARIABLES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX",
+)
+
+
+def skill_git(*args):
+    """Run git in the skill root; None when git is missing or does not answer."""
+    environment = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARIABLES}
+    try:
+        return subprocess.run(
+            ["git", "-C", str(SKILL_ROOT)] + list(args),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, env=environment,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def same_directory(left, right):
+    """True when two spellings name one directory (case, separators, links)."""
+    def canonical(value):
+        return os.path.normcase(os.path.realpath(str(value)))
+    if canonical(left) == canonical(right):
+        return True
+    try:
+        return os.path.samefile(str(left), str(right))
+    except OSError:
+        return False
+
+
+_SKILL_CHECKOUT = []
+
+
 def skill_is_checkout():
-    """True when this copy of the skill is a git checkout of its own repository.
+    """True only when the skill root is the top of its own git work tree.
 
     A marketplace install lives under ~/.claude/plugins/cache/<marketplace>/
-    <plugin>/<sha>/ -- no .git, and the whole directory is replaced on update --
-    so anything written into its lessons/ or references/ is silently discarded.
+    <plugin>/<sha>/ and is replaced on update, so anything written into its
+    lessons/ or references/ is silently discarded. A copy vendored into a
+    project (<project>/.claude/skills/adminwright, a documented install) is
+    overwritten by the next copy. Both can sit inside SOME git repository -- a
+    git-tracked home, the project itself -- so "a .git in any ancestor" is not
+    the test: the work tree's top must be the skill root itself.
     """
-    if in_plugin_cache(SKILL_ROOT):
-        return False
-    return any((candidate / ".git").exists() for candidate in [SKILL_ROOT] + list(SKILL_ROOT.parents))
+    if _SKILL_CHECKOUT:
+        return _SKILL_CHECKOUT[0]
+    result = False
+    if not in_plugin_cache(SKILL_ROOT) and any(
+        (candidate / ".git").exists() for candidate in [SKILL_ROOT] + list(SKILL_ROOT.parents)
+    ):
+        done = skill_git("rev-parse", "--show-toplevel")
+        if done is not None and done.returncode == 0 and done.stdout.strip():
+            result = same_directory(done.stdout.strip(), SKILL_ROOT)
+    _SKILL_CHECKOUT.append(result)
+    return result
 
 
 def clean_block(text):
@@ -7037,11 +7508,51 @@ def clean_block(text):
     )
 
 
-def scope_exists(scope, lessons_dir):
-    relative = Path(scope)
-    if relative.is_absolute() or ".." in relative.parts:
-        return False
-    return any((base / relative).is_file() for base in (Path(lessons_dir).parent, SKILL_ROOT))
+SKILL_SCOPE_HINT = (
+    "name the one file or area of the skill it would change, as a path from the skill root "
+    "that exists, e.g. SKILL.md, references/architecture.md, scripts, agents, "
+    "assets/admin-core-schema, lessons or INTEGRATIONS.md"
+)
+
+
+def skill_path_exists(root, relative):
+    """Whether root/relative exists, matching every segment's case exactly.
+
+    Exact case on every platform: 'skill.md' exists on Windows and not on Linux,
+    and a scope must bucket the same way wherever the store was harvested.
+    """
+    current = Path(root)
+    for segment in relative.split("/"):
+        try:
+            if segment not in os.listdir(str(current)):
+                return False
+        except OSError:
+            return False
+        current = current / segment
+    return True
+
+
+def skill_scope_problem(scope, roots=None):
+    """None when `scope` names an existing file or area of the skill, else what is wrong.
+
+    The one validator for feedback[].scope (add refuses, validate warns) and
+    `lesson add --scope`: they used to disagree -- feedback accepted a
+    nonexistent references/nope.md and 'scripts/../../etc/passwd' but refused
+    assets/, INTEGRATIONS.md and lessons/, while lesson add refused the bare
+    'scripts' and 'agents' scopes that feedback and promote use.
+    """
+    value = scope.strip() if isinstance(scope, str) else ""
+    if not value:
+        return "is missing"
+    if "\\" in value:
+        return "uses '\\'; write the path with '/'"
+    if not FEEDBACK_SCOPE_PATTERN.match(value):
+        return "is not a relative path inside the skill (no leading '/', and no '.', '..' or hidden segments)"
+    if value == "references":
+        return "names the whole references/ folder; name the one reference file"
+    if any(skill_path_exists(root, value) for root in (roots or (SKILL_ROOT,))):
+        return None
+    return "names nothing that exists in the skill"
 
 
 def build_lesson_text(lesson_id, args, date):
@@ -7050,7 +7561,7 @@ def build_lesson_text(lesson_id, args, date):
         "---",
         "id: " + yaml_quote(lesson_id),
         "title: " + yaml_quote(args.title),
-        "date: " + date,
+        "date: " + yaml_quote(date),
         "category: " + args.category,
         "scope: " + yaml_quote(args.scope),
         "status: " + args.status,
@@ -7074,13 +7585,77 @@ def build_lesson_text(lesson_id, args, date):
     return "\n".join(lines)
 
 
+def lesson_date(raw):
+    """A caller-supplied YYYY-MM-DD, checked against the calendar (the clock is never read).
+
+    Written unvalidated, `--date $'2026-09-23\\nstatus: adopted\\n---'` closed the
+    frontmatter early and opened the lesson as adopted, past the refusal below.
+    """
+    import datetime
+
+    value = raw.strip() if isinstance(raw, str) else ""
+    if value == "":
+        return None
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        try:
+            datetime.date(int(value[:4]), int(value[5:7]), int(value[8:]))
+            return value
+        except ValueError:
+            pass
+    raise ManifestError("--date must be a calendar date written YYYY-MM-DD, e.g. 2026-09-23; got "
+                        + json.dumps(value))
+
+
+def create_new_file(path, text):
+    """Write `text` to a file that must not exist yet (O_EXCL); False if it does.
+
+    write_text_file replaces its target by design; a lesson must never replace
+    another one. The file is written LF-only, as UTF-8 without a BOM.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(str(path), flags, 0o644)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+    except BaseException:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def create_outbox_lesson(directory, stem, text):
+    """<stem>.md, else <stem>-2.md, -3.md ...: an earlier lesson is never overwritten.
+
+    The outbox named lessons <date>-<slug>.md and wrote them with a plain
+    replace, so two lessons with one title on one day -- or two long titles
+    sharing their first 60 characters, or two undated ones -- kept only the
+    second, with a success message for both.
+    """
+    for number in range(1, 1000):
+        path = directory / (stem + ("" if number == 1 else "-" + str(number)) + ".md")
+        if create_new_file(path, text):
+            return path
+    raise ManifestError("the outbox already holds 999 lessons named " + stem + ".md; " + str(directory))
+
+
 def cmd_lesson_add(args):
     if args.status == "adopted":
         raise ManifestError(
             "a lesson is opened as 'proposed'; adoption is a separate reviewed edit "
             "(lessons/README.md, section 7), never part of opening it"
         )
-    date = text_of(args.date) or "unknown"
+    date = lesson_date(args.date) or "unknown"
     if date == "unknown":
         stderr("WARN: no --date supplied; recorded as 'unknown'")
     outbox = False
@@ -7091,11 +7666,12 @@ def cmd_lesson_add(args):
     else:
         outbox = True
         lessons_dir = global_store_dir() / "outbox" / "lessons"
-    if not scope_exists(args.scope, lessons_dir):
-        raise ManifestError(
-            "--scope '" + args.scope + "' is not an existing file under the skill root; name the "
-            "one reference the rule lands in, e.g. references/architecture.md"
-        )
+    # An explicit --lessons-dir may sit in another clone of the skill: accept a
+    # scope that exists there too.
+    roots = (lessons_dir.parent, SKILL_ROOT) if args.lessons_dir else (SKILL_ROOT,)
+    problem = skill_scope_problem(args.scope, roots)
+    if problem:
+        raise ManifestError("--scope " + json.dumps(args.scope) + " " + problem + "; " + SKILL_SCOPE_HINT)
     try:
         lessons_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -7104,20 +7680,31 @@ def cmd_lesson_add(args):
     if outbox:
         # Not a checkout: numbering and the index belong to the repository, and a
         # plugin cache is replaced on update. Park the lesson where it survives.
-        path = lessons_dir / ((date if date != "unknown" else "undated") + "-" + slug + ".md")
-        write_text_file(path, build_lesson_text("pending", args, date))
+        with FileLock(lessons_dir / ".lock"):
+            path = create_outbox_lesson(
+                lessons_dir, (date if date != "unknown" else "undated") + "-" + slug,
+                build_lesson_text("pending", args, date),
+            )
         print("Wrote " + str(path))
         print(
-            "This copy of adminwright is not a git checkout (a marketplace plugin cache is "
-            "replaced on update), so the lesson was written to your outbox instead of lessons/.\n"
+            "This copy of adminwright (" + str(SKILL_ROOT) + ") is not a git checkout of the "
+            "skill repository: a plugin cache is replaced on update, and a copy vendored into a "
+            "project is overwritten by the next copy. So the lesson was written to your outbox "
+            "instead of lessons/.\n"
             "To adopt it: clone github.com/TarikAI/adminwright, copy the file into lessons/ under "
-            "the next id, edit the reference it names, and open a pull request."
+            "the next id, run `lesson index`, edit the reference it names, and open a pull request."
         )
         return 0
     with FileLock(lessons_dir / ".lock"):
-        lesson_id = "%04d" % next_lesson_number(lessons_dir)
-        path = lessons_dir / (lesson_id + "-" + slug + ".md")
-        write_text_file(path, build_lesson_text(lesson_id, args, date))
+        # Exclusive creation even under the lock: a writer that does not take it
+        # (an older copy of this script) must never have its lesson replaced.
+        for _attempt in range(100):
+            lesson_id = "%04d" % next_lesson_number(lessons_dir)
+            path = lessons_dir / (lesson_id + "-" + slug + ".md")
+            if create_new_file(path, build_lesson_text(lesson_id, args, date)):
+                break
+        else:
+            raise ManifestError("could not allocate a lesson id in " + str(lessons_dir))
         rebuild_lesson_index(lessons_dir)
     print("Wrote " + str(path))
     print("Updated " + str(lessons_dir / "index.md"))
@@ -7404,7 +7991,12 @@ def build_parser():
         "harvest", help="Move a project's feedback[] into the cross-project store"
     )
     harvest.add_argument("--manifest", required=True)
-    harvest.add_argument("--project", help="defaults to platform.name")
+    harvest.add_argument(
+        "--project",
+        help="the name shown for this project in the store and in promote output (default "
+             "platform.name); it never changes how the project is counted, which is by "
+             "platform.id",
+    )
     harvest.add_argument("--store", help="defaults to $ADMINWRIGHT_HOME or ~/.adminwright")
     harvest.add_argument("--date", help="caller-supplied date; the script never reads the clock")
     harvest.set_defaults(func=cmd_harvest)
@@ -7419,7 +8011,8 @@ def build_parser():
         type=float,
         default=SIMILARITY_THRESHOLD,
         help="content-word overlap needed to treat two observations as one "
-             "finding (0.0-1.0; lower groups more aggressively)",
+             "finding (0.0-1.0; lower groups more aggressively). Three shared "
+             "non-generic words and a match with the group's members are always required",
     )
     promote.add_argument("--json", action="store_true")
     promote.add_argument(
@@ -7440,7 +8033,11 @@ def build_parser():
     )
     store_parser.add_argument("action", choices=("init", "sync", "status"))
     store_parser.add_argument("--store", help="defaults to $ADMINWRIGHT_HOME or ~/.adminwright")
-    store_parser.add_argument("--remote", help="git URL to sync with; use a PRIVATE repository")
+    store_parser.add_argument(
+        "--remote",
+        help="with init: the git URL to sync with (use a PRIVATE repository); sync and status "
+             "use the remote init configured and warn if this is given",
+    )
     store_parser.add_argument("--branch", default="main")
     store_parser.add_argument("--date", help="caller-supplied date; the script never reads the clock")
     store_parser.set_defaults(func=cmd_store)

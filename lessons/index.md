@@ -8,7 +8,7 @@ files, so the index cannot drift from them. Field meanings, statuses, and the re
 procedure are in [README.md](README.md). The promotion bar is in
 [../references/skill-evolution.md](../references/skill-evolution.md).
 
-`scope` is skill-root-relative and names the single reference file the rule lands in.
+`scope` is skill-root-relative and names the one file or area the rule lands in.
 
 | id | title | category | scope | status | confidence | platforms | date |
 |---|---|---|---|---|---|---|---|

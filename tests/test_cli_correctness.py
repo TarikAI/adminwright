@@ -516,6 +516,22 @@ class TestInitLayout(TempProject):
         self.assertIn("decision-assumed", out)
 
 
+class TestSourceIntegrity(unittest.TestCase):
+    def test_no_top_level_name_is_defined_twice(self):
+        # Two branches each added a `git_paths` helper; the later definition
+        # silently replaced the earlier one and broke `review-scope` at runtime.
+        import ast
+        from collections import Counter
+        for script in sorted(SCRIPT.parent.glob("*.py")):
+            tree = ast.parse(script.read_text(encoding="utf-8"))
+            names = Counter(
+                node.name for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+            )
+            twice = sorted(name for name, count in names.items() if count > 1)
+            self.assertEqual(twice, [], script.name + " defines these more than once")
+
+
 class TestRuleMatrix(unittest.TestCase):
     """6.25 -- the published matrix is generated from RULES, never hand-written."""
 

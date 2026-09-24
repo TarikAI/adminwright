@@ -37,9 +37,20 @@ distinct projects" cannot be evaluated while each project's copy of the skill on
 about itself. `harvest` moves a finished project's `feedback[]` into a store outside every
 project — `$ADMINWRIGHT_HOME`, or `~/.adminwright` by default — where observations from every
 platform you have built accumulate. `promote` then groups observations that say the same
-thing in different words and reports only those that clear the bar.
+thing in different words and reports only those that clear the bar. Grouping is deliberately
+conservative, because a false merge invents the second project the bar asks for: two records
+group only when they share at least three words beyond the vocabulary of complaint
+(manifest, validation, failed, missing), and a record joins a group only if it matches every
+member of a group of three or fewer, or a majority of a larger one. `promote` lists every
+member; if two of them are not the same finding, do not adopt them as one.
 
-A project is counted by its stable `platform.id` (written by `init`, so renaming the platform does not make it a new project), never by its display name; `promote --export` replaces it with a fingerprint salted per store.
+A project is counted by its stable `platform.id` (written by `init`, so renaming the platform
+does not make it a new project); `promote --export` replaces it with a fingerprint salted per
+store. `harvest --project <name>` changes only the name shown, never the count. A manifest
+without a `platform.id` (created before `init` wrote one) is counted by its name, so a rename
+counts twice and two consoles that share a name count once: `validate` and `harvest` warn
+(`platform-id-missing`). Add one once and never change it:
+`set --manifest <path> --path platform.id --value <name>-<6 random hex digits>`.
 
 The store is an accumulation buffer, not the record. Adopted lessons live in the skill's own
 `lessons/` directory under version control, which is how they reach anyone else.
@@ -58,15 +69,18 @@ repository: observations quote your engineering notes. If you would rather not u
 
 **Other people, opt-in.** `promote --export <file>` writes a sanitised bundle of promotion
 candidates: emails, URLs, paths, addresses, hostnames, domains, tokens and hashes replaced by
-markers, project names replaced by one-way fingerprints, stacks coarsened to families, and
-evidence references dropped. Contribution is a pull request adding the bundle under
-`community/observations/`, so review is the trust gate.
+markers, project names replaced by one-way fingerprints salted per store (countable only
+within bundles from one store), scope kept only when it names a part of the skill, stacks
+coarsened to families, and evidence references dropped. Contribution is a pull request
+adding the bundle under `community/observations/`, so review is the trust gate.
 `promote --include-community` then lets contributed records corroborate a local observation
 across the bar.
 
 Three rules keep that safe:
 
-- Community records **corroborate only**. They never adopt guidance on their own, and they
+- Community records **corroborate only**. `promote` enforces it: a candidate made only of
+  contributed records is listed as "community only (not eligible)", each contributed record
+  counts as one project, and a bundle this store exported never corroborates itself. They
   are labelled in `promote` output so a reviewer can weigh them differently.
 - Their fingerprints are **recomputed on load**, never trusted from the bundle, so a stale or
   hand-edited file cannot group itself with unrelated observations.
@@ -86,8 +100,8 @@ Commands, and exactly what each writes:
 | Share, opt-in | `promote --export <file>` | a sanitised bundle; sharing happens only when you open a pull request |
 | Weigh contributions | `promote --include-community` | nothing; adds contributed evidence to the bar calculation |
 | Read the queue | `lesson list --status proposed` | nothing |
-| Adopt | edit of the one reference named in `scope` | the guidance change |
-| Close the lesson | edit of the lesson frontmatter and its index row to `status: adopted` | the lesson and the index |
+| Adopt | edit of the one file named in `scope`, or in `Proposed edit` for an area scope | the guidance change |
+| Close the lesson | edit of the lesson frontmatter to `status: adopted`, then `lesson index` | the lesson, and the index rebuilt from the files |
 | Close the project entry | `set --manifest <path> --path 'feedback[fb-003].status' --value promoted` | the manifest entry |
 
 Invocation form:
@@ -139,8 +153,9 @@ Before opening, run `lesson list` and read the `rejected` and `adopted` entries.
 idea matches a rejected lesson, either add new evidence from a distinct project to that
 lesson or drop it. Do not open a second file for the same idea.
 
-`lesson add` requires a title, a category from the feedback vocabulary, a `scope` (the single
-reference file the rule would land in, named by its inventory path; it must exist), a
+`lesson add` requires a title, a category from the feedback vocabulary, a `scope` (the one
+file or area the rule would land in, skill-root-relative; it must exist, and it is checked
+exactly as `feedback[].scope` is, so a promoted candidate's scope is copied as is), a
 trigger, and a rule. It writes the frontmatter and the five headings exactly as
 [../lessons/README.md](../lessons/README.md) documents them, with `status: proposed`,
 `confidence: observed-once` (or `--confidence repeated|confirmed`), `platforms` from
@@ -150,7 +165,8 @@ trigger, and a rule. It writes the frontmatter and the five headings exactly as
 adopted id) cannot drift; `lesson index` does the same on demand. Outside a git checkout of
 the skill it writes to `$ADMINWRIGHT_HOME/outbox/lessons/` instead. Fill `platforms` from the project manifest's
 `platform.archetypes` and `platform.stack` before review. A lesson cannot be adopted with
-empty `platforms`, an empty `Proposed edit`, or a `scope` that is not a real reference file.
+empty `platforms`, an empty `Proposed edit`, or a `scope` that does not exist in the skill; an
+area scope such as `scripts` is narrowed to the file it changes in `Proposed edit`.
 
 Field definitions and status transitions are in [../lessons/README.md](../lessons/README.md).
 

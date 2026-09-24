@@ -472,6 +472,7 @@ def build_matrix():
         "archetypes": ["logistics-mobility"],        # archetype-coverage: models none of its domains
         "domainTerms": ["mock"],                     # domain-term-unbacked: no entity is a Mock
     })
+    del m["platform"]["id"]                          # platform-id-missing
     m["roles"] = [
         {"id": "ops", "name": "Ops", "responsibilities": ["Run it"], "scopes": ["all"],
          "mfaRequired": True, "separationOfDuties": [],     # separation-of-duties for the critical command
