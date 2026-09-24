@@ -1018,6 +1018,25 @@ class TestMachinePaths(InstallBase):
         self.assertEqual(machine_path(self.project), inside.resolve().as_posix(),
                          "the per-machine file must never point at a stale location")
 
+    def test_a_skill_in_the_plugin_cache_is_recorded_as_its_marketplace_clone(self):
+        # Claude Code deletes <plugins>/cache/<mkt>/<plugin>/<version>/ about 14
+        # days after an update; the marketplace clone stays.
+        plugins = self.scratch() / "plugins"
+        cached = make_runnable_skill(plugins / "cache" / "tarikai" / "adminwright" / "0123abcd4567")
+        clone = make_runnable_skill(plugins / "marketplaces" / "tarikai")
+        out, _err = self.install("codex", cached)
+        self.assertEqual(machine_path(self.project), clone.resolve().as_posix())
+        self.assertIn("marketplace clone", out)
+        self.assertEqual(leaks(self.project, machine_needles(cached, clone, self.project)), [])
+
+    def test_a_skill_in_the_plugin_cache_without_a_clone_warns(self):
+        plugins = self.scratch() / "plugins"
+        cached = make_runnable_skill(plugins / "cache" / "tarikai" / "adminwright" / "0123abcd4567")
+        _out, err = self.install("gemini", cached)
+        self.assertEqual(machine_path(self.project), cached.resolve().as_posix())
+        self.assertIn("WARNING", err)
+        self.assertIn("14 days", err)
+
     def test_an_existing_gitignore_gains_the_entry_once_and_keeps_its_rules(self):
         skill = make_skill(self.scratch() / "adminwright")
         gitignore = self.project / ".gitignore"

@@ -84,7 +84,11 @@ When the skill lives inside the project, every copy and the pointer block name i
 to the project root. When it lives outside (a plugin cache, `~/.claude/skills/`, a clone
 elsewhere), the copies say `<skill>` where the source says `${CLAUDE_PLUGIN_ROOT}`, and
 the installer writes this machine's path to `.adminwright/skill-dir` and adds
-`/.adminwright/skill-dir` to the project's `.gitignore`. Each agent's "Locate the skill"
+`/.adminwright/skill-dir` to the project's `.gitignore`. A skill found in Claude Code's
+versioned plugin cache (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, deleted
+about 14 days after the plugin updates) is recorded as the marketplace clone
+(`~/.claude/plugins/marketplaces/<marketplace>/`) when that holds the skill too, and the
+installer warns when it does not. Each agent's "Locate the skill"
 section reads that file first, and falls back to its search list whenever the path it names
 does not exist. A teammate who pulls the committed agents needs the skill in one of those
 standard places, or one run of the installer, which writes their own

@@ -403,6 +403,43 @@ def write_text(path, text):
 
 # --- this machine's skill path --------------------------------------------------
 
+def is_skill_dir(path):
+    """A directory an agent can run the skill from."""
+    return (path / "SKILL.md").is_file() and (path / "scripts" / "admin_console_manifest.py").is_file()
+
+
+def durable_skill_dir(skill_dir):
+    """(directory to record for this machine, message or None).
+
+    Claude Code copies a marketplace plugin to
+    <plugins>/cache/<marketplace>/<plugin>/<version>/ and deletes that directory
+    about 14 days after the next update, while the marketplace's clone at
+    <plugins>/marketplaces/<marketplace>/ stays. A skill found in the cache is
+    recorded as the clone when the clone holds it too; otherwise the message is
+    a warning that the recorded path will go stale.
+    """
+    resolved = Path(skill_dir).resolve()
+    for ancestor in resolved.parents:
+        if ancestor.name.lower() != "cache" or ancestor.parent.name.lower() != "plugins":
+            continue
+        inside = resolved.relative_to(ancestor).parts  # marketplace, plugin, version, ...
+        if len(inside) < 3:
+            break
+        clone = ancestor.parent / "marketplaces" / inside[0]
+        for candidate in (clone.joinpath(*inside[3:]), clone):
+            if is_skill_dir(candidate):
+                return candidate, (
+                    "The skill is in Claude Code's versioned plugin cache (" + portable(resolved)
+                    + "), which is deleted about 14 days after the plugin updates; recording the "
+                    "marketplace clone " + portable(candidate) + " for this machine instead")
+        return resolved, (
+            "WARNING: " + portable(resolved) + " is in Claude Code's versioned plugin cache, which "
+            "is deleted about 14 days after the plugin updates, and no marketplace clone holds "
+            "the skill; rerun this installer after each update, or pass --skill-dir with a "
+            "directory that stays")
+    return resolved, None
+
+
 def record_machine_path(project_root, skill_dir):
     """Write this machine's absolute skill path to MACHINE_PATH_FILE.
 
@@ -459,7 +496,10 @@ def report_machine_path(project_root, skill_dir, needed):
     path = project_root / MACHINE_PATH_FILE
     if not needed and not path.exists():
         return
-    if record_machine_path(project_root, skill_dir):
+    recorded, message = durable_skill_dir(skill_dir)
+    if message:
+        print(message, file=sys.stderr if message.startswith("WARNING") else sys.stdout)
+    if record_machine_path(project_root, recorded):
         if needed:
             print("Wrote this machine's skill path to " + str(path) + "; the agent files name "
                   "the skill " + PLACEHOLDER + " and read the path from there")
