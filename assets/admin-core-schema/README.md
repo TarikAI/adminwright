@@ -204,6 +204,17 @@ BEGIN
     IF EXISTS (SELECT 1 FROM verify_audit_chain('verify')) THEN
         RAISE EXCEPTION 'VERIFY FAILED: a healthy chain reported problems' USING ERRCODE = 'XX000';
     END IF;
+    -- A writer cannot make a row look scrubbed: payload hashes are derived, and a row
+    -- without a payload names no redaction policy.
+    INSERT INTO audit_event (chain_id, occurred_at, environment, action, target_type, result,
+                             before_hash, after_hash, redaction_policy)
+    VALUES ('verify-forged', now(), 'production', 'user.view', 'user', 'succeeded', 'deadbeef', 'cafe', 'pii-v1')
+    RETURNING id INTO n;
+    IF (SELECT before_hash IS NOT NULL OR after_hash IS NOT NULL OR redaction_policy <> 'none'
+          FROM audit_event WHERE id = n) THEN
+        RAISE EXCEPTION 'VERIFY FAILED: an insert kept writer-supplied payload hashes or a redaction policy without a payload'
+            USING ERRCODE = 'XX000';
+    END IF;
 
     -- 2. audit_event is append-only, and the rows are still there afterwards.
     PERFORM pg_temp.expect_refused('UPDATE audit_event', 'UPDATE audit_event SET reason = ''x'' WHERE id = ' || ev1, 'P0001');

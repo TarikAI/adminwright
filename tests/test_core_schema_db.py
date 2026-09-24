@@ -18,6 +18,32 @@ import unittest
 
 from _core_schema_pg import ENABLED, PSQL, SCHEMA, SKIP_REASON, PgCase, readme_verification_sql
 
+# The chain-link trigger as it was at d6c64a8: it hashed a payload only when one was present and
+# otherwise kept whatever before_hash / after_hash / redaction_policy the writer supplied.
+PRE_FIX_CHAIN_LINK = r"""
+CREATE OR REPLACE FUNCTION admin_core.audit_event_chain_link()
+RETURNS trigger AS $$
+DECLARE
+    last_seq  bigint;
+    last_hash text;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('admin_core.audit_event:' || NEW.chain_id, 0));
+    SELECT a.chain_seq, a.row_hash INTO last_seq, last_hash
+      FROM admin_core.audit_event a WHERE a.chain_id = NEW.chain_id ORDER BY a.chain_seq DESC LIMIT 1;
+    NEW.chain_seq := COALESCE(last_seq, 0) + 1;
+    NEW.prev_hash := last_hash;
+    IF NEW.before_state IS NOT NULL THEN
+        NEW.before_hash := encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex');
+    END IF;
+    IF NEW.after_state IS NOT NULL THEN
+        NEW.after_hash := encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex');
+    END IF;
+    NEW.row_hash := encode(sha256(convert_to(admin_core.audit_event_hash_input(NEW), 'UTF8')), 'hex');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+"""
+
 
 @unittest.skipUnless(ENABLED, SKIP_REASON)
 class TestCoreSchemaOnPostgres(PgCase):
@@ -78,6 +104,13 @@ class TestCoreSchemaOnPostgres(PgCase):
             "ALTER TABLE admin_core.admin_job_failure ADD CONSTRAINT admin_job_failure_job_id_fkey "
             "FOREIGN KEY (job_id) REFERENCES admin_core.admin_job(id) ON DELETE CASCADE",
             "DELETE admin_job with failures was allowed",
+        )
+
+    def test_verification_is_not_vacuous_forged_payload_hash(self):
+        # round-2 finding: an INSERT could set before_hash with no payload, so the row looked scrubbed
+        self.assert_verification_fails_without(
+            PRE_FIX_CHAIN_LINK,
+            "an insert kept writer-supplied payload hashes",
         )
 
     def test_verification_is_not_vacuous_request_rewrite(self):

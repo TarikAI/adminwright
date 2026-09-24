@@ -561,6 +561,10 @@ $$;
 -- chain_seq gap-free; use several chain_ids to shard write throughput. Under
 -- REPEATABLE READ or SERIALIZABLE a stale snapshot can pick an already-used
 -- chain_seq: the unique index then rejects the insert and the writer retries.
+-- The payload hashes are derived, never taken from the writer: a hash without its
+-- payload is what a scrubbed row looks like, so an INSERT must not be able to forge
+-- one. A row inserted with no payload at all records redaction_policy 'none', since
+-- no policy was applied to anything.
 CREATE OR REPLACE FUNCTION admin_core.audit_event_chain_link()
 RETURNS trigger AS $$
 DECLARE
@@ -578,11 +582,12 @@ BEGIN
      LIMIT 1;
     NEW.chain_seq := COALESCE(last_seq, 0) + 1;
     NEW.prev_hash := last_hash;
-    IF NEW.before_state IS NOT NULL THEN
-        NEW.before_hash := encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex');
-    END IF;
-    IF NEW.after_state IS NOT NULL THEN
-        NEW.after_hash := encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex');
+    NEW.before_hash := CASE WHEN NEW.before_state IS NULL THEN NULL
+        ELSE encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex') END;
+    NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL
+        ELSE encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex') END;
+    IF NEW.before_state IS NULL AND NEW.after_state IS NULL THEN
+        NEW.redaction_policy := 'none';
     END IF;
     NEW.row_hash := encode(
         sha256(convert_to(admin_core.audit_event_hash_input(NEW), 'UTF8')), 'hex');

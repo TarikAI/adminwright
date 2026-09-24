@@ -1204,6 +1204,17 @@ class TestCanonicalIsSelfConsistent(unittest.TestCase):
         self.assertIn("tenant_id", CANON.columns["feature_flag"])
         self.assertIn("tenant_id", CANON.columns["config_change"])
 
+    def test_payload_hashes_are_derived_on_insert(self):
+        # round-2 finding: a writer could set before_hash on a row with no payload, making it look
+        # scrubbed; the trigger now always derives both hashes and clears the policy of a
+        # payload-less row.
+        sql = read("postgres.sql")
+        link = sql[sql.index("FUNCTION admin_core.audit_event_chain_link"):]
+        link = link[: link.index("$$ LANGUAGE plpgsql")]
+        self.assertIn("NEW.before_hash := CASE WHEN NEW.before_state IS NULL THEN NULL", link)
+        self.assertIn("NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL", link)
+        self.assertIn("NEW.redaction_policy := 'none'", link)
+
     def test_approval_requests_stay_as_written(self):
         # round-2 finding: rewriting requested_by got a requester past the SoD trigger, and the
         # doc listed columns as immutable that nothing enforced. Only the lifecycle may change.

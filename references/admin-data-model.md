@@ -201,7 +201,8 @@ Non-obvious requirements:
   impersonated identity — that is the single most common way impersonation audit is destroyed.
   It is text in the identity space of `impersonation_session.target_subject_id`, not a foreign
   key to `admin_actor`: the acted-as subject is usually a customer.
-- `before_hash` / `after_hash` are hashes of the payloads (the insert trigger computes them),
+- `before_hash` / `after_hash` are hashes of the payloads, always computed by the insert trigger
+  (a missing payload gets no hash, and a row with no payload records `redaction_policy` `none`),
   and the row hash covers the hashes rather than the payload text. This is what makes later
   payload redaction possible without invalidating the chain.
 - Redaction is not optional. Audit payloads become the least-governed copy of sensitive data in

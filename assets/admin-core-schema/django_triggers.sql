@@ -89,11 +89,12 @@ BEGIN
      LIMIT 1;
     NEW.chain_seq := COALESCE(last_seq, 0) + 1;
     NEW.prev_hash := last_hash;
-    IF NEW.before_state IS NOT NULL THEN
-        NEW.before_hash := encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex');
-    END IF;
-    IF NEW.after_state IS NOT NULL THEN
-        NEW.after_hash := encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex');
+    NEW.before_hash := CASE WHEN NEW.before_state IS NULL THEN NULL
+        ELSE encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex') END;
+    NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL
+        ELSE encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex') END;
+    IF NEW.before_state IS NULL AND NEW.after_state IS NULL THEN
+        NEW.redaction_policy := 'none';
     END IF;
     NEW.row_hash := encode(
         sha256(convert_to(audit_event_hash_input(NEW), 'UTF8')), 'hex');
