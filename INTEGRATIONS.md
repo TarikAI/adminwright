@@ -127,7 +127,8 @@ closes that agent's own earlier unrecorded bundle, and so does a `diff` that fin
 to review; bundles of other agents, or of runs without `--agent`, are never touched.
 
 Endpoint engine (`--engine ocr`, needs provider config): runs
-`ocr review --audience agent --format json` itself, keeps the raw JSON as evidence, and
+`ocr review --audience agent --format json` itself, keeps the raw JSON as evidence
+(`.admin-console/ocr-diff-<timestamp>-<pid>.json`; `scan` writes `ocr-scan-...`), and
 persists findings directly. What happens next depends on how `ocr` says the run ended: the
 reply's `status`, which repeats the run manifest's `terminal_state` (`ocr` 1.8.5 and later;
 replies recorded from the real CLI are in `tests/fixtures/ocr/`).
@@ -188,9 +189,15 @@ Windows PowerShell 5.1 specifics (PowerShell 7 writes and pipes UTF-8 and needs 
 beside the manifest: not yet recorded and less than 24 hours old. Several live bundles are
 refused (exit 2, listing them), because guessing would check your findings against another
 agent's review. A bundle older than 24 hours is ignored with a notice. A successful `record`
-closes its bundle, so it neither gates nor is checked against the next `record`; the file
-stays, holds the skip reasons under `closed.skipped`, and is what the gaps cite as evidence.
-A refused `record` leaves the bundle open.
+closes its bundle, so it neither gates nor is checked against the next `record` (the file
+stays until you delete it, with the skip reasons under `closed.skipped` and the name of the
+record it produced under `closed.record`). A refused `record` leaves the bundle open and
+writes nothing.
+
+*The record.* Every successful `record` writes
+`.admin-console/ocr-record-<timestamp>-<pid>.json`: the findings and skips as submitted, and,
+when a bundle was used, the bundle's mode, refs, agent and reviewable files. That file, not
+the bundle, is what the gaps cite.
 
 *Coverage.* With a bundle, every bundled file must end in one list or the other (a skip
 entry needs a `path` and a `reason`), and only bundled paths may appear in either — silent
@@ -216,10 +223,21 @@ is recorded anew. To accept a finding, `set` its `status` to `accepted` and writ
 accepted-risk `rationale`; the fingerprint lives in its own field, so the next run still
 recognises it (a whole-object `set` that drops the field makes it new again). Gaps recorded
 before the field existed carry the key at the end of their rationale as `fp:<12 hex>`,
-which is honoured for as long as that text stays. Findings are written as one atomic batch, so a refused `record` leaves the
-manifest untouched and re-running after a refusal cannot duplicate gaps. Bundles and raw
-`ocr-*.json` output stay under `.admin-console/` because gaps cite them as evidence; keep
-them with the manifest.
+which is honoured for as long as that text stays. Findings are written as one atomic batch,
+so a refused `record` leaves the manifest untouched and re-running after a refusal cannot
+duplicate gaps.
+
+*What to commit.* Everything the bridge writes sits beside the manifest in
+`.admin-console/`:
+
+| File | What it is | Commit it? |
+|---|---|---|
+| `ocr-bundle*.json` | one delegate review's work order, written by `diff` | No. Transient and git-ignored; delete it once recorded |
+| `ocr-record-*.json` | what a `record` submitted, with the bundle's file list | Yes: the gaps cite it |
+| `ocr-diff-*.json`, `ocr-scan-*.json` | the raw `ocr` reply of an endpoint `diff` or `scan` | Yes: the gaps cite it |
+
+Commit the evidence with the manifest, so a clone or a CI checkout can follow every OCR gap
+to the review that produced it.
 
 **3. `scan` — Audit mode.** Full-file review of code no diff covers (endpoint engine
 only; delegate mode has no full-file scan):

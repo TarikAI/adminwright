@@ -256,6 +256,12 @@ class TempConsole(unittest.TestCase):
         """A path as the manifest cites it: relative to the project root, forward slashes."""
         return str(Path(path).relative_to(self.root)).replace("\\", "/")
 
+    def cited(self, gap):
+        """The one evidence file a bridge gap cites, as (relative path, parsed JSON)."""
+        self.assertEqual(len(gap["evidence"]), 1, gap)
+        cited = gap["evidence"][0]
+        return cited, json.loads((self.root / cited).read_text(encoding="utf-8"))
+
     def diff(self, *extra, **kwargs):
         code, out, err = self.review("diff", "--manifest", self.manifest, *extra, **kwargs)
         self.assertEqual(code, 0, err)
@@ -396,7 +402,12 @@ class Record(TempConsole):
         self.assertEqual(gaps[0]["severity"], "high")
         self.assertIn("src/orders.py:10", gaps[0]["description"])
         self.assertIn("OCR delegate pass", gaps[0]["rationale"])
-        self.assertIn(self.rel(self.bundle_path), gaps[0]["evidence"])
+        # The evidence is the committed record of this review, which names the
+        # (transient, git-ignored) bundle it was checked against.
+        cited, record = self.cited(gaps[0])
+        self.assertRegex(cited, r"^\.admin-console/ocr-record-\d{8}-\d{6}-\d+\.json$")
+        self.assertEqual(record["bundle"]["file"], self.bundle_path.name)
+        self.assertEqual(record["findings"], self.findings_payload()["findings"])
 
     def test_refuses_silent_omission(self):
         payload = {"findings": [], "skipped": []}
@@ -938,7 +949,7 @@ class BundleLifecycle(TempConsole):
         qa = [p for p in self.bundles() if "qa-1" in p.name][0]
         code, out, err = self.record(self.payload(), "--bundle", str(qa))
         self.assertEqual(code, 1, err)
-        self.assertIn(self.rel(qa), self.gaps()[0]["evidence"])
+        self.assertEqual(self.cited(self.gaps()[0])[1]["bundle"]["file"], qa.name)
         # security-1's bundle is now the only live one, so it is picked up.
         code, out, err = self.record({"findings": [], "skipped": [{"path": "src/orders.py", "reason": "vendored"}]})
         self.assertEqual(code, 0, err)
@@ -973,6 +984,11 @@ class BundleLifecycle(TempConsole):
         closed = json.loads(bundle_path.read_text(encoding="utf-8"))["closed"]
         self.assertEqual(closed["by"], "record")
         self.assertEqual(closed["skipped"], [{"path": "src/orders.py", "reason": "generated code"}])
+        # The skip reasons also reach the committed record the bundle points at.
+        record = json.loads((bundle_path.parent / closed["record"]).read_text(encoding="utf-8"))
+        self.assertEqual(record["skipped"], closed["skipped"])
+        self.assertEqual(record["bundle"]["reviewable_files"],
+                         [{"path": "src/orders.py", "status": "modified"}])
         # Spent: the next record is no longer gated by, or checked against, it.
         code, out, err = self.record(self.payload(path="anywhere/else.py"))
         self.assertEqual(code, 1, err)
@@ -1060,6 +1076,40 @@ class BundleLifecycle(TempConsole):
         self.assertNotIn("coverage_rate=100%", out)
         self.assertNotIn("total_files", out)
         self.assertIn("no review bundle", err)
+
+    def test_gaps_cite_committed_evidence_never_a_bundle(self):
+        # Bundles are transient and git-ignored; a gap citing one pointed every
+        # clone and CI checkout at a file it does not have (audit ocr#5).
+        self.diff("--agent", "qa-1")
+        self.assertEqual(self.record(self.payload())[0], 1)
+        self.assertEqual(self.record(self.payload(content="without a bundle"))[0], 1)
+        endpoint = {"FAKE_FINDINGS": json.dumps({"comments": [comment(content="from the endpoint")]})}
+        code, _out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr", env=endpoint)
+        self.assertEqual(code, 1, err)
+        gaps = self.gaps()
+        self.assertEqual(len(gaps), 3)
+        for gap in gaps:
+            cited, _document = self.cited(gap)
+            self.assertNotIn("ocr-bundle", cited, gap["id"])
+            self.assertRegex(cited, r"^\.admin-console/ocr-(record|diff|scan)-[0-9-]+\.json$")
+
+    def test_a_refused_record_leaves_no_record_file_behind(self):
+        self.diff()
+        payload = self.payload()
+        payload["findings"].append(dict(comment(), severity="catastrophic"))
+        code, _out, _err = self.record(payload)
+        self.assertEqual(code, 2)
+        self.assertEqual(list((self.root / ".admin-console").glob("ocr-record-*.json")), [])
+        # And the add itself refusing (not just normalisation) cleans up too.
+        with mock.patch.object(bridge, "add_gaps", return_value=subprocess.CompletedProcess(
+                [], 2, stdout="", stderr="gap refused")):
+            args = bridge.build_parser().parse_args(
+                ["record", "--manifest", str(self.manifest), "--findings", json.dumps(self.payload())])
+            with mock.patch.object(bridge, "stderr"):
+                with self.assertRaises(bridge.ReviewError):
+                    bridge.cmd_record(args)
+        self.assertEqual(list((self.root / ".admin-console").glob("ocr-record-*.json")), [])
+        self.assertNotIn("closed", json.loads(self.only_bundle().read_text(encoding="utf-8")))
 
     def test_every_json_file_the_bridge_writes_has_lf_line_endings(self):
         # Text mode wrote CRLF on Windows (1205 CR bytes in one ocr-record file).

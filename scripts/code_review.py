@@ -40,11 +40,18 @@ record  Persist delegate-mode findings as manifest gaps[] through
         every bundled (path, status) must end reviewed or explicitly skipped
         with a reason, and findings/skips for paths outside the bundle are
         refused; silent omissions and invented paths alike. A successful
-        record closes its bundle (kept as evidence, no longer discoverable);
-        a bundle older than 24 hours is ignored. Without a bundle nothing can
-        be checked, and the summary says `coverage: unknown` instead of
+        record closes its bundle (no longer discoverable); a bundle older
+        than 24 hours is ignored. Bundles are transient work files: every
+        record writes .admin-console/ocr-record-<timestamp>-<pid>.json (the
+        findings and skips as submitted, plus the bundle's mode, refs and
+        file list), and that is what the gaps cite. Without a bundle nothing
+        can be checked, and the summary says `coverage: unknown` instead of
         claiming 100%. Findings already recorded as live gaps (same path,
         start_line and content) are not written twice.
+
+Evidence files: ocr-bundle*.json are transient (the .gitignore that `init`
+writes excludes them); ocr-record-*, ocr-diff-* and ocr-scan-*.json are the
+evidence the gaps cite and belong in the repository with the manifest.
 
 Findings use OCR's comment schema: path, content, start_line, end_line,
 category (bug|security|performance|maintainability|test|style|documentation|
@@ -960,7 +967,11 @@ def write_bundle(manifest, bundle, agent=None):
 
 
 def close_bundle(path, bundle, **facts):
-    """Mark a bundle spent. It stays on disk: recorded gaps cite it as evidence."""
+    """Mark a bundle spent, so it neither gates nor is checked against another record.
+
+    The file stays on disk until someone deletes it; the gaps never cite it
+    (they cite the ocr-record file named in `closed.record`).
+    """
     closed = dict(facts)
     closed["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     bundle["closed"] = closed
@@ -1536,6 +1547,28 @@ def persist_endpoint_result(manifest, proc, mode):
     return EXIT_OK
 
 
+def record_document(bundle_path, bundle, findings, skipped):
+    """The evidence a delegate `record` leaves: what was submitted, against which bundle."""
+    summary = None
+    if bundle is not None:
+        summary = {
+            "file": bundle_path.name,
+            "agent": bundle.get("agent"),
+            "mode": bundle.get("mode"),
+            "refs": bundle.get("refs") or {},
+            "created": bundle.get("created"),
+            "reviewable_files": bundle.get("reviewable_files", []),
+        }
+    return {
+        "schema_version": "1",
+        "engine": "delegate",
+        "recorded": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "bundle": summary,
+        "findings": findings,
+        "skipped": skipped,
+    }
+
+
 def cmd_record(args):
     manifest = Path(args.manifest)
     if not manifest.exists():
@@ -1584,7 +1617,6 @@ def cmd_record(args):
             for f in missing:
                 stderr("  " + f["path"] + " (" + str(f.get("status", "changed")) + ")")
             return EXIT_USAGE
-        evidence_path = bundle_path
     else:
         # No `diff` bundle: there is no reviewable-file set to check the
         # payload against, so it is taken as given and coverage is unknown.
@@ -1592,22 +1624,33 @@ def cmd_record(args):
             "note: no review bundle found; paths are not checked against a diff."
             " Run `diff` first for guaranteed file coverage."
         )
-        evidence_path = manifest.parent / (
-            "ocr-record-" + time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()) + ".json"
-        )
-        write_json_atomic(evidence_path, payload)
 
-    written, duplicates = persist_findings(
-        manifest, findings, "delegate", "delegate review", evidence_path
+    # The gaps cite this record, never the bundle: a bundle is a transient work
+    # file (git-ignored, so absent from every clone), while ocr-record-*.json is
+    # committed with the manifest. It therefore carries what a reader needs from
+    # the bundle as well: its mode, refs and file list.
+    evidence_path = manifest.parent / (
+        "ocr-record-" + time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()) + ".json"
     )
+    write_json_atomic(evidence_path, record_document(bundle_path, bundle, findings_raw, skipped))
+    try:
+        written, duplicates = persist_findings(
+            manifest, findings, "delegate", "delegate review", evidence_path
+        )
+    except BaseException:
+        # Refused (nothing persisted): nothing cites the record, so it goes.
+        try:
+            os.unlink(str(evidence_path))
+        except OSError:
+            pass
+        raise
     if bundle is not None:
         # Spent: the next `record` must not be gated by, or checked against,
-        # this review. The file stays as evidence and now also holds the skip
-        # reasons, which nothing else persists.
+        # this review.
         try:
             close_bundle(
                 bundle_path, bundle, by="record", findings=written,
-                duplicates=duplicates, skipped=skipped,
+                duplicates=duplicates, skipped=skipped, record=evidence_path.name,
             )
         except OSError as exc:
             stderr("note: could not mark " + str(bundle_path) + " as recorded: " + str(exc))
