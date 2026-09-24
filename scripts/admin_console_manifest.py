@@ -5976,10 +5976,16 @@ def cmd_promote(args):
     # another salt and cannot be matched: see PRIVACY.md.)
     salt = store_salt(store, create=False)
     own_fingerprints = {}
-    if salt:
-        for item in local_records:
-            if record_project_key(item):
-                own_fingerprints[project_fingerprint(record_project_key(item), salt)] = record_project_key(item)
+    for item in local_records:
+        key = record_project_key(item)
+        if not key:
+            continue
+        if salt:
+            own_fingerprints[project_fingerprint(key, salt)] = key
+        # Bundles exported before stores had a salt hashed the bare name.
+        for name in (key, text_of(item.get("project"))):
+            if name:
+                own_fingerprints.setdefault(project_fingerprint(name), key)
 
     def counted_key(item):
         key = record_project_key(item)

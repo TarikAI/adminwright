@@ -482,6 +482,18 @@ class TestExportAndCommunity(LearningCase):
         payload = self.promote_with_community(skill_root)
         self.assertEqual(payload["candidates"], [], "one project, however often its bundle returns")
 
+    def test_an_unsalted_bundle_from_before_the_salt_does_not_corroborate_its_source(self):
+        # Stores exported bare sha256(name) fingerprints before they had a salt.
+        shared = ("gap", "Bulk action authorized once for the whole batch",
+                  "Require per-target authorization in bulk commands")
+        manifest = self.project("Solo", [shared])
+        self.harvest(manifest)
+        skill_root = self.community_bundle("old.json", [{
+            "category": "gap", "scope": "references/security-governance.md",
+            "observation": shared[1], "proposedChange": shared[2],
+            "projects": [acm.project_fingerprint("Solo")]}])
+        self.assertEqual(self.promote_with_community(skill_root)["candidates"], [])
+
     def test_contributed_text_is_printed_on_one_line(self):
         # The weekly review workflow captures this output in a heredoc; a
         # contributed newline must not end it or forge a heading.
