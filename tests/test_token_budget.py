@@ -27,6 +27,11 @@ CEILINGS = {
     "repair": 16000,
 }
 AGENT_CEILING = 3500
+# After auto-compaction Claude Code re-attaches only the first 5,000 tokens of each invoked
+# skill. At about 6,300 the cut fell inside Phase 8, so long builds -- the runs this skill is
+# for -- silently lost the agent roster and the completion report. chars/4 runs about 4%
+# under real tokens, so 4,700 keeps the whole file inside the re-attached part.
+SKILL_CEILING = 4700
 
 
 def estimate(paths):
@@ -57,6 +62,14 @@ class TestTokenBudget(unittest.TestCase):
                 "%s now costs about %d tokens (ceiling %d). Trim, move a fact to the one file "
                 "that owns it, or raise the ceiling in this test deliberately." % (name, used, ceiling),
             )
+
+    def test_skill_md_survives_compaction_whole(self):
+        used = estimate(["SKILL.md"])
+        self.assertLessEqual(
+            used, SKILL_CEILING,
+            "SKILL.md costs about %d tokens; past %d its tail is dropped after compaction. Move "
+            "detail to the reference that owns it." % (used, SKILL_CEILING),
+        )
 
     def test_each_agent_prompt_stays_small(self):
         for path in sorted(glob.glob(str(SKILL_ROOT / "agents" / "adminwright-*.md"))):

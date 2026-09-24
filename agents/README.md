@@ -11,39 +11,50 @@ plugin; every other harness gets them via the installer below.
 
 | Agent | Role | Dispatch when |
 |---|---|---|
-| `adminwright-architect` | `architect` | First, always. Discovery, manifest modeling, capability derivation, IA, build order. Never writes feature code. |
-| `adminwright-implementer` | `implementer` | Per claimed slice: the spine (one instance, serialized), then one instance per entity/domain in parallel. Never reviews its own work. |
-| `adminwright-ux-reviewer` | `ux-reviewer` | A screen is `implemented` and the app runs. States, IA, accessibility, responsiveness, copy. Never changes server logic. |
-| `adminwright-qa` | `qa` | A domain is `implemented` and the build passes; also owns the release gate. Adversarial audit, permission matrix, coverage, browser evidence. Never fixes its own findings. |
-| `adminwright-security` | `security` | The auth/authz/tenancy/audit spine is `implemented` and the authz matrix emits. Threat model, matrix, audit completeness, data exposure. Never approves its own exceptions. |
-| `adminwright-harvester` | learning pass | Last, always — after build, extend, audit, or repair. Collects what the run taught from `feedback[]`, worklogs, and a conversation digest; runs `harvest` and `promote`; records lessons; edits references when the promotion bar clears. |
+| `adminwright-architect` | `architect` | First, alone. Discovery, manifest modeling, capability derivation, IA, build order with file ownership. Never writes feature code. |
+| `adminwright-implementer` | `implementer` | Per claimed slice: the spine (one instance, serialized), then one instance per entity or domain in parallel. Never reviews its own work. |
+| `adminwright-ux-reviewer` | `ux-reviewer` | A domain's screens are `implemented`, the app runs, and each role has an operator account. Files findings; never changes product code. |
+| `adminwright-security` | `security` | The auth, authorization, tenancy and audit spine is `implemented`. Threat model, matrix, audit, data exposure. Proposes risk acceptances; a human decides. |
+| `adminwright-qa` | `qa` | A domain is `implemented` and builds, and last before release. Adversarial audit, negative tests red then green, the only writer of `reviewStatus`, and the release gate. |
+| `adminwright-harvester` | learning pass | Last, always, with a digest of the conversation. Banks what the run taught, runs `harvest` and `promote`, records lessons. |
 
 Shape of a healthy run, orchestrated from the main session:
 
-1. Dispatch `adminwright-architect`; wait for plan validation to exit 0.
-2. Dispatch one `adminwright-implementer` for the walking skeleton — serialized, nothing in
-   parallel with the spine.
-3. Fan out `adminwright-implementer` instances per entity or domain slice, each under its
-   own claim, no shared migrations in flight.
-4. Converge: `adminwright-ux-reviewer` and `adminwright-security` in parallel over each
-   finished domain; `adminwright-qa` rolling behind them.
-5. Route filed gaps back to implementers under new claims; repeat until qa's release gate
-   (`validate` and `coverage` both exit 0) passes. The loop has a stop rule: a reviewer that
-   sets `reviewStatus: contested` must file a `gaps[]` entry naming the capability (the
-   validator refuses `contested` without one), the implementer fixes it and returns it to
-   `unreviewed`, and a different reviewer than the contester reviews next. A capability
-   contested twice goes to the user, not to a third round: file a `blocked` gap stating both
-   positions. A gap becomes `accepted` only by the user, or by a named approver recorded as a
-   confirmed `decisions[]` entry; agents propose, they never accept. The two-round rule and the
-   approver rule are stated once, in [../references/multi-agent.md](../references/multi-agent.md).
-6. Dispatch `adminwright-harvester` last, passing it a short digest of this session's
-   conversation — corrections the user made, guidance that proved wrong, phases that were
-   skipped — so what the run taught outlives the chat.
+1. Dispatch `adminwright-architect` alone.
+2. Dispatch one `adminwright-implementer` for the walking skeleton, serialized: nothing runs
+   in parallel with the spine.
+3. Fan out one `adminwright-implementer` per entity or domain slice, each under its own claim
+   and owning the paths the build-order decision gives it, with no shared migration in flight.
+4. Converge on each finished domain: `adminwright-ux-reviewer` and `adminwright-security` in
+   parallel (their review claims do not conflict), then `adminwright-qa`, which sets
+   `reviewStatus`.
+5. Route filed gaps back to implementers under new claims until qa's release gate passes. The
+   contest loop, its two-round cap, and the conditions that stop a run are in
+   [../references/multi-agent.md](../references/multi-agent.md#the-contest-loop-and-conflict-resolution).
+   The validator enforces the review states: `contested` needs a gap, `reviewed` is refused
+   while a blocking gap is open, and `contested` never goes straight to `reviewed`.
+6. Dispatch `adminwright-harvester` last, with a short digest of this session's conversation:
+   corrections the user made, guidance that proved wrong, phases that were skipped. A
+   dispatched agent cannot see the chat. In Claude Code you may instead run the pass as a fork
+   of your session.
 
-The agents coordinate through the manifest and lock files only. In a harness without
-subagent support, run the same passes in sequence with distinct agent ids — the
-single-agent degradation rules in
-[../references/multi-agent.md](../references/multi-agent.md) apply.
+Dispatch each pass with the inputs in
+[the dispatch template](../references/multi-agent.md#dispatch-and-verify). Each returns a first
+line `STATUS: DONE`, `DONE_WITH_CONCERNS`, `BLOCKED` or `NEEDS_CONTEXT`. Do not relay the
+report. Check each pass yourself before starting the next:
+
+- after the architect, `validate --phase plan`;
+- after an implementer, its worklog's `verified` commands;
+- around each review, `review-scope --start` and then the check;
+- after qa, the release gates.
+
+The orchestrating session never edits product code, because its fixes would skip review.
+Subagents cannot ask the user anything: a decision only a human can make comes back as an
+`assumed` decision and a `blocked` gap for you to put to the user.
+
+The agents coordinate through the manifest and lock files only. In a harness without subagent
+support, run the same passes in sequence with distinct agent ids; the single-agent
+degradation rules in [../references/multi-agent.md](../references/multi-agent.md) apply.
 
 ## Installing the agents into any harness
 
@@ -71,9 +82,9 @@ machine's skill path) and a `/.adminwright/skill-dir` line in `.gitignore`; see 
 
 Native files carry only the fields their harness documents; `.adminwright/agents/` is the
 harness-neutral copy of the source files. Everything else in the source frontmatter is
-Claude Code-only — `model` (the harvester's `opus`), `disallowedTools` (the reviewers' edit
-guard), and any Claude Code field added later, such as `color` — so only the `claude-code`
-copies act on it; the neutral copy carries it verbatim for reference. Every other harness
+Claude Code-only: `model` (the harvester's `opus`), `disallowedTools` (the reviewers' edit
+guard, and `Agent` for every agent but the architect) and `color`. Only the `claude-code`
+copies act on them; the neutral copy carries them verbatim for reference. Every other harness
 loses the reviewers' edit restriction: see
 [the reviewer edit guard](#the-reviewer-edit-guard-per-harness) below.
 
@@ -132,10 +143,14 @@ that every harness shares.
 
 ### The reviewer edit guard, per harness
 
-The qa, security and ux-reviewer sources carry `disallowedTools: Edit, NotebookEdit`: a
-reviewer must not edit the code it reviews, yet it still writes its worklog and the
-manifest, and qa writes tests, so file writes and the shell stay available. Only Claude Code
-enforces this; in every other harness the restriction is lost. None of them can say "no
+The qa, security and ux-reviewer sources carry `disallowedTools: Edit, NotebookEdit, Agent`.
+A reviewer must not edit the code it reviews, yet it still writes its worklog, evidence and
+the manifest, and qa writes new tests, so file writes and the shell stay available. `Agent` is
+removed from every agent but the architect: a subagent can dispatch subagents, and a
+"reviewer" an implementer spawned under a new id would defeat the independence rule
+invisibly. Only Claude Code enforces this; in every other harness the restriction is lost.
+The check that works everywhere is `review-scope`, which reads the working tree after a
+review pass and lists every file the reviewer changed that a reviewer may not. None of them can say "no
 edit tool, writes allowed" in a project file, and their coarser switches — opencode's
 `permission.edit`, Codex's `sandbox_mode`, Cursor's `readonly` — would block the worklog
 and manifest writes too, so the installer maps the guard to none of them:

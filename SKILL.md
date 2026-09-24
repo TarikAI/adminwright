@@ -1,15 +1,19 @@
 ---
 name: adminwright
-description: Design, build, extend, or audit a complete admin console, admin dashboard, admin panel, back office, internal tool, control panel, ops console, superadmin area, or CRUD dashboard for any platform, in any stack. Use when an agent must infer the platform's administrative capabilities from its domain, repository, data model, APIs, roles, lifecycles, integrations, and risks; implement real end-to-end control surfaces backed by live data and authorized server operations rather than decorative dashboards or mock screens; coordinate several agents building one console; or verify that an existing admin system is connected, secure, auditable, accessible, resilient, and operationally complete. Ships six dispatchable role agents — architect, implementer, ux-reviewer, qa, security, and a harvester that learns from every run — installable into any harness (Claude Code, Codex, opencode, Antigravity, Gemini CLI, Cursor, Pi) via scripts/install_agents.py.
+description: Designs, builds, extends, or audits a real admin console (admin panel, admin dashboard, back office, internal tool, ops or superadmin area, CRUD dashboard) for any platform and stack, backed by live data, server-side authorization, audit trails and tests instead of mock screens. Use when an admin surface must be inferred from a platform's domain, data model, APIs, roles, lifecycles and risks; when several agents build one console; or to verify that an existing admin system is connected, secure, auditable, accessible and operationally complete. Not for customer-facing product features or analytics-only charts.
+license: Apache-2.0
+compatibility: Python 3.9+ (standard library only) for scripts/. Any agent harness that can run shell commands.
 ---
 
 # Adminwright
 
-Build the platform's operational control plane, not a decorative analytics page.
+Build the platform's operational control plane, not a decorative analytics page. An admin
+capability is complete only when the authorized operator can observe the relevant state,
+understand it, act on it through a real backend operation, receive truthful feedback, recover
+safely, and produce evidence of who changed what.
 
-An admin capability is complete only when the authorized operator can observe the relevant
-state, understand it, act on it through a real backend operation, receive truthful feedback,
-recover safely, and produce evidence of who changed what.
+If you were dispatched as an adminwright role agent, your agent file is your contract: use
+this file only for its reference table and the phase you were given.
 
 ## Non-negotiable contract
 
@@ -19,63 +23,84 @@ recover safely, and produce evidence of who changed what.
   operation, a server-side policy, an authoritative data source, an audit event where
   required, a test, and evidence. An orphan on either side is a defect.
 - No mock, placeholder, stub, random, or hard-coded value in the release path. A value that
-  is genuinely static by design must be registered in `declaredStatic[]` with a reason and an
-  approver. That registry is the only sanctioned exception.
+  is genuinely static by design is registered in `declaredStatic[]` with a reason and an
+  approver; that registry is the only sanctioned exception.
 - Identify the actual stack and read its authoritative documentation before implementing
-  against it. Record what you consulted in `platform.researchSources[]`. Guessing a
+  against it; record what you consulted in `platform.researchSources[]`. Guessing a
   framework's auth, policy, or job idioms is a defect.
-- Never ship a control that is not connected to an authorized server-side operation.
-- Never rely on hidden navigation or client-side checks as authorization.
+- Never ship a control that is not connected to an authorized server-side operation, and
+  never rely on hidden navigation or client-side checks as authorization.
 - Implement vertical slices across data, service/API, authorization, UI, audit,
   observability, and tests.
 - Prefer safe recovery over irreversible deletion. Add previews, confirmations, reason
   capture, step-up authentication, approvals, or undo according to risk.
 - The agent that implements a capability never marks it reviewed. Review is a separate pass
   by a different agent, or an explicitly declared pass that re-reads the code.
-- Do not declare completion from screenshots. Use the manifest, automated checks, and browser
-  evidence.
+- Do not declare completion from screenshots. Use the manifest, automated checks, and
+  browser evidence.
 - Preserve the project's architecture and design system unless there is evidence that
   changing them is required.
 
-Commands below use two placeholders. `<skill-dir>` is the directory containing this
-`SKILL.md`: Claude Code injects it as the plugin root, and other harnesses install it where
-[agents/README.md](agents/README.md) says. `<project-root>` is the repository the console
-administers; with several consoles in one repository, see "Monorepos and several
-consoles" under Phase 2.
+## Conventions
+
+`<skill-dir>` means `${CLAUDE_SKILL_DIR}`, the directory that holds this file;
+`<project-root>` is the repository the console administers. The manifest is
+`<project-root>/.admin-console/manifest.json`, changed only through
+`python <skill-dir>/scripts/admin_console_manifest.py` (`py -3` or `python3` where `python`
+is not on PATH). Take arguments from `<command> --help`, never from the script's source.
+Exit 0 is clean, 1 means findings at error severity, 2 a usage failure or a write
+the guard refused (nothing was written), 3 a claim conflict.
+[manifest-cli.md](references/manifest-cli.md) has every command form, shell quoting, what
+to commit, and monorepo layouts.
+
+## Completion report
+
+Every mode ends with Phase 8 and then this report. Lead with operational outcomes, then:
+
+- Profile selected and why
+- Domains and workflows now controllable
+- Roles and scopes supported
+- Real systems and integrations connected
+- High-risk safeguards and audit coverage
+- Automated and browser verification performed
+- Manifest validation and coverage results
+- Lessons recorded
+- Remaining blocked, deferred, or not-applicable items with rationale
+
+Never use "enterprise-grade", "complete", or "production-ready" without evidence from the
+release gates.
+
+## Workflow
+
+Copy this checklist into your worklog and tick it as each exit condition holds:
+
+```text
+- [ ] Mode and profile stated; profile confirmed as a decision
+- [ ] 1 Discover: stack docs read, listed in platform.researchSources[]
+- [ ] 2-3 Model: roles and capabilities before screens; validate --phase plan exits 0
+- [ ] 4 Design: navigation by operator job; every metric names its decision
+- [ ] 5 Build: walking skeleton, then each capability through all ten steps
+- [ ] 6 Harden: safeguards, audit and states by risk
+- [ ] 7 Verify: validate --phase release and coverage exit 0; gap report; adversarial pass
+- [ ] 8 Learn: harvest and promote run; completion report written
+```
 
 ## Select the operating mode
 
-- **Build:** create a new admin console or a major module end to end.
-- **Extend:** add capabilities while preserving established policies and component
-  vocabulary. This is not a full build: skip Phases 1 and 4, load only the narrow-extension
-  set in the table below, `add` the new capabilities to the existing manifest, implement
-  them (Phase 5), and finish with Phase 7's `validate` and `coverage`.
-- **Audit:** compare an existing console with the domain and implementation, then report
-  gaps. Do not modify the product's code — but the audit itself must leave durable
-  artifacts, not only a chat report. Initialize the manifest if absent, model what you
-  found at status `discovered`, record every gap in `gaps[]` and every observation about
-  this skill in `feedback[]`, and write the report to a file:
-  `python <skill-dir>/scripts/admin_console_manifest.py emit --manifest
-  <project-root>/.admin-console/manifest.json --format gap-report --out
-  docs/admin-gap-report.md` (that path, everywhere). A chat report evaporates with
-  the session; the manifest is what lets the next agent repair instead of re-audit. Build
-  the manifest through `add` and `set`, not by hand-writing JSON — the write guard catches
-  malformed entries at the moment they are cheapest to fix. End the report by naming the
-  next step: repair mode against this manifest, which turns the audit into a build plan.
+- **Build:** a new admin console or a major module, end to end.
+- **Extend:** new capabilities in an existing console, preserving its policies and component
+  vocabulary. Skip Phases 1 and 4, load the narrow-extension set, `add` and build the new
+  capabilities, and finish with Phase 7's gates.
+- **Audit:** compare an existing console with the domain and implementation, changing no
+  product code but leaving durable artifacts: the manifest (initialized if absent) models what
+  you found at status `discovered`, with every gap in `gaps[]` and every observation about
+  this skill in `feedback[]`; the report comes from `emit --format gap-report --out
+  <project-root>/docs/admin-gap-report.md` and ends by naming repair mode as the next step.
 - **Repair:** implement verified audit findings and update evidence.
 
-State the mode in your worklog. If the request includes implementation, continue through
-verification without stopping after planning.
-
-The skill covers operator surfaces reached through the admin UI, an admin API, a CLI, a
-scheduled job, or a chat/ops bot. Each capability declares `surface` (default `["ui"]`): a
-`ui` capability needs `uiRoutes` and a screen that lists it; every other surface needs
-`entrypoints` and `policyTests` instead, because no screen carries them. It does not build
-customer-facing product features.
-
-Every mode ends the same way: `harvest` the manifest's `feedback[]` into the store. The
-first field tests of this skill ran two audits and a build across seven projects and
-harvested nothing — the learning loop cannot start from observations nobody recorded.
+If the request includes implementation, continue through
+verification without stopping after planning. Operator surfaces may be the admin UI, an admin
+API, a CLI, a scheduled job, or a chat/ops bot (a capability's `surface`).
 
 ## Select the profile
 
@@ -88,11 +113,11 @@ gate, never the truth requirement.
 | `standard` | Any console real users depend on | Evidence must resolve; all gates must pass |
 | `regulated` | Money, health, minors, or audited data | Adds test-token matching, separation of duties, privileged-read audit, and forbids unresolved assumptions |
 
-Choosing a profile is a recorded decision in `decisions[]`, not a default.
+`init` records the profile as an assumed decision, `dec.profile`; confirm it with the owner.
 
 ## Load references by phase
 
-Do not read every reference up front. Load what the current phase needs.
+Load only what the current phase needs, and only the named section when a link names one.
 
 | Entry point | Minimum set |
 |---|---|
@@ -104,92 +129,44 @@ Do not read every reference up front. Load what the current phase needs.
 
 ## Phase 1: Discover the platform
 
-Load [discovery.md](references/discovery.md) for the evidence hierarchy, repository
-archaeology, and the six discovery maps.
+Load [discovery.md](references/discovery.md). Inspect before inventing: reconcile docs,
+schemas and migrations, state machines, APIs, queues and jobs, integrations, auth policies,
+tenant scoping, customer routes that create admin obligations, existing admin surfaces, and
+the support scripts and manual SQL that reveal missing controls.
 
-Inspect before inventing. Reconcile documentation, schemas and migrations, state machines,
-public and internal APIs, queues and scheduled jobs, integrations, authentication and
-authorization policies, tenant scoping, customer-facing routes that create administrative
-obligations, existing admin surfaces, and the support scripts and manual SQL that reveal
-missing control surfaces.
-
-Identify the stack and read its documentation. Load
-[stack-adapters.md](references/stack-adapters.md) for the seven seams to resolve, and
-[resource-index.md](references/resource-index.md) for the authoritative sources.
-
-Treat current behavior as evidence, not automatically as the desired design. Classify the
-platform using one or more archetypes from
-[capability-catalog.md](references/capability-catalog.md).
-
-Before designing screens, run the buy-versus-build check in
-[buy-vs-build.md](references/buy-vs-build.md). Adopting a framework changes who writes the
-code, never the contract.
+Identify the stack and read its documentation ([stack-adapters.md](references/stack-adapters.md),
+[resource-index.md](references/resource-index.md)). Current behavior is evidence, not
+automatically the desired design. Classify the platform with archetypes from
+[capability-catalog.md](references/capability-catalog.md), and run
+[buy-vs-build.md](references/buy-vs-build.md) before designing screens: a framework changes
+who writes the code, never the contract.
 
 ## Phase 2: Model the control plane
 
-If `.admin-console/manifest.json` already exists, do not `init`: read it, read every worklog
-whose `agents[].status` is `handed-off`, run `validate --phase plan`, and resume at the
-first phase whose exit condition fails. Otherwise create it:
+If the manifest already exists, do not `init`: read it, read every worklog whose
+`agents[].status` is `handed-off`, run `validate --phase plan`, and resume at the first phase
+whose exit condition fails. Otherwise create it:
 
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py init --project-root <project-root> --name "<platform name>" --archetype <archetype> --profile <profile>
 ```
 
-Use `py -3` or `python3` if `python` is not on PATH. If Python is unavailable, copy
-`assets/admin-console.manifest.template.json` and fill it manually against
-`assets/admin-console.manifest.schema.json`, which types every field. Without Python there
-are no release gates at all -- no `validate`, no `coverage`, no write guard -- so say so in
-the completion report instead of calling the console verified.
-
 Before your first `add`, read `<skill-dir>/evals/fixtures/saas-clean/.admin-console/manifest.json`,
-a complete manifest that passes at `regulated`, and imitate its field shapes. A capability
-attaches to its entity with `--entity`, and `set` changes one field by path:
+a complete manifest that passes at `regulated`, and imitate its field shapes. The fields each
+capability needs, and when, are in
+[verification.md](references/verification.md#capability-fields-the-validator-requires).
 
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-root>/.admin-console/manifest.json --kind capability --entity user --json '{"id":"user.list","outcome":"Find an account","kind":"query","roles":["ops"]}'
 python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'entities[user].capabilities[user.list].status' --value planned
 ```
 
-Model incrementally with `add` and `set`; `remove --kind <kind> --id <id>` deletes a wrong entry
-(refused while anything still points at it) and `rename --kind <kind> --id <old> --to <new>`
-changes an id and every reference to it, so the manifest is never hand-edited. `set` also
-takes a whole object as JSON (`--path crossCutting.audit --value '{...}'`) instead of one call
-per flag. Pass structured values as one quoted argument
-(`--json '{"id":"ops", ...}'`), or, in PowerShell 5.1 — which strips the quotes inside
-single-quoted JSON — write the object to a file and use `--json-file role.json`. Before release, an unfinished model reports gaps as
-warnings rather than blocking — a role is unused until its first capability exists. Malformed
-edits still block: bad ids, unknown references, and placeholder values are refused at write
-time. `--allow-invalid` overrides that and prints exactly what it wrote through; anything it
-waves past still fails the release gate.
-
-The fields the validator requires on each capability, and when, are in the table in
-[verification.md](references/verification.md#capability-fields-the-validator-requires) —
-read it before the first `add --kind capability`.
-
-Populate from evidence, not guesses: archetypes, tenancy, regulated data, stack, research
-sources, volumes, roles and scopes, entities with lifecycle states and transitions, commands
-and queries with risk and recovery, work queues, screens, integrations, cross-cutting
-controls, quality gates, and decisions.
-
-Use `status: not-applicable` only with a recorded rationale, and `blocked` only with the
-exact external dependency. Neither may hide unfinished work. Leave implementation fields
-empty rather than filling them with placeholder text — the scanner treats placeholders as
-defects, and an empty field is an honest one.
-
-What to commit: the manifest, its schema copy, `worklog/`, and the reports you `emit`.
-Not `locks/`, `.lock`, `*.tmp` or the OCR bundle files; `init` writes
-`.admin-console/.gitignore` with them.
-
-Monorepos and several consoles: one manifest per console. Root evidence at the repository
-(paths are repo-relative), and place each console's manifest with `init --manifest <path>`,
-which records `projectRoot` so `emit`, `harvest` and `code_review.py` stop guessing it.
-Keep the `platform.id` that `init` writes: `harvest` counts each console once by it.
-
-Check the model as you go:
-
-```text
-python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --phase plan
-```
+Change the manifest only with `add`, `set`, `remove` and `rename`, never by hand: their
+write guard refuses malformed edits while they are cheap to fix, and an unfinished model only
+warns until release. Populate from evidence, not guesses. Leave an implementation field empty
+rather than filling it with placeholder text: the scanner treats placeholders as defects, and
+an empty field is honest. `not-applicable` needs a recorded rationale and `blocked` the exact
+external dependency; neither may hide unfinished work.
 
 ## Phase 3: Derive capabilities
 
@@ -200,18 +177,14 @@ is the safe recovery path, and what evidence must remain.
 
 Do not create CRUD mechanically. Some entities are read-only; others need transitions,
 assignment, approvals, reconciliation, replay, suspension, redaction, or restoration rather
-than arbitrary editing.
+than arbitrary editing. Use the catalog to check domain-obvious modules and apply its
+completeness test; document why each expected module is included, deferred, or not
+applicable.
 
-Use the catalog to check domain-obvious modules and apply its completeness test. Document why
-each expected module is included, deferred, or not applicable.
-
-Finish roles and capabilities before adding a single screen. Two field builds modelled
-entities and screens and stopped there, leaving zero roles and zero capabilities: nothing
-traced to a server operation, every screen was decorative by construction, and repair mode
-had no targets to work on. A screen is a view onto capabilities that already exist, so
-`validate --phase plan` is the checkpoint — run it before Phase 4 and treat an entity whose
-lifecycle no command reaches, or a screen with no capability, as an unfinished model rather
-than a design choice.
+Finish roles and capabilities before adding a single screen: a screen is a view onto
+capabilities that already exist. Run `validate --phase plan` before Phase 4; an entity whose
+lifecycle no command reaches, or a screen with no capability, is an unfinished model, not a
+design choice.
 
 ## Phase 4: Design the information architecture
 
@@ -230,10 +203,9 @@ destination. Remove metrics that support no action.
 Load [build-order.md](references/build-order.md) and
 [admin-data-model.md](references/admin-data-model.md).
 
-Order matters. Build the walking skeleton first — authentication, the role and scope spine,
-the audit spine, one read-only list backed by real data, one low-risk command end to end —
-before fanning out. Retrofitting server-side authorization, tenant scoping, and audit onto
-twenty finished screens is a rewrite, not a patch.
+Build the walking skeleton first (authentication, the role and scope spine, the audit spine,
+one read-only list on real data, one low-risk command end to end): retrofitting
+authorization, tenancy and audit onto finished screens is a rewrite, not a patch.
 
 For each capability afterward:
 
@@ -245,9 +217,10 @@ For each capability afterward:
 6. Add structured logs, metrics, traces, alerts, or reconciliation evidence where
    operationally important.
 7. Build the interface using the project's design system.
-8. Cover loading, empty, populated, filtered-empty, validation, conflict, error, forbidden,
-   partial/stale, and success states as applicable. Release requires `loading`, `populated`,
-   `error` and `forbidden` on every screen, and `success` on any screen with actions.
+8. Cover every applicable state (loading, empty, populated, filtered-empty, validation,
+   conflict, error, forbidden, partial/stale, success). Release requires `loading`,
+   `populated`, `error` and `forbidden` on every screen, and `success` wherever there are
+   actions.
 9. Add unit, integration, authorization, contract, and browser tests proportional to risk.
 10. Update the manifest with real implementation and evidence paths.
 
@@ -264,49 +237,38 @@ bulk operations; safe impersonation, export controls, PII redaction, retention, 
 boundaries; approval or dual control for high-impact actions; optimistic concurrency;
 idempotency for financial, messaging, provisioning, and integration commands; accessible
 keyboard operation and focus management; locale, timezone, and currency handling; defined
-performance budgets and pagination strategy; and production-grade loading, empty, error,
-permission, maintenance, degraded, and offline states.
+performance budgets and pagination strategy; and maintenance, degraded and offline states.
 
 ## Phase 7: Verify and close gaps
 
 Load [verification.md](references/verification.md) and
 [test-data.md](references/test-data.md).
 
-Seed production-shaped fixtures first — every lifecycle state, long and localized text,
-missing optionals, conflicts, partial job failures, and cross-tenant neighbours. A console
-only ever seen with twelve tidy rows fails on contact with production.
+Seed production-shaped fixtures first: every lifecycle state, long and localized text,
+missing optionals, conflicts, partial job failures, cross-tenant neighbours.
 
 Run the project's build, type check, lint, tests, security checks, and browser tests. Then:
 
 ```text
-python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --project-root <project-root> --phase release
+python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --phase release
 python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <project-root>/.admin-console/manifest.json
 python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report --out <project-root>/docs/admin-gap-report.md
 ```
 
-Exit 0 is clean, 1 means findings at error severity, 2 a usage or IO failure, 3 a claim
-conflict. Both `validate` and `coverage` must exit 0 before any release declaration. A refused
-`add` or `set` also exits 2 — the manifest was left unmodified, so the request could not be
-carried out; exit 1 always means "read it, and it has findings".
+Both `validate` and `coverage` must exit 0 before any release declaration. `emit` also writes
+`authz-matrix`, `test-plan`, `seed-plan`, `nav-map` and `operator-handbook`.
 
-If the `ocr` CLI is on PATH, an optional external review pass through
-`scripts/code_review.py` (see [Optional integrations](#optional-integrations)) runs
-alongside these gates.
+A reviewer that did not implement the capability signs it: `set reviewedBy <its id>`, then
+`reviewStatus reviewed`, which is refused while an open critical or high gap targets it. A
+`contested` capability returns to `unreviewed` through its implementer's fix, never straight
+to `reviewed`.
 
-`emit` also produces the working documents the verification pass needs: `authz-matrix`,
-`test-plan`, `seed-plan`, `nav-map`, and `operator-handbook`.
-
-The reviewing agent records who it is before it signs off: `set reviewedBy <its agent id>`,
-then `set reviewStatus reviewed`. At `regulated` a review with no `reviewedBy`, or one that
-names the implementer, fails the gate; at `standard` it warns.
-
-Then run the adversarial pass, by an agent that did not implement the work: compare
-customer-facing capabilities against administrative obligations; compare schemas, services,
-events, jobs, integrations, and flags against the manifest; find actions still performed
-through scripts, database edits, or undocumented procedures; find controls without
-operations and operations without control surfaces; find privileged operations without policy
-tests or audit evidence; and attempt guessed identifiers, direct API calls, cross-tenant
-reads, replayed commands, and out-of-scope bulk targets.
+Then an agent that did not implement the work runs the
+[adversarial pass](references/verification.md#adversarial-qa-pass): obligations the manifest
+missed; actions still done by script, SQL or undocumented procedure; controls without
+operations and operations without controls; privileged operations without policy tests or
+audit; and guessed identifiers, direct API calls, cross-tenant reads, replayed commands and
+out-of-scope bulk targets.
 
 A green validate is a floor, not a proof. It cannot tell whether a test asserts the right
 thing or a policy is correct. Those remain yours.
@@ -315,108 +277,47 @@ thing or a policy is correct. Those remain yours.
 
 Load [skill-evolution.md](references/skill-evolution.md).
 
-Capture observations during the build in `feedback[]`, each with a `scope` (the one
-`references/<file>.md`, `SKILL.md`, `scripts`, or `agents` it would change; `add` refuses an
-entry without one). At the end, move them into the
-cross-project store and see what has earned promotion:
+Record observations as you work in `feedback[]`, each with a `scope`: the one file or area of
+the skill it would change, as a path from the skill root (`SKILL.md`, `references/<file>.md`,
+`scripts`, `agents`). At the end,
+harvest them into the cross-project store and see what has earned promotion:
 
 ```text
 python <skill-dir>/scripts/admin_console_manifest.py harvest --manifest <project-root>/.admin-console/manifest.json --date <YYYY-MM-DD>
 python <skill-dir>/scripts/admin_console_manifest.py promote
 ```
 
-The store lives outside every project — `$ADMINWRIGHT_HOME`, or `~/.adminwright` by default —
-so observations accumulate across every platform you build. `promote` groups ones that say the
-same thing in different words and reports only those that clear the bar: seen on two or more
-distinct projects, or a correction of guidance that was factually wrong. Single-project quirks
-and style preferences belong in the project's agent contract file, not in this skill.
-
-Record an accepted candidate, then edit the reference it names:
-
-```text
-python <skill-dir>/scripts/admin_console_manifest.py lesson add --title "<rule>" --category <gap|friction|incorrect-guidance|new-pattern|tooling> --scope references/<file>.md --trigger "<what happened>" --rule "<the durable rule>" --date <YYYY-MM-DD>
-```
-
-Edit the reference only in a git checkout of the skill repository. A marketplace install is a
-cache that Claude Code replaces on update, so an edit made there vanishes: outside a
-checkout, `lesson add` writes to `$ADMINWRIGHT_HOME/outbox/lessons/` and prints how to send
-the lesson upstream, and you report the intended edit instead of making it.
-
-Adoption is a judgement call about guidance others will follow literally. Run it with a
-capable model and a fresh read of the reference, not as an afterthought at the end of a long
-session. In a harness with subagent support, dispatch `adminwright-harvester` for this phase
-and pass it a short digest of the session's conversation — corrections the user made,
-guidance that proved wrong, phases that were skipped — so learning that lives only in chat
-history is banked before it evaporates.
+With subagents, dispatch the harvester and give it a digest of the conversation (the user's
+corrections, guidance that proved wrong, skipped phases): a dispatched agent cannot see the
+chat.
 
 ## Working with other agents
 
 Load [multi-agent.md](references/multi-agent.md) when more than one agent will touch this
-console, and when a single agent runs the roles in sequence.
+console, and when one agent runs the roles in sequence.
 
-Six agents ship with the skill — one per role plus a learning pass:
-`adminwright-architect`, `adminwright-implementer`, `adminwright-ux-reviewer`,
-`adminwright-qa`, `adminwright-security`, `adminwright-harvester`
-([agents/README.md](agents/README.md) has the dispatch order; the harvester is a pass, not
-a claimable role, and never registers in `agents[]`). Each carries its role
-contract and needs no conversation history. In a harness with subagent support, dispatch
-them; in any other harness, install them with
-`python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <root>` and
-run the passes sequentially with distinct agent ids.
+Six agents ship with the skill: five claimable roles in pass order (architect, implementer,
+ux-reviewer, security, qa) and the harvester, a learning pass that never registers in
+`agents[]`. In Claude Code they are `adminwright:adminwright-<role>`; elsewhere,
+`install_agents.py --harness <name>` installs them ([agents/README.md](agents/README.md)).
 
-Coordination happens through the manifest and lock files, never through conversation
-history. Claim before you build:
-
-```text
-python <skill-dir>/scripts/admin_console_manifest.py claim --manifest <project-root>/.admin-console/manifest.json --agent <id> --role <architect|implementer|ux-reviewer|qa|security> --capability <id>
-```
-
-Exit 3 means another agent holds the claim. Mutate the manifest only through `add` and `set`;
-rewriting the whole file discards concurrent work.
+Coordination goes through the manifest and its locks, never through conversation or a
+harness's messaging. Claim before you build (`claim --agent <id> --role <role> --capability
+<id>`; exit 3 means it is held). The orchestrating session verifies each pass itself
+(`validate --phase plan` after the architect, `review-scope` after each review, the release
+gates after qa) and never edits product code, because its fixes would skip review.
 
 ## Persist the rules in the project
 
 Write [assets/agent-contract.template.md](assets/agent-contract.template.md) into the project
-as its agent instruction file — `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, or the equivalent —
+as its agent instruction file (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, or the equivalent),
 filled in for this platform. A skill governs a session; the contract file governs the
-repository, and it is what keeps the next agent from undoing this one's work.
-
-For how this skill installs in each harness, and how to run it in one with no skill support at
-all, see [agents/README.md](agents/README.md).
+repository, so the next agent does not undo this one's work.
 
 ## Optional integrations
 
-Two tools sharpen the skill when present and change nothing when absent. Neither is a
-prerequisite; record their use or absence in `decisions[]`.
-
-- **DesignArchitect** (UI closure): at Phase 4, if detected — `DESIGN_ARCHITECT_HOME`, or a
-  sibling checkout containing `core/scripts/run_pipeline.py` — derive the UI affordance
-  graph from the manifest and require `.design-architect/holes.json` empty and
-  `handoff/coverage.md` at `holes_remaining: 0` before citing closure as evidence. The
-  contract is affordance coverage, never visual design.
-- **Open Code Review (OCR)** (line-anchored review): at Phase 7 and in audit, if `ocr` is on
-  PATH, `scripts/code_review.py diff --agent <id>` runs a delegate-mode review — no OCR-side
-  API key; the reviewing agent covers every file in the bundle and finishes with the `record
-  --bundle <path>` command `diff` prints, findings persist to `gaps[]` and surface in `emit
-  --format gap-report`. `scan` (full-file review) and `--engine ocr` need an endpoint
-  (`ocr config provider` first); delegate mode has no scan. Findings are judgments with
-  guaranteed file coverage — a floor, not a proof.
-- The harvester pass shares its lesson format with DesignArchitect's skill-harvester;
-  cross-referencing between the two stores stays manual for now.
-
-## Completion report
-
-Lead with operational outcomes, then report:
-
-- Profile selected and why
-- Domains and workflows now controllable
-- Roles and scopes supported
-- Real systems and integrations connected
-- High-risk safeguards and audit coverage
-- Automated and browser verification performed
-- Manifest validation and coverage results
-- Lessons recorded
-- Remaining blocked, deferred, or not-applicable items with rationale
-
-Never use "enterprise-grade", "complete", or "production-ready" without evidence from the
-release gates.
+Two tools sharpen the skill when present and change nothing when absent. Record their use in
+`decisions[]` and see [INTEGRATIONS.md](INTEGRATIONS.md). **DesignArchitect** (Phase 4) checks
+the UI affordance graph for holes, never visual design. **Open Code Review** (Phase 7 and
+audit), when `ocr` is on PATH, runs a line-anchored review through `scripts/code_review.py`
+whose findings become `gaps[]`: a floor, not a proof.

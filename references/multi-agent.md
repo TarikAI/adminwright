@@ -2,289 +2,270 @@
 
 ## Contents
 
+Part 1, the protocol. Every agent needs these sections; load them by name.
+
 1. Coordination model
 2. Roles
-3. The independence rule
+3. The review state machine
 4. Claiming work
-5. Manifest concurrency
-6. Handoff records
+5. Handoff and return
+
+Part 2, orchestration. The session that dispatches agents needs these.
+
+6. Dispatch and verify
 7. Fan-out patterns
-8. Conflict resolution
-9. Single-agent degradation
+8. The contest loop and conflict resolution
+9. When a run stops
+10. Rationalizations
+11. Single-agent degradation
+
+Commands are abbreviated to their subcommand; the full forms, shell quoting and lock details are in [manifest-cli.md](manifest-cli.md).
 
 ## Coordination model
 
-Coordinate through files. Never through chat memory, a shared context window, or an assumption about what another agent already did.
-
-Three artifacts carry all coordination state:
+Coordinate through files. Never through chat memory, a shared context window, a harness's messaging (`SendMessage`, team mailboxes), or an assumption about what another agent already did.
 
 | Artifact | Path | Written by |
 |---|---|---|
-| Manifest | `<project-root>/.admin-console/manifest.json` | the script's `add`, `set`, `remove`, `rename`, `claim`, `release-claim`, `harvest` and `migrate --write` subcommands only; every write stamps `validatedWith` (the rule-set hash and skill commit that last touched it) |
-| Locks | `.admin-console/.lock` (the write lock) and `.admin-console/locks/<capability>.lock` (one per claimed capability) | the script only, never by hand; see [Manifest concurrency](#manifest-concurrency) |
-| Worklogs | `<project-root>/.admin-console/worklog/<agentId>.md` | the owning agent, using the file tools in your harness |
+| Manifest | `<project-root>/.admin-console/manifest.json` | the script only (`add`, `set`, `remove`, `rename`, `claim`, `release-claim`, `harvest`, `migrate --write`); every write stamps `validatedWith` |
+| Locks | `.admin-console/.lock` and `.admin-console/locks/` | the script only, never by hand |
+| Worklogs | `.admin-console/worklog/<agentId>.md` | the owning agent, with the harness's file tools |
 
-Invocation form used throughout. Use `py -3` or `python3` if `python` is not on PATH:
+Before touching code, every agent:
 
-```text
-python <skill-dir>/scripts/admin_console_manifest.py <command> ...
-```
+1. reads the manifest, which is the current truth, not your recollection of it;
+2. reads the worklog of every agent whose `agents[].status` is `handed-off` (a reviewer forms its own findings first, then reads the implementers' worklogs and checks their `verified` claims);
+3. claims what it will work on, then works only inside that claim.
 
-Every agent does the same three things before touching code:
-
-1. Read the manifest. It is the current truth, not your recollection of it.
-2. Read the worklog of every agent whose `agents[].status` is `handed-off`.
-3. Claim what you intend to work on, then work only inside that claim.
-
-Register yourself first:
-
-```text
-python <skill-dir>/scripts/admin_console_manifest.py add \
-  --manifest <project-root>/.admin-console/manifest.json \
-  --kind agent \
-  --json '{"id":"impl-billing","role":"implementer","ownsCapabilities":[],"ownsScreens":[],"status":"active","notes":".admin-console/worklog/impl-billing.md"}'
-```
-
-Quote the `--json` value so your shell passes it as a single argument.
-
-PowerShell 5.1 strips the double quotes inside single-quoted JSON before Python sees them, and splits a value containing spaces even when each quote is escaped. Put the JSON in a file and pass `--json-file`; the UTF-8 byte-order mark that `Set-Content -Encoding utf8` writes is accepted. (`--json '@role.json'` works too, but the `@` argument must be quoted: unquoted, PowerShell reads `@role` as splatting.)
-
-<!-- doc-test: skip -->
-```text
-Set-Content -Encoding utf8 role.json '{"id":"ops","name":"Ops team","responsibilities":["Admin"],"scopes":["all"]}'
-python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-root>/.admin-console/manifest.json --kind role --json-file role.json
-```
-
-A capability is attached to its entity with `--entity`; an entity added with `add --kind entity` may also carry its `capabilities` inline, and each gets the same defaults:
-
-```text
-python <skill-dir>/scripts/admin_console_manifest.py add \
-  --manifest <project-root>/.admin-console/manifest.json \
-  --kind capability --entity user \
-  --json '{"id":"user.reactivate","outcome":"Reactivate a suspended account","kind":"command","roles":["ops"],"risk":"moderate"}'
-```
+Never rewrite the manifest as a whole file. A whole-file write serializes the copy you read minutes ago, and every `add` and `set` another agent made since then disappears without an error. The same holds for one agent across passes: your in-context copy is stale the moment the script writes.
 
 ## Roles
 
-Five claimable roles, run in this order: `architect`, `implementer`, `ux-reviewer`, `security`, `qa`. Each is a distinct pass, whether five agents run them or one agent runs them in sequence. `qa` runs last because it owns the release gate.
+Five claimable roles, in pass order: `architect`, `implementer`, `ux-reviewer`, `security`, `qa`. Each is a distinct pass, whether five agents run them or one agent runs them in sequence. `qa` runs last because it owns the release gate.
 
-The `harvester` is a sixth pass, not a role. It never registers in `agents[]` and never claims a capability (`claim --role harvester` is refused, and `add --kind agent` rejects the role). It runs after `qa`, changes no capability record, and writes only `feedback[]` (through `harvest`), the cross-project store and, in a checkout of the skill repository, lessons. See [skill-evolution.md](skill-evolution.md).
+The `harvester` is a sixth pass, not a role. It never registers in `agents[]` and never claims a capability (`claim --role harvester` is refused, and `add --kind agent` rejects the role). It runs after `qa` and writes only `feedback[]`, the cross-project store and, in a checkout of the skill, lessons. See [skill-evolution.md](skill-evolution.md).
 
 | Role | Owns | Must not |
 |---|---|---|
-| `architect` | discovery, manifest modeling, capability derivation, IA, build order | write feature code |
-| `implementer` | vertical slices: data, service, policy, UI, audit, tests | mark its own work verified |
-| `ux-reviewer` | IA, tables, forms, states, accessibility, responsiveness, copy | change server logic |
-| `security` | threat model, authz matrix, audit completeness, data exposure | approve its own exceptions |
-| `qa` | adversarial audit, permission matrix, negative tests, browser evidence, gap filing, the release gate | fix its own findings silently |
+| `architect` | discovery, modeling, capability derivation, IA, build order | write feature code |
+| `implementer` | vertical slices: data, service, policy, UI, audit, tests | mark its own work reviewed |
+| `ux-reviewer` | IA, tables, forms, states, accessibility, responsiveness, copy | change product code |
+| `security` | threat model, authz matrix, audit completeness, data exposure | accept a risk itself |
+| `qa` | adversarial audit, permission matrix, negative tests, browser evidence, `reviewStatus`, the release gate | fix its own findings |
 
 ### architect
 
-- **Entry:** the repository is readable and discovery has named entities, roles, and lifecycles. See [discovery.md](discovery.md).
-- **Exit:** every entity carries capabilities at `status: discovered` or better; every capability has `outcome`, `kind`, `roles`, `risk`, `entityStates`; the capabilities the build order schedules are moved from `discovered` to `planned` (the implementer's entry condition, and nobody else moves them); build order is recorded in `decisions[]`; `validate --phase plan` exits 0.
-- **Writes:** `platform`, `roles[]`, `entities[]`, capability skeletons, `screens[]`, `workQueues[]`, `integrations[]`, `crossCutting`, `qualityGates[]` ids and thresholds, `decisions[]`.
+- **Entry:** the repository is readable. See [discovery.md](discovery.md).
+- **Exit:**
+  - every entity carries capabilities at `status: discovered` or better;
+  - every capability has `outcome`, `kind`, `roles`, `risk`, `entityStates`;
+  - the capabilities the build order schedules are `planned` (nobody else moves them there);
+  - the build order, with its file-ownership table, is a `decisions[]` entry;
+  - `validate --phase plan` exits 0.
+- **Writes:**
+  - `platform`, `roles[]`, `entities[]`, capability skeletons, `screens[]`, `workQueues[]`, `integrations[]`, `qualityGates[]` ids and thresholds, `decisions[]`;
+  - the empty `crossCutting` structure, whose sections belong to other roles.
+- **First pass:** it claims nothing, because nothing exists yet and it runs alone. In extend or repair mode it claims the existing capabilities it changes.
+- **File ownership:** the build-order decision lists each fan-out slice's owned directories and files. Shared items are marked as serialized: the migrations directory, lockfiles, design-system primitives, the navigation registry, `crossCutting`. There is one row for each pair of slices that touch the same file.
 
 ### implementer
 
-- **Entry:** the capability exists at `status: planned`, its spine dependencies are `implemented`, and `claim` succeeded.
-- **Exit:** `dataBinding`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `safeguards`, `tests`, `evidence` are real and non-placeholder, and every referenced file exists and is non-empty; `status: implemented`; `reviewStatus` left `unreviewed`.
-- **Writes:** capability implementation fields, `screens[].status`, `declaredStatic[]`, `decisions[]` for choices made, `gaps[]` it cannot close.
+- **Entry:** the capability is `planned`, its spine dependencies are `implemented`, and `claim` succeeded.
+- **Exit:**
+  - `dataBinding`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `safeguards`, `tests` and `evidence` are real;
+  - every referenced file exists and is non-empty;
+  - `status: implemented`, with `reviewStatus` left `unreviewed`.
+- **Writes:** capability implementation fields, `screens[].status`, `declaredStatic[]`, `decisions[]` for choices made, `gaps[]` it cannot close. It changes only the paths its slice owns; for anything else it files a gap and returns `NEEDS_CONTEXT`.
 
 ### ux-reviewer
 
-- **Entry:** at least one screen is at `status: implemented` and the application runs.
-- **Exit:** every reviewed screen declares the required states as [verification.md](verification.md#state-and-data-coverage) states them, `accessibilityStatus` is set and `crossCutting.experience.evidence` names what was exercised, `responsive` reflects an actual viewport check, findings are filed as `gaps[]`, and no server code changed. See [experience-design.md](experience-design.md).
-- **Writes:** `screens[].states`, `screens[].accessibilityStatus` (a status, not a path), `screens[].responsive`, `crossCutting.experience` (flags and `evidence`), `qualityGates[accessibility]`, `gaps[]`, `feedback[]`, `reviewedBy` then `reviewStatus` on capabilities it did not implement.
+- **Entry:**
+  - at least one screen is `implemented` and the application runs;
+  - an operator account exists for each role;
+  - a browser tool is available.
+
+  Without all three, file a `blocked` gap and return `BLOCKED`: a review from source is not a UX review.
+- **Exit:**
+  - reviewed screens declare their states per [verification.md](verification.md#state-and-data-coverage);
+  - `accessibilityStatus` and `responsive` reflect real checks;
+  - `crossCutting.experience.evidence` names what was exercised;
+  - findings are filed as gaps;
+  - `review-scope` is clean.
+- **Writes:** `screens[].states`, `screens[].accessibilityStatus`, `screens[].responsive`, `crossCutting.experience` (with `set --append`), `qualityGates[accessibility]`, `gaps[]`, `feedback[]`. See [experience-design.md](experience-design.md).
 
 ### security
 
-- **Entry:** the authentication, authorization, tenancy, and audit spine is `implemented` and `emit --format authz-matrix` produces output.
-- **Exit:** `crossCutting.authentication`, `.authorization`, `.audit`, and `.safety` carry evidence; every `risk: high` or `risk: critical` capability has safeguards, audit events, and a negative test; accepted risks are `decisions[]` with `status: confirmed` and a named human approver. See [security-governance.md](security-governance.md).
-- **Writes:** `crossCutting.authentication`, `.authorization`, `.audit`, `.safety`, `roles[].separationOfDuties`, critical and high `gaps[]`, accepted-risk `decisions[]`, `reviewedBy` then `reviewStatus` on privileged commands it did not implement.
+- **Entry:** the authentication, authorization, tenancy and audit spine is `implemented`, and `emit --format authz-matrix` produces output.
+- **Exit:**
+  - `crossCutting.authentication`, `.authorization`, `.audit` and `.safety` carry evidence;
+  - every `high` or `critical` capability has safeguards, audit events and a negative test;
+  - every risk that needs acceptance is proposed, not accepted;
+  - `review-scope` is clean.
+- **Writes:** those four sections, `roles[].separationOfDuties`, `gaps[]`, and proposed risk acceptances. A proposed acceptance is a `decisions[]` entry with `status: assumed` (naming the risk, the mitigations and the approving role) plus a `blocked` gap asking for a human decision. A dispatched agent cannot ask the human, so only the main session, having asked, sets a decision to `confirmed`. See [security-governance.md](security-governance.md).
 
 ### qa
 
-- **Entry:** the target domain's capabilities are `implemented` and the build passes; for the release gate, the `ux-reviewer` and `security` passes are finished.
-- **Exit:** `coverage` has been run and its findings filed; role-matrix and negative tests exist and were executed against the built system; `qualityGates[]` are `passed` or `failed` with evidence paths; `reviewStatus` is `reviewed` or `contested`; for a release, `validate --phase release` and `coverage` exit 0 and the gap report is emitted. See [verification.md](verification.md) and [test-data.md](test-data.md).
-- **Writes:** `qualityGates[]`, `crossCutting.observability` and `crossCutting.data`, `gaps[]`, `reviewedBy` then `reviewStatus`, `tests[]` and `evidence[]` entries for tests it wrote, `feedback[]`.
+- **Entry:** the target domain's capabilities are `implemented` and the build passes. For the release gate, the `ux-reviewer` and `security` passes are finished.
+- **Exit:**
+  - `coverage` has been run and its findings filed;
+  - role-matrix and negative tests exist and were run against the built system;
+  - every negative test on a high or critical capability was shown failing with its guard disabled and passing with it in place;
+  - `qualityGates[]` are `passed` or `failed` with evidence;
+  - `reviewStatus` is set;
+  - `review-scope` is clean for every review pass since the last gate;
+  - for a release, `validate --phase release` and `coverage` exit 0 and the gap report is emitted.
+- **Writes:** `qualityGates[]`, `crossCutting.observability` and `.data`, `gaps[]`, `reviewedBy` then `reviewStatus`, and `tests[]` and `evidence[]` entries for new test files it wrote. It adds tests and never edits an existing one; a test that must change is a gap for an implementer. See [verification.md](verification.md) and [test-data.md](test-data.md).
 
-Each `crossCutting` section has one owner, so two agents never overwrite each other's evidence: `security` owns `authentication`, `authorization`, `audit` and `safety`; `ux-reviewer` owns `experience`; `qa` owns `observability` and `data`. The architect creates the empty structure; implementers do not edit it.
+Each `crossCutting` section has one owner: `security` owns `authentication`, `authorization`, `audit` and `safety`; `ux-reviewer` owns `experience`; `qa` owns `observability` and `data`. Add to evidence lists with `set --append`, which takes a union and never drops another entry.
 
 The security pass is required at every profile for the authorization matrix and audit completeness. The formal data-exposure review is required at `regulated`, and at `standard` when `platform.regulatedData` is non-empty.
 
-## The independence rule
+## The review state machine
 
-The agent that implements a capability may not be the agent that sets its `reviewStatus` to `reviewed`.
+The agent that implements a capability may not be the agent that marks it reviewed. Self-review fails for four reasons, and trying harder fixes none of them:
 
-Self-review fails for four reasons, and none of them are fixed by trying harder:
+- You review the intent you held, not the artifact you produced.
+- The blind spot that caused the defect is still active.
+- Recall confirms cheaply: "I handled the empty state" is memory, and memory does not fail the way a file read does.
+- A diff cannot show what was never written: the absent policy test, the unemitted audit event.
 
-- You review the intent you held, not the artifact you produced. Your mental model stands in for the code and conceals the difference between them.
-- The blind spot that caused the defect is still active. A missing tenant filter is missing because tenancy was not on your mind; re-reading with the same frame does not surface it.
-- Recall confirms cheaply. "I handled the empty state" is memory, and memory does not fail the way a file read does.
-- Reviewing the diff cannot see what was never written: the absent policy test, the unemitted audit event, the lifecycle state with no query capability.
+Honest review is a fresh read of the artifact from disk, checked against a list derived from the manifest rather than from the change.
 
-What makes review honest is a fresh read of the artifact from disk, checked against a list derived from the manifest rather than from the change.
+`reviewStatus` has one writer, `qa`. The other reviewers file findings as gaps.
 
-`reviewStatus` semantics:
+| Transition | Who | Enforced |
+|---|---|---|
+| `unreviewed` → `reviewed` | `qa`, with `reviewedBy` set first to an id that never implemented the capability | refused while an open blocking gap targets it (`reviewed-with-blocking-gap`) |
+| `unreviewed` or `reviewed` → `contested` | `qa`, after filing the gap | refused without an open gap naming the capability (`contested-needs-gap`) |
+| `contested` → `unreviewed` | the implementer, once the gap is `fixed` or disputed with evidence on the gap | – |
+| `contested` → `reviewed` | nobody | refused (`review-transition`) |
+| gap `fixed` → confirmed or reopened | a fresh agent of the role that filed it (scoped re-review) | – |
 
-| Value | Set by |
+A **blocking** finding is critical or high, and either violates a manifest requirement or comes with a reproduction. Anything else is advisory: filed, but it never holds up a review. Calibrate severity by impact:
+
+| Finding | Severity |
 |---|---|
-| `unreviewed` | the implementer, and only this value |
-| `reviewed` | an agent id different from the implementer, after re-reading the files the manifest names; set `reviewedBy` to your agent id first, because the validator compares it with `owner`, `implementedBy` and every implementer that ever held the capability |
-| `contested` | a reviewer that disputes the work; must be paired with a `gaps[]` entry |
+| Cross-tenant read or write, authorization bypass, privileged action without a server-side check | critical |
+| Unaudited privileged mutation, a missing state on a critical flow, destructive action without recovery | high |
+| A missing state elsewhere, an accessibility failure on a secondary screen, a misleading error | medium |
+| Copy, polish, layout | low |
 
-An implementer may never move `contested` to `reviewed`. It fixes the gap, sets `status` to `in-progress` and back to `implemented`, and returns `reviewStatus` to `unreviewed`.
+When reviewers report the same issue at the same place, the findings merge into one gap and the higher severity wins.
 
 ## Claiming work
 
-```text
-python <skill-dir>/scripts/admin_console_manifest.py claim \
-  --manifest <project-root>/.admin-console/manifest.json \
-  --agent <agentId> --role <role> --capability <capabilityId> [--capability <capabilityId> ...]
-```
+Claim before reading the code you intend to change, not after writing it. The first claim registers the agent.
 
-The claim registers the agent on its first claim, writes `locks/<capability>.lock` (the file holds the agent id) and records the capability in `agents[].ownsCapabilities`. It decides conflicts from the manifest as well as from lock files: it exits 3 when another `active` agent lists the capability or is its `owner`, or when the lock file names another agent. An agent whose `status` is `done` or `handed-off` no longer counts as a manifest-level holder, but a lock file it left behind still blocks a claim until `release-claim` or `--force-steal` removes it. A claim goes through the same write guard as `add` and `set`, so it cannot smuggle in an invalid record. Claim before reading the code you intend to change, not after writing it.
+- A builder's claim (`implementer`, `architect`) excludes everyone: nothing is reviewed while it is being built.
+- Reviewers of different roles may review one capability in parallel; two reviewers of the same role may not.
+- An id that has built something cannot claim as a reviewer, so use a fresh id for each review pass.
+- The claim stamps `owner` and `implementedBy` for builders only, and `release-claim` never clears `implementedBy`, so reviewer identity stays checkable after handoff.
 
-What a claim stamps depends on the role. `--role implementer` (and `architect`) sets `owner` and, when it is empty, `implementedBy` (an implementer claim replaces an `implementedBy` that names an architect); `implementedBy` is the record of who built the capability and `release-claim` never clears it, so a reviewer-identity check still works after the handoff. A reviewer role (`ux-reviewer`, `qa`, `security`) takes the lock and is listed in `ownsCapabilities` but leaves `owner` and `implementedBy` alone, so claiming a capability to review it does not make you its implementer. An agent id that has held capabilities as an implementer or architect cannot claim as a reviewer; use a different id.
+When a claim conflicts, the command exits 3 and names the holder:
 
-Release on finish or on stop. Omitting `--capability` releases everything the agent holds:
-
-```text
-python <skill-dir>/scripts/admin_console_manifest.py release-claim \
-  --manifest <project-root>/.admin-console/manifest.json --agent <agentId> [--capability <capabilityId>]
-```
-
-A release blanks `owner`, moves the capability from `ownsCapabilities` to the agent's `previouslyOwned` (the history the reviewer-identity check also reads) and sets the agent `done` when nothing is left. It exits 3 and releases nothing for a capability the agent never held or whose lock names another agent.
-
-To take a capability from an agent that has stalled and cannot release it, run `claim` again with `--force-steal --reason '<why>'`; the reason is required. The capability leaves the victim's `ownsCapabilities` (it stays in `previouslyOwned`) and the thief's record gains `stolenFrom` and a note. Never steal from an agent that may still be writing.
-
-Safe to claim concurrently:
-
-| Concurrent work | Why it is safe |
-|---|---|
-| Capabilities on different entities with no shared migration in flight | disjoint files, disjoint tables |
-| Screens in different navigation domains | disjoint routes and components |
-| Per-role authorization suites | additive test files, one role each |
-| Integration adapters with distinct credential boundaries | disjoint adapters and secrets |
-| `qa` audit of a finished domain while implementation continues elsewhere | one agent reads, the other writes, no shared file |
-| `emit` runs to distinct `--out` paths | read-only against the manifest |
-
-Must serialize under a single claim at a time:
-
-| Serialized work | Failure if run in parallel |
-|---|---|
-| The auth, authorization, tenancy, and audit spine | two policy layers and two audit writers that diverge silently |
-| The manifest's `crossCutting` section | one agent's evidence arrays overwrite the other's |
-| Schema migrations and the migration sequence | colliding version numbers, an ordering that will not run |
-| Shared design-system components: table shell, form primitives, confirm dialog | two variants of the same control, no baseline for UX review |
-| The navigation and IA registry | duplicate or orphaned routes |
-| The release-phase validation pass | partial state read as final state |
-
-The spine is built to `implemented` by one agent before entity slices fan out. Slices depend on the spine; the spine depends on nothing. See [build-order.md](build-order.md).
-
-## Manifest concurrency
-
-Mutate the manifest only through the script (`add`, `set`, `remove`, `rename`, `claim`, `release-claim`, `harvest`, `migrate --write`):
-
-```text
-python <skill-dir>/scripts/admin_console_manifest.py set \
-  --manifest <project-root>/.admin-console/manifest.json \
-  --path 'entities[user].capabilities[user.suspend].status' --value in-progress
-```
-
-`set --path` accepts a path exactly as `validate` prints it (a leading `manifest.`, numeric indexes such as `roles[0]`, and `evidence[0]`), so a finding's path can be pasted in.
-
-Never rewrite the manifest as a whole file. A whole-file write serializes the copy you read minutes ago, and every `add` and `set` another agent made since then disappears. Nothing reports the loss: the result is still well-formed, so validation passes and the deleted work reappears only as a missing capability at release. This is the most damaging failure mode in concurrent operation, and it is silent.
-
-The same rule holds in single-agent mode across passes. Your in-context copy of the manifest is stale the moment the script writes to it.
-
-Three different things get called a lock or a claim. Do not create or edit any of these files yourself, and do not mix them up:
-
-| What | Where | Freed by |
-|---|---|---|
-| Write lock | `.admin-console/.lock`, held for milliseconds by every write command | Automatically. The file records the holder's pid: a lock whose process is dead is taken over after about 2 seconds, and any lock older than 120 seconds is taken over regardless (the pid check is local to the machine, so on a shared filesystem the 120 seconds is what frees it). A caller that waits 30 seconds gets exit 2 naming the holder's pid and the lock's age; delete the file only if that process is gone |
-| Capability lock | `.admin-console/locks/<capability>.lock`, holding the claiming agent's id | `release-claim --agent <holder> --capability <capabilityId>` (name the capability explicitly when the manifest has no record of the holder), or `claim --force-steal --reason`. It never expires by itself |
-| Manifest claim | `agents[].ownsCapabilities` of an `active` agent, and `capability.owner` | `release-claim`, or setting the holder's `status` to `done` or `handed-off` (`set --path 'agents[<agentId>].status' --value handed-off`), or `--force-steal` |
-
-`claim` refuses on either of the last two rows, so deleting a lock file does not free a capability the manifest still assigns to an active agent, and setting the holder's status does not remove its lock file. Before freeing anything, confirm the holder's `agents[].status` is `done` or `handed-off`, or that its process is gone; never free a claim while its holder may be mid-write.
-
-Claim conflict returns exit code 3. The capability is held. Then:
-
-1. Read the message, which names the holder, and re-read the manifest to confirm it from `agents[]`.
+1. Re-read `agents[]` to confirm the holder.
 2. Claim a different unclaimed capability and continue.
-3. If nothing else is claimable, file a `gaps[]` entry naming the contended capability and its holder, set your `agents[].status` to `handed-off`, write the worklog, and stop.
+3. If nothing else is claimable, file a gap naming the contended capability and its holder, set your `agents[].status` to `handed-off`, write the worklog, and stop.
 
-Do not retry in a loop, do not proceed without the claim, and do not edit files under another agent's claim.
+Do not retry in a loop, do not proceed without the claim, and do not edit files under another agent's claim. Release on finish or on stop. `claim --force-steal --reason` exists for an agent that stalled; never use it on one that may still be writing. The kinds of lock, and what frees each, are in [manifest-cli.md](manifest-cli.md#claims-and-locks).
 
-## Handoff records
+## Handoff and return
 
-Write a handoff before you stop, whether you finished, were blocked, or ran out of budget. The next agent receives the manifest and your worklog and nothing else. Assume it has no conversation history and cannot ask you a question.
+The next agent receives the manifest and your worklog and nothing else. Assume it has no conversation history and cannot ask you a question. Before you stop, whether finished, blocked or out of budget:
 
-Before stopping:
-
-1. `set` the true `status` and `reviewStatus` of every capability you touched. Half-done is `in-progress`, not `implemented`.
+1. `set` the true `status` of every capability you touched. Half-done is `in-progress`, not `implemented`.
 2. `add --kind decision` for every non-obvious choice, with `status: assumed` when unconfirmed.
-3. `add --kind gap` for every defect you know about, including defects you caused.
-4. `add --kind feedback` for friction that belongs to the skill rather than to the project, per [skill-evolution.md](skill-evolution.md).
+3. `add --kind gap` for every defect you know about, including ones you caused.
+4. `add --kind feedback` for friction that belongs to the skill rather than the project; see [skill-evolution.md](skill-evolution.md).
 5. `release-claim` everything you are not deliberately still holding.
 6. `set` your `agents[<id>].status` to `done` or `handed-off`.
 7. Write the worklog.
-
-Worklog format, at `<project-root>/.admin-console/worklog/<agentId>.md`:
 
 ```text
 # worklog <agentId>
 role: architect|implementer|ux-reviewer|security|qa
 mode: build|extend|audit|repair    profile: internal|standard|regulated
-started: <ISO-8601>    ended: <ISO-8601>
+status: DONE|DONE_WITH_CONCERNS|BLOCKED|NEEDS_CONTEXT
+base: <commit at dispatch>    started: <ISO-8601>    ended: <ISO-8601>
+touched: <every path you changed>
 
 claims-held: <capabilityId>, ...        # still locked, each with a reason
 claims-released: <capabilityId>, ...
 
 did
-- <capabilityId>  <status old -> new>  <what changed>  <files touched>
+- <capabilityId>  <status old -> new>  <what changed>
 verified
-- <capabilityId>  <command run>  <evidence path>  pass|fail
+- <capabilityId>  <command run>  exit <code>  <evidence path>
 decided
 - <decisionId>  <one line>  assumed|confirmed
 found
-- <gapId>  critical|high|medium|low  <one line>
+- <gapId>  critical|high|medium|low  blocking|advisory  <one line>
 next
 - <the single first action the following agent should take>
 blocked-on
 - <external dependency, credential, or human decision, or "none">
 ```
 
-Keep it to one page. It is a pointer into the manifest, not a copy of it. When the worklog and the manifest disagree, the manifest wins.
+Keep it to one page. It points into the manifest and does not copy it; when the two disagree, the manifest wins.
+
+Return to the dispatcher in this shape: a first line `STATUS: DONE`, `DONE_WITH_CONCERNS`, `BLOCKED` or `NEEDS_CONTEXT`, then at most twelve lines with the plain-language outcome first, then the worklog path. Name the gap ids behind a concern or a block, and exactly what context is missing.
+
+## Dispatch and verify
+
+Dispatch each pass with everything it needs, because it sees nothing else:
+
+```text
+Agent: adminwright:adminwright-<role> (Claude Code) | adminwright-<role> (elsewhere)
+Project root: <absolute path>   Manifest: <path>   Mode: build|extend|audit|repair   Profile: <p>
+Agent id: <role>-<slug>, fresh for each pass   Scope: <capability ids or domain> and the paths it owns
+Base: <git rev-parse HEAD>   Plan of record: <decision id or file>
+Harvester only: a digest of the conversation (user corrections, wrong guidance, skipped phases)
+Return: the STATUS line, at most 12 lines, then the worklog path
+```
+
+For a reviewer, run `review-scope --agent <id> --start` before dispatching it. When a pass returns, do not relay its report; check it yourself before starting the next pass:
+
+| After | Run |
+|---|---|
+| architect | `validate --phase plan`, which must exit 0 |
+| implementer | the commands in its worklog's `verified` lines; compare the exit codes |
+| any reviewer | `review-scope --agent <id>`, which must exit 0 |
+| qa, for a release | `validate --phase release` and `coverage`, which must exit 0 |
+
+The orchestrating session never edits product code: its fixes would skip review. A decision only a human can make comes back as an `assumed` decision and a `blocked` gap. Ask the human, then record the answer yourself.
 
 ## Fan-out patterns
 
-| Works | Shape |
+Serialize the spine, fan out on slices, converge for review, and serialize the release gate. The spine is built to `implemented` by one agent before entity slices fan out. See [build-order.md](build-order.md).
+
+| Safe in parallel | Why |
 |---|---|
-| Per-entity slices | one implementer per entity, spine already `implemented`, no shared migration in flight |
-| Per-role authorization suites | one agent per role, each writing that role's permitted and forbidden matrix tests |
-| Rolling adversarial QA | `qa` audits finished domains while implementers continue on unfinished ones |
-| Parallel review | `ux-reviewer` and `security` over the same finished domain; they write different manifest sections |
-| Emit and fix | one agent emits `authz-matrix` and `gap-report`, others fix the named items under their own claims |
+| Capabilities on different entities with no shared migration in flight | disjoint files and tables |
+| Screens in different navigation domains | disjoint routes and components |
+| Per-role authorization suites | additive test files, one role each |
+| Integration adapters with distinct credential boundaries | disjoint adapters and secrets |
+| `ux-reviewer` and `security` over one finished domain | reviewer claims of different roles, different manifest sections |
+| `qa` on a finished domain while implementation continues elsewhere | one reads, the other writes |
 
-| Fails | Why |
+| Serialize | Failure if run in parallel |
 |---|---|
-| Two implementers on one entity | overlapping service, policy, and screen files; last write wins |
-| Parallel schema changes | migration numbering and ordering collide; neither branch runs |
-| Two agents editing one screen | component-level conflicts that tests do not catch |
-| Concurrent `crossCutting` edits | evidence arrays overwritten with no conflict signal |
-| An implementer and its reviewer at the same time | the reviewer reads a moving artifact and reviews nothing |
-| Fan-out before the spine exists | every slice invents its own auth, tenancy, and audit handling |
+| The auth, authorization, tenancy and audit spine | two policy layers and two audit writers that diverge silently |
+| Schema migrations | colliding version numbers, an ordering that will not run |
+| Shared design-system components and the navigation registry | two variants of one control; duplicate or orphaned routes |
+| An implementer and a reviewer on one capability | the reviewer reads a moving artifact and reviews nothing |
+| The release-phase validation pass | partial state read as final |
 
-Shape of a healthy run: serialize the spine, fan out on slices, converge for review, serialize the release gate.
+Do not give adminwright agents their own worktrees (`isolation: worktree`, `/batch`, team worktrees). A worktree branches from the default branch and `locks/` is not committed, so the claims and the manifest split. Do not let an agent dispatch agents: a self-spawned "reviewer" under a new id defeats the independence rule, and nothing in the manifest can see it.
 
-## Conflict resolution
+## The contest loop and conflict resolution
 
-**Divergent decisions.** Both entries stay in `decisions[]`. Do not delete or edit another agent's decision. Add yours, then have the tie-breaker `set` the losing entry's `status` to `superseded` and name the replacement in the winner's `reason`.
+1. `qa` files the gap, with a reproduction or a file reference, and contests the capability.
+2. The implementer fixes only the paired gaps, logs the covering test with its command and output, marks each gap `fixed`, and returns the capability to `unreviewed`. If it disputes a finding instead, it records the evidence on the gap.
+3. A fresh re-review marks each paired gap ADDRESSED or NOT ADDRESSED and checks only the fix for new breakage. "Attempted" is not addressed.
 
-**Contested reviewStatus.** The reviewer sets `contested` and files a paired `gaps[]` entry with a reproduction or a file reference. Only an agent other than the implementer may return it to `reviewed`. The loop (contest, fix, re-review) runs at most two rounds; a third disagreement is filed as a `gaps[]` entry with `status: blocked` and goes to the human. A `gaps[]` entry moves to `status: accepted` only on the human's word, recorded as a confirmed `decisions[]` entry whose `reason` names the approver; an agent never accepts a gap it filed or caused.
+Out-of-scope observations become new advisory gaps and never open a new round. A round ends in a reopened gap, and two rounds end the loop: the gap goes to `blocked` with both positions stated, and the human decides. Nobody adjudicates before that cap, and every ruling is a `decisions[]` entry. A gap becomes `accepted` only on the human's word, recorded as a confirmed decision naming the approver; an agent never accepts a gap it filed or caused.
 
-**Tie-breakers**, in this order:
+**Divergent decisions.** Both entries stay. Add yours; the tie-breaker sets the losing entry's `status` to `superseded` and names the replacement in the winner's `reason`.
 
 | Dispute | Decided by |
 |---|---|
@@ -292,30 +273,49 @@ Shape of a healthy run: serialize the spine, fan out on slices, converge for rev
 | Authorization, audit, tenancy, sensitive-data exposure, risk classification | `security`, overriding `architect` |
 | Operator workflow, IA, screen states, copy | `ux-reviewer` |
 | Whether evidence is sufficient | `qa` |
-| Pricing, legal interpretation, irreversible production action, an ambiguous business rule with materially different outcomes | the human. File a `gaps[]` entry with `status: blocked` and stop |
+| Pricing, legal interpretation, irreversible production action, an ambiguous business rule | the human: file a `blocked` gap and stop |
 
-Never resolve a conflict by rewriting another agent's manifest entry. Resolution is additive: a new decision that supersedes, or a gap that records the disagreement.
+Resolution is additive: a new decision that supersedes, or a gap that records the disagreement, never a rewrite of another agent's entry. If two agents already edited the same files, the later one re-reads both versions from disk and reconciles them under its own claim.
 
-If two agents have already edited the same files, the later agent re-reads both versions from disk and reconciles in a single pass under its own claim. Do not reconcile from memory.
+## When a run stops
+
+Stop when any of these holds:
+
+- the release gate passes;
+- every open gap is blocked on a human or accepted;
+- a fix wave did not reduce the number of open critical and high gaps;
+- three fix waves have run on one domain.
+
+In the last two cases, escalate to the human with the open gaps and the list of rulings made.
+
+## Rationalizations
+
+| The thought | What to do instead |
+|---|---|
+| "I'll fix this one-liner while reviewing." | A reviewer's fix is unreviewed code, and `review-scope` flags it. File the gap. |
+| "The implementer's log says the tests pass." | A log is a claim. Run the command and cite your own output. |
+| "One more round will converge." | Two rounds is the cap; the third disagreement goes to the human. |
+| "It is only style, so I'll contest it." | Contest only a blocking finding; style is an advisory gap. |
+| "I'll accept this risk myself." | Propose an `assumed` decision and a `blocked` gap; a human accepts. |
+| "The subagent reported success." | Run the pass's check from [Dispatch and verify](#dispatch-and-verify). |
 
 ## Single-agent degradation
 
-One agent runs all five roles in sequence. The separation is the value; compressing the passes produces one pass wearing five labels.
+One agent runs all five roles in sequence. The separation is the value; compressing the passes produces one pass wearing five labels. Pass order is `architect`, `implementer`, `ux-reviewer`, `security`, `qa`, then the harvester pass. Cycle implementation and review per domain rather than reviewing everything once at the end.
 
-Pass order: `architect`, `implementer`, `ux-reviewer`, `security`, `qa`, then the `harvester` pass, which never claims anything. `qa` is last of the five because it owns the release gate. Cycle implementer and review per domain rather than implementing everything and reviewing once at the end.
+Minimum honest separation, all required:
 
-Minimum honest separation. All four are required:
+1. **A distinct agent id per pass**, such as `solo-architect`, `solo-impl-billing`, `solo-ux`, `solo-sec`, `solo-qa`, so the manifest still records who did what.
+2. **An announced pass switch**, in the conversation and the worklog, naming the exit condition you intend to satisfy.
+3. **A fresh read of the artifact under review**, from disk, at the start of every review pass: open the files the manifest names and check them against its requirements, not against recall or the diff you just produced.
+4. **A `qa` pass against the built system**: the build, the test commands, the running application, the emitted authorization matrix.
+5. **`review-scope --role <role> --agent <id>`** around every review pass (`--start` before it, the check after).
 
-1. **A distinct agent id per pass** — `solo-architect`, `solo-impl-billing`, `solo-ux`, `solo-sec`, `solo-qa`. The manifest then still records who did what, and the independence rule stays machine-checkable.
-2. **An explicit role declaration in the worklog** before the pass starts, naming the exit condition you intend to satisfy.
-3. **A fresh read of the artifact under review**, from disk, at the start of every review pass. Open the files the manifest names and check them against the manifest's requirements. Do not review from recall, and do not review the diff you just produced.
-4. **A `qa` pass that runs against the built system** — the build, the test commands, the running application, the emitted authorization matrix. Never against your notes, and never against a description of what the code does.
-
-Further constraints in single-agent mode:
+Further constraints:
 
 - Do not set `status: implemented` and `reviewStatus: reviewed` in the same pass.
-- A review pass files gaps; it does not fix them. Fixes happen in a later implementer pass under a new claim.
-- Re-read the manifest at the start of every pass. Your context copy is stale after any `set`.
+- A review pass files gaps; fixes happen in a later implementer pass under a new claim.
+- Re-read the manifest at the start of every pass.
 - Claim and release exactly as a multi-agent run does. The lock costs nothing and preserves the record.
 - If you skip a pass, record why in `decisions[]`. Being a single agent is not a reason; scope and budget may be, and they must be stated.
 
