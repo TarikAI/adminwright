@@ -121,8 +121,9 @@ jobs:
           print("no broken links")
           PY
 
-      # Compares postgres.sql with the five translations: tables, columns, CHECK constraint
-      # names and enum value sets, index names (partial and expression ones too), single-column
+      # Compares postgres.sql with the five translations: tables, columns and their types,
+      # CHECK constraints (names, enum value sets, expressions by logical equivalence), index
+      # names and definitions (UNIQUE, key columns and expressions, WHERE), single-column
       # UNIQUEs, foreign-key ON DELETE actions, and the text of every trigger and function.
       # The same file runs in the `test` job; it is stdlib-only and needs no database.
       - name: Schema translations cover the same tables

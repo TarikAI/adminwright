@@ -21,10 +21,16 @@ whose reason is not obvious, but not the reasoning behind the model.
 The raw statements are written out in full: Prisma and Django keep them in the companion
 `.sql` file, Laravel and Rails carry them inline, and Drizzle needs the Integrity section of
 `postgres.sql` appended to its generated migration. Do not drop them when adapting.
-`tests/test_core_schema.py` compares tables, columns, CHECK and index names, foreign-key
-`ON DELETE` actions and the function and trigger text across all of these files, so a change
-to `postgres.sql` that a variant misses fails CI. CI also applies `postgres.sql` to a real
-PostgreSQL and runs the verification SQL at the end of this file.
+
+`tests/test_core_schema.py` parses all six files and compares, without a database: the tables;
+the columns and their type families; the CHECK constraints (names, enum value sets, and the
+expressions, by logical equivalence); the indexes and named unique constraints (names, UNIQUE,
+the ordered key columns and expressions, the `WHERE` predicate); foreign-key `ON DELETE`
+actions; and the function and trigger text. A change to `postgres.sql` that a variant misses in
+any of those fails CI. It cannot see what a tool adds or changes at migration time, so CI also
+builds the Django, Prisma and Drizzle variants on a real PostgreSQL and runs the verification
+SQL at the end of this file against each, and against `postgres.sql` itself. Laravel and Rails
+are checked by the static comparison only.
 
 ## What this is and is not
 
