@@ -324,6 +324,49 @@ class TestPromotionBar(LearningCase):
         payload = json.loads(run("promote", "--json", env=self.env)[1])
         self.assertEqual(payload["candidates"], [], "one project, however often it is named")
 
+    def test_the_project_flag_renames_but_never_re_keys(self):
+        # The reviewer's probe: harvest, re-open the entry, harvest again with
+        # --project. One codebase must stay one project.
+        manifest = self.project("AcmePortal", [self.SHARED], platform_id="acmeportal-f95c53")
+        self.harvest(manifest)
+        code, _out, err = run("set", "--manifest", manifest, "--path", "feedback[fb.1].status",
+                              "--value", "open")
+        self.assertEqual(code, 0, err)
+        code, out, err = run("harvest", "--manifest", manifest, "--date", "2026-09-23",
+                             "--project", "acme-portal", env=self.env)
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(run("promote", "--json", env=self.env)[1])
+        self.assertEqual(payload["candidates"], [], "one codebase is one project")
+        store_keys = {json.loads(line)["projectKey"] for line in
+                      (self.store / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+                      if line.strip()}
+        self.assertEqual(store_keys, {"acmeportal-f95c53"})
+
+    def test_a_manifest_without_a_platform_id_is_counted_by_name_and_warns(self):
+        manifest = self.project("Legacy", [self.SHARED])
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        del data["platform"]["id"]
+        manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        code, out, err = run("harvest", "--manifest", manifest, "--date", "2026-09-23",
+                             "--project", "legacy-display", env=self.env)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("platform.id is missing", err)
+        self.assertIn("--path platform.id", err)
+        record = json.loads((self.store / "observations.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(record["projectKey"], "Legacy", "--project must not re-key a legacy project")
+        self.assertEqual(record["project"], "legacy-display")
+        code, out, _err = run("validate", "--manifest", manifest, "--phase", "plan")
+        self.assertEqual(code, 0, out)
+        self.assertIn("[platform-id-missing]", out)
+        self.assertIn("--path platform.id", out)
+
+    def test_a_manifest_with_a_platform_id_does_not_warn(self):
+        manifest = self.project("Current", [self.SHARED], platform_id="current-abcdef")
+        _code, out, _err = run("validate", "--manifest", manifest, "--phase", "plan")
+        self.assertNotIn("platform-id-missing", out)
+        _out, err = self.harvest(manifest)
+        self.assertNotIn("platform.id is missing", err)
+
     def test_an_edited_entry_is_harvested_again(self):
         manifest = self.project("Alpha", [self.SHARED])
         out, _err = self.harvest(manifest)

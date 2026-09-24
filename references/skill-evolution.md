@@ -39,7 +39,13 @@ project — `$ADMINWRIGHT_HOME`, or `~/.adminwright` by default — where observ
 platform you have built accumulate. `promote` then groups observations that say the same
 thing in different words and reports only those that clear the bar.
 
-A project is counted by its stable `platform.id` (written by `init`, so renaming the platform does not make it a new project), never by its display name; `promote --export` replaces it with a fingerprint salted per store.
+A project is counted by its stable `platform.id` (written by `init`, so renaming the platform
+does not make it a new project); `promote --export` replaces it with a fingerprint salted per
+store. `harvest --project <name>` changes only the name shown, never the count. A manifest
+without a `platform.id` (created before `init` wrote one) is counted by its name, so a rename
+counts twice and two consoles that share a name count once: `validate` and `harvest` warn
+(`platform-id-missing`). Add one once and never change it:
+`set --manifest <path> --path platform.id --value <name>-<6 random hex digits>`.
 
 The store is an accumulation buffer, not the record. Adopted lessons live in the skill's own
 `lessons/` directory under version control, which is how they reach anyone else.

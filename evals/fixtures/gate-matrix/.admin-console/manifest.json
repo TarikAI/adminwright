@@ -4,7 +4,6 @@
   "profile": "gold",
   "projectRoot": "..",
   "platform": {
-    "id": "gate-matrix-000000",
     "name": "gate-matrix",
     "summary": "",
     "archetypes": [

@@ -67,6 +67,7 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `not-applicable-undecided`* | off | warn | error |
 | `placeholder-scan` | error | error | error |
 | `plan-note` | warn | warn | warn |
+| `platform-id-missing` | warn | warn | warn |
 | `privileged-read-audit` | off | error | error |
 | `profile-invalid` | error | error | error |
 | `rationale-required` | error | error | error |

@@ -466,6 +466,7 @@ def build_matrix():
         "regulatedData": ["billing"], "sourceSystems": ["postgres"],
         "archetypes": ["logistics-mobility"],        # archetype-coverage: models none of its domains
     })
+    del m["platform"]["id"]                          # platform-id-missing
     m["roles"] = [
         {"id": "ops", "name": "Ops", "responsibilities": ["Run it"], "scopes": ["all"],
          "mfaRequired": True, "separationOfDuties": []},   # separation-of-duties for the critical command

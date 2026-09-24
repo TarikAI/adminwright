@@ -325,6 +325,8 @@ RULES = {
     "implementer-unrecorded": LATE,
     "not-applicable-undecided": STRICT_ONLY,
     "contested-needs-gap": LATE,
+    # learning loop (round 2)
+    "platform-id-missing": W3,
 }
 
 # Rules that describe an UNFINISHED model rather than a malformed one.
@@ -2650,6 +2652,9 @@ def validate_gaps(manifest, findings, release):
                 "scripts, or agents; an unscoped entry cannot be grouped with the same finding "
                 "from another project",
             )
+    # With the feedback checks because only `harvest` reads it: it is how the
+    # promotion bar tells one project from another.
+    check_platform_id(manifest, findings)
 
 
 def validate_agents(manifest, findings):
@@ -5310,20 +5315,41 @@ def feedback_content_hash(item):
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
 
 
-def project_key_of(manifest, manifest_path, override=None):
-    """The identity a project is counted by: an explicit id, else its name.
+def project_key_of(manifest, manifest_path):
+    """The identity a project is counted by: `platform.id`, else its name.
 
     A bare display name is a poor key -- two unrelated projects both called
     'admin' were one, and one project renamed was two. `platform.id` is the
-    stable handle; the name is the fallback.
+    stable handle; the name is only the fallback for manifests that predate it.
+    `harvest --project` is deliberately NOT an input here: it renames the
+    project in the output, and letting it re-key the project meant one codebase
+    harvested once with the flag and once without counted as two projects.
     """
     platform = as_dict(manifest.get("platform"))
     return (
-        text_of(override)
-        or text_of(platform.get("id"))
+        text_of(platform.get("id"))
         or text_of(platform.get("name"))
         or project_root_of(manifest_path, manifest).name
     )
+
+
+PLATFORM_ID_HINT = (
+    "add a stable id once and never change it: `set --manifest <path> --path platform.id "
+    "--value <name>-<6 random hex digits>` (the form `init` writes, e.g. acme-portal-3f9a2c)"
+)
+
+
+def check_platform_id(manifest, findings):
+    """The learning loop's identity check: without platform.id a project is its name."""
+    platform = manifest.get("platform")
+    if isinstance(platform, dict) and not text_of(platform.get("id")):
+        findings.add(
+            "platform-id-missing",
+            "platform.id",
+            "is missing, so `harvest` counts this console by its display name: renaming it "
+            "makes it a second project, and two consoles that share a name count as one; "
+            + PLATFORM_ID_HINT,
+        )
 
 
 def cmd_harvest(args):
@@ -5335,7 +5361,12 @@ def cmd_harvest(args):
         text_of(args.project) or text_of(platform.get("name"))
         or project_root_of(manifest_path, manifest).name
     )
-    key = project_key_of(manifest, manifest_path, args.project)
+    key = project_key_of(manifest, manifest_path)
+    if not text_of(platform.get("id")):
+        stderr(
+            "WARN: platform.id is missing, so this project is counted by its name '" + key
+            + "': a rename will count as a new project. To fix it, " + PLATFORM_ID_HINT
+        )
     stack = as_dict(platform.get("stack"))
     stack_summary = ", ".join(
         text_of(stack.get(name)) for name in ("frontend", "backend", "database") if text_of(stack.get(name))
@@ -6118,7 +6149,12 @@ def build_parser():
         "harvest", help="Move a project's feedback[] into the cross-project store"
     )
     harvest.add_argument("--manifest", required=True)
-    harvest.add_argument("--project", help="defaults to platform.name")
+    harvest.add_argument(
+        "--project",
+        help="the name shown for this project in the store and in promote output (default "
+             "platform.name); it never changes how the project is counted, which is by "
+             "platform.id",
+    )
     harvest.add_argument("--store", help="defaults to $ADMINWRIGHT_HOME or ~/.adminwright")
     harvest.add_argument("--date", help="caller-supplied date; the script never reads the clock")
     harvest.set_defaults(func=cmd_harvest)
