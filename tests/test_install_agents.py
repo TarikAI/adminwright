@@ -160,7 +160,7 @@ def git_ignores(project, relative):
 
 
 # Where each harness's own documentation says custom agents live, written out
-# here independently of ia.HARNESSES (checked 2026-09-23; see the URLs beside the
+# here independently of ia.HARNESSES (checked 2026-09-24; see the URLs beside the
 # HARNESSES entries): (directory, file pattern, frontmatter/TOML keys required).
 NATIVE = {
     "claude-code": (".claude/agents", "{n}.md", ("name", "description")),
@@ -449,7 +449,7 @@ class TestNativeFiles(InstallBase):
     def test_every_harness_cites_the_docs_it_was_verified_against(self):
         for name, spec in ia.HARNESSES.items():
             with self.subTest(harness=name):
-                self.assertEqual(spec.checked, "2026-09-23")
+                self.assertEqual(spec.checked, "2026-09-24")
                 if name != "generic":
                     self.assertTrue(spec.docs, "no documentation URL recorded")
                 for url in spec.docs:

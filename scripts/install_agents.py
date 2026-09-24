@@ -13,7 +13,7 @@ Usage:
         [--skill-dir <dir>] [--append-pointer]
 
 Harnesses. Native agent locations and required fields were verified against each
-harness's official documentation on 2026-09-23; the URLs sit beside the HARNESSES
+harness's official documentation on 2026-09-24; the URLs sit beside the HARNESSES
 entries. A harness with no documented agents concept gets only the harness-neutral
 copy and the pointer block; no location is invented for it.
 
@@ -33,8 +33,8 @@ copy and the pointer block; no location is invented for it.
 
 .adminwright/agents/ is the harness-neutral fallback: the source files, verbatim
 apart from the skill path. Native files are rebuilt from each source's `name`,
-`description` and body only, so Claude-specific frontmatter (`tools`, `model`)
-never reaches a harness that would misread it.
+`description` and body only, so Claude-specific frontmatter (`model`,
+`disallowedTools`) never reaches a harness that would misread or reject it.
 
 No file the installer writes for a project to commit carries a machine's absolute
 path. A skill inside the project is named relative to the project root. A skill
@@ -87,7 +87,7 @@ SECTION_MARK = "<!-- adminwright-harness: {} -->"
 # native story of its own.
 NEUTRAL_DIR = ".adminwright/agents"
 
-CHECKED = "2026-09-23"
+CHECKED = "2026-09-24"
 
 # native_dir          project-relative directory the harness discovers agents in
 #                     (None: the harness documents no agents concept)
@@ -100,40 +100,50 @@ Harness = namedtuple(
 
 HARNESSES = {
     # Subagents are Markdown + YAML frontmatter in .claude/agents/; `name` and
-    # `description` are required, `tools` and `model` optional. The source files
-    # already have exactly this shape, so they are copied verbatim.
+    # `description` are required, `model` and `disallowedTools` optional. The
+    # source files already have exactly this shape, so they are copied verbatim.
+    # Claude Code substitutes ${CLAUDE_PLUGIN_ROOT} in plugin agent content only,
+    # not in .claude/agents/, so these copies name the skill like any other.
     "claude-code": Harness(
         ".claude/agents", "claude", None, False,
-        ("https://code.claude.com/docs/en/sub-agents",), CHECKED),
-    # opencode reads .opencode/agents (plural); the singular directory is not a
-    # fallback. `description` is required, `mode` defaults to `all` so it is set
-    # to `subagent`. `name` is the file name and any unknown frontmatter key is
-    # forwarded to the model provider as an option, so `name`, `tools` (deprecated
-    # there) and `model` (needs provider/model-id) must not be carried over.
+        ("https://code.claude.com/docs/en/sub-agents",
+         "https://code.claude.com/docs/en/plugins-reference#environment-variables"), CHECKED),
+    # opencode reads .opencode/agents (plural; its loader also accepts the
+    # singular directory, which the docs do not mention). `description` is
+    # required, `mode` defaults to `all` so it is set to `subagent`. `name` is the
+    # file name and any unknown frontmatter key is forwarded to the model provider
+    # as an option, so `name`, `tools` (deprecated there), `model` (needs
+    # provider/model-id) and `disallowedTools` must not be carried over.
     "opencode": Harness(
         ".opencode/agents", "opencode", None, False,
         ("https://opencode.ai/docs/agents/",), CHECKED),
     # Custom agents are standalone TOML files in .codex/agents/ (project) or
     # ~/.codex/agents/; `name`, `description` and `developer_instructions` are
-    # required. AGENTS.md is Codex's project instruction file.
+    # required. Current Codex releases spawn them when asked, including by an
+    # AGENTS.md instruction, and AGENTS.md is Codex's project instruction file.
+    # The docs moved to learn.chatgpt.com; the developers.openai.com pages still
+    # serve the same text with these as their canonical links.
     "codex": Harness(
         ".codex/agents", "codex", "AGENTS.md", True,
-        ("https://developers.openai.com/codex/subagents",
-         "https://developers.openai.com/codex/guides/agents-md"), CHECKED),
-    # Custom subagents are `.agents/agents/<name>.md` or `.agents/agents/<name>/agent.md`
-    # (workspace) with required `name` and `description`; the folder form is the
-    # one both documentation pages show. The docs do not say what an omitted
-    # `tools` list means, so only the required fields are written. Antigravity
-    # reads AGENTS.md at the workspace root.
+        ("https://learn.chatgpt.com/docs/agent-configuration/subagents",
+         "https://learn.chatgpt.com/docs/agent-configuration/agents-md"), CHECKED),
+    # Custom subagents are `.agents/agents/<name>.md` or
+    # `.agents/agents/<name>/agent.md` (workspace) with required `name` and
+    # `description`; the folder form is the template the /agents panel prints.
+    # `tools` is an allowlist, and an unknown name can hang the subagent (a
+    # known issue the docs state), so only the required fields are written.
+    # Antigravity reads AGENTS.md (and GEMINI.md) at the workspace root.
     "antigravity": Harness(
         ".agents/agents", "antigravity", "AGENTS.md", True,
-        ("https://antigravity.google/docs/subagents/",
-         "https://antigravity.google/docs/cli/commands/agents/",
-         "https://antigravity.google/docs/cli/best-practices/"), CHECKED),
+        ("https://antigravity.google/docs/subagents",
+         "https://antigravity.google/docs/cli/commands/agents",
+         "https://antigravity.google/docs/rules"), CHECKED),
     # Custom subagents are Markdown in .gemini/agents/ (project) or
     # ~/.gemini/agents/; `name` (lowercase slug) and `description` are required,
-    # an omitted `tools` inherits the parent's. GEMINI.md is the default
-    # context file; AGENTS.md is read only if context.fileName lists it.
+    # an omitted `tools` inherits the parent's, and the frontmatter schema is
+    # strict (an unknown key fails the load). The body is the system prompt and
+    # is templated (see GEMINI_TEMPLATE). GEMINI.md is the default context file;
+    # AGENTS.md is read only if context.fileName lists it.
     "gemini": Harness(
         ".gemini/agents", "gemini", "GEMINI.md", True,
         ("https://geminicli.com/docs/core/subagents/",
