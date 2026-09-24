@@ -598,7 +598,9 @@ return new class extends Migration
         //
         // The database owns chain_seq, prev_hash, row_hash and the payload hashes
         // (audit_event_chain_link). verify_audit_chain() re-computes the chain;
-        // scrub_audit_payload() is the single permitted UPDATE of an audit_event.
+        // scrub_audit_payload() is the sanctioned UPDATE of an audit_event: it records
+        // an audit.scrub_payload event first, and the update trigger refuses any payload
+        // drop that does not name such an event for the row.
         // Copied verbatim from postgres.sql (a test keeps them in step).
         DB::unprepared(<<<'SQL'
             CREATE OR REPLACE FUNCTION audit_event_hash_input(e audit_event)
@@ -697,6 +699,15 @@ return new class extends Migration
                         problem := 'after_hash does not match after_state';
                         RETURN NEXT;
                     END IF;
+                    IF ((r.before_state IS NULL AND r.before_hash IS NOT NULL)
+                        OR (r.after_state IS NULL AND r.after_hash IS NOT NULL))
+                       AND NOT EXISTS (
+                           SELECT 1 FROM audit_event s
+                            WHERE s.target_type = 'audit_event' AND s.target_id = r.id::text
+                              AND s.action = 'audit.scrub_payload') THEN
+                        problem := 'payload dropped without an audit.scrub_payload event';
+                        RETURN NEXT;
+                    END IF;
                     prev_seq := r.chain_seq;
                     prev_hash := r.row_hash;
                 END LOOP;
@@ -708,7 +719,8 @@ return new class extends Migration
             RETURNS void
             LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
             DECLARE
-                ev audit_event%ROWTYPE;
+                ev       audit_event%ROWTYPE;
+                scrub_id bigint;
             BEGIN
                 IF p_policy IS NULL OR p_policy IN ('', 'none') THEN
                     RAISE EXCEPTION 'scrub_audit_payload needs a named redaction policy';
@@ -716,22 +728,26 @@ return new class extends Migration
                 IF p_reason IS NULL OR btrim(p_reason) = '' THEN
                     RAISE EXCEPTION 'scrub_audit_payload needs a reason';
                 END IF;
-                PERFORM set_config('admin_core.scrub', 'on', true);
-                UPDATE audit_event
-                   SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
-                 WHERE id = p_event_id
-                RETURNING * INTO ev;
+                SELECT * INTO ev FROM audit_event WHERE id = p_event_id FOR UPDATE;
                 IF NOT FOUND THEN
                     RAISE EXCEPTION 'audit_event % does not exist', p_event_id;
                 END IF;
-                PERFORM set_config('admin_core.scrub', 'off', true);
-
+                IF ev.before_state IS NULL AND ev.after_state IS NULL THEN
+                    RAISE EXCEPTION 'audit_event % has no payload to scrub', p_event_id;
+                END IF;
+                -- actor_kind is 'system': the database performed the write; actor_id is who asked.
                 INSERT INTO audit_event
-                    (occurred_at, actor_id, actor_kind, tenant_id, environment,
+                    (chain_id, occurred_at, actor_id, actor_kind, tenant_id, environment,
                      action, target_type, target_id, reason, result)
                 VALUES
-                    (now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
-                     'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded');
+                    (ev.chain_id, now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
+                     'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded')
+                RETURNING id INTO scrub_id;
+                PERFORM set_config('admin_core.scrub', scrub_id::text, true);
+                UPDATE audit_event
+                   SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
+                 WHERE id = p_event_id;
+                PERFORM set_config('admin_core.scrub', '', true);
             END;
             $$;
 
@@ -746,14 +762,31 @@ return new class extends Migration
 
             CREATE OR REPLACE FUNCTION audit_event_guard_update()
             RETURNS trigger AS $$
+            DECLARE
+                scrub_event text := current_setting('admin_core.scrub', true);
             BEGIN
-                IF current_setting('admin_core.scrub', true) IS DISTINCT FROM 'on' THEN
+                IF scrub_event IS NULL OR scrub_event !~ '^[0-9]{1,18}$' THEN
                     RAISE EXCEPTION 'audit_event is append-only; UPDATE is not permitted (scrub payloads with scrub_audit_payload)';
                 END IF;
                 IF NEW.before_state IS NOT NULL OR NEW.after_state IS NOT NULL
                    OR (to_jsonb(NEW) - 'before_state' - 'after_state' - 'redaction_policy')
                       IS DISTINCT FROM (to_jsonb(OLD) - 'before_state' - 'after_state' - 'redaction_policy') THEN
                     RAISE EXCEPTION 'audit_event scrub may only drop before_state / after_state and set redaction_policy';
+                END IF;
+                IF OLD.before_state IS NULL AND OLD.after_state IS NULL THEN
+                    RAISE EXCEPTION 'audit_event % has no payload left to scrub', OLD.id;
+                END IF;
+                IF NEW.redaction_policy IN ('', 'none') THEN
+                    RAISE EXCEPTION 'audit_event scrub needs a named redaction policy';
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM audit_event s
+                     WHERE s.id = scrub_event::bigint
+                       AND s.action = 'audit.scrub_payload'
+                       AND s.target_type = 'audit_event'
+                       AND s.target_id = OLD.id::text
+                ) THEN
+                    RAISE EXCEPTION 'audit_event %: a payload drop must name this row''s audit.scrub_payload event (use scrub_audit_payload)', OLD.id;
                 END IF;
                 RETURN NEW;
             END;

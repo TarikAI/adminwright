@@ -222,8 +222,8 @@ schema pins it (`audit_event_hash_input()`, the `audit_event_chain_link` trigger
 - **`chain_seq`**: last + 1 under a per-`chain_id` advisory lock: gap-free, and inserts in one
   chain serialize (shard by tenant, region or day if write throughput matters, and verify per
   chain). Writers omit `chain_seq`, `prev_hash` and `row_hash`.
-- **Verifier**: `verify_audit_chain([chain_id])` recomputes every row and lists gaps, broken links,
-  edited rows and payload-hash mismatches; empty means internally consistent.
+- **Verifier**: `verify_audit_chain([chain_id])` lists gaps, broken links, edited rows, hash
+  mismatches and payloads dropped without an `audit.scrub_payload` event; empty means consistent.
 
 It proves, given an independently held anchor:
 
@@ -395,7 +395,7 @@ operator search belongs on the domain tables, not on `audit_event`.
 
 | Table | Immutable after write | Permitted later change |
 |---|---|---|
-| `audit_event` | Every column | Payload drop via `scrub_audit_payload()` only, itself audited, hashes retained |
+| `audit_event` | Every column | One payload drop, named by the `audit.scrub_payload` event `scrub_audit_payload()` writes first; hashes kept |
 | `admin_job` | `input_summary`, `input_hash`, `initiated_by` | State, progress, result |
 | `approval_request` | Every other column, including `payload`, `payload_hash`, `requested_by`, `command_key` | `state`, `executed_at`, `execution_result` |
 | `approval_decision` | Whole row | None; a reversal is a new request |

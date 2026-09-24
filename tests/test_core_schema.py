@@ -1215,6 +1215,20 @@ class TestCanonicalIsSelfConsistent(unittest.TestCase):
         self.assertIn("NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL", link)
         self.assertIn("NEW.redaction_policy := 'none'", link)
 
+    def test_scrub_guard_needs_the_rows_scrub_event(self):
+        # audit finding 5.11 (round 2): the guard trusted a user-settable flag, so any role with
+        # UPDATE could drop payloads with no audit record. It must look the named event up.
+        sql = read("postgres.sql")
+        guard = sql[sql.index("FUNCTION admin_core.audit_event_guard_update"):]
+        guard = guard[: guard.index("$$ LANGUAGE plpgsql")]
+        self.assertNotIn("IS DISTINCT FROM 'on'", guard)
+        self.assertIn("s.action = 'audit.scrub_payload'", guard)
+        self.assertIn("s.target_id = OLD.id::text", guard)
+        scrub = sql[sql.index("FUNCTION admin_core.scrub_audit_payload"):]
+        scrub = scrub[: scrub.index("\n$$;")]
+        self.assertLess(scrub.index("'audit.scrub_payload'"), scrub.index("UPDATE admin_core.audit_event"),
+                        "scrub_audit_payload must record its event before it drops the payload")
+
     def test_approval_requests_stay_as_written(self):
         # round-2 finding: rewriting requested_by got a requester past the SoD trigger, and the
         # doc listed columns as immutable that nothing enforced. Only the lifecycle may change.

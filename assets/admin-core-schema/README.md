@@ -67,8 +67,11 @@ tables land in `public`, to match project convention (then pass `-v schema=publi
 The database owns the audit hash chain: leave `chain_seq`, `prev_hash`, `row_hash` and the
 payload hashes out of your `INSERT`s and read the doc's hash-chain section for the encoding.
 `SELECT * FROM admin_core.verify_audit_chain()` returns one row per problem and nothing when
-the stored chain is consistent; `admin_core.scrub_audit_payload(...)` is the only way to drop
-an audit payload.
+the stored chain is consistent. Drop an audit payload with `admin_core.scrub_audit_payload(...)`:
+it writes an `audit.scrub_payload` event first and then drops the payload, once. The update
+trigger refuses any payload drop that does not name such an event for that row, so setting the
+`admin_core.scrub` flag yourself is not enough, and `verify_audit_chain()` reports a payload
+that disappeared without one (for example with the trigger disabled).
 
 ## Adapting it
 
@@ -113,7 +116,8 @@ database regardless of which stack owns the migrations:
    and other services.
 2. **The hash chain and payload scrub**: the `BEFORE INSERT` trigger that assigns
    `chain_seq`, `prev_hash` and `row_hash`, `verify_audit_chain()`, and
-   `scrub_audit_payload()`, the single permitted `UPDATE`.
+   `scrub_audit_payload()`, the sanctioned `UPDATE` (the update trigger admits a payload drop
+   only when it names the `audit.scrub_payload` event recording it).
 3. **The separation-of-duties trigger** on `approval_decision`, and the trigger that keeps an
    `approval_request` as written (only `state`, `executed_at` and `execution_result` change),
    without which a requester re-attributes the request and approves it. Enforcing either only
@@ -179,7 +183,7 @@ END $f$;
 DO $verify$
 DECLARE
     alice bigint; bob bigint; carol bigint; ev1 bigint; ev2 bigint;
-    req bigint; role bigint; sess bigint; job bigint; dsr bigint; n bigint;
+    ev3 bigint; req bigint; role bigint; sess bigint; job bigint; dsr bigint; n bigint;
 BEGIN
     INSERT INTO admin_actor (auth_subject, display_name) VALUES ('verify-alice', 'Alice') RETURNING id INTO alice;
     INSERT INTO admin_actor (auth_subject, display_name) VALUES ('verify-bob', 'Bob') RETURNING id INTO bob;
@@ -223,20 +227,46 @@ BEGIN
     SELECT count(*) INTO n FROM audit_event WHERE chain_id = 'verify';
     IF n <> 2 THEN RAISE EXCEPTION 'VERIFY FAILED: a refused mutation changed the row count (%)', n USING ERRCODE = 'XX000'; END IF;
 
-    -- 3. the one permitted UPDATE: scrub the payload, keep the hashes and the chain.
+    -- 3. the sanctioned payload drop: scrub_audit_payload() records an audit.scrub_payload
+    --    event in the row's chain first; the hashes and the chain are kept.
     PERFORM scrub_audit_payload(ev1, 'pii-v1', 'retention window elapsed', alice);
     IF (SELECT before_state FROM audit_event WHERE id = ev1) IS NOT NULL
        OR (SELECT before_hash FROM audit_event WHERE id = ev1) IS NULL
-       OR NOT EXISTS (SELECT 1 FROM audit_event WHERE action = 'audit.scrub_payload' AND target_id = ev1::text)
+       OR (SELECT redaction_policy FROM audit_event WHERE id = ev1) <> 'pii-v1'
+       OR NOT EXISTS (SELECT 1 FROM audit_event WHERE chain_id = 'verify' AND action = 'audit.scrub_payload'
+                                                  AND target_id = ev1::text)
        OR EXISTS (SELECT 1 FROM verify_audit_chain('verify')) THEN
         RAISE EXCEPTION 'VERIFY FAILED: scrub dropped the hashes, broke the chain, or was not audited' USING ERRCODE = 'XX000';
     END IF;
     PERFORM pg_temp.expect_refused('direct payload UPDATE', 'UPDATE audit_event SET after_state = NULL WHERE id = ' || ev1, 'P0001');
+    PERFORM pg_temp.expect_refused('second scrub of one payload', format('SELECT scrub_audit_payload(%s, ''p2'', ''again'')', ev1), 'P0001');
+    -- Anyone can set the admin_core.scrub flag the function uses, so by itself it proves
+    -- nothing: a payload drop must name the audit.scrub_payload event of that very row.
+    INSERT INTO audit_event (chain_id, occurred_at, actor_id, environment, action, target_type,
+                             target_id, result, before_state)
+    VALUES ('verify', now(), alice, 'production', 'user.update', 'user', 'u2', 'succeeded', '{"email":"a@example.com"}')
+    RETURNING id INTO ev3;
+    PERFORM set_config('admin_core.scrub', 'on', true);
+    PERFORM pg_temp.expect_refused('GUC-only payload drop', 'UPDATE audit_event SET before_state = NULL, redaction_policy = ''silent'' WHERE id = ' || ev3, 'P0001');
+    PERFORM set_config('admin_core.scrub', (SELECT max(id) FROM audit_event WHERE action = 'audit.scrub_payload'
+                                                                             AND target_id = ev1::text)::text, true);
+    PERFORM pg_temp.expect_refused('payload drop under another row''s scrub event', 'UPDATE audit_event SET before_state = NULL, redaction_policy = ''silent'' WHERE id = ' || ev3, 'P0001');
+    PERFORM set_config('admin_core.scrub', '', true);
+    IF (SELECT before_state FROM audit_event WHERE id = ev3) IS NULL THEN
+        RAISE EXCEPTION 'VERIFY FAILED: a refused payload drop still dropped the payload' USING ERRCODE = 'XX000';
+    END IF;
 
-    -- 4. tampering by someone who can disable the trigger is detected by the verifier.
+    -- 4. tampering by someone who can disable the trigger is detected by the verifier:
+    --    an edited row, and a payload dropped with no audit.scrub_payload event.
     ALTER TABLE audit_event DISABLE TRIGGER audit_event_no_update;
     UPDATE audit_event SET action = 'tampered' WHERE id = ev2;
+    UPDATE audit_event SET before_state = NULL WHERE id = ev3;
     ALTER TABLE audit_event ENABLE TRIGGER audit_event_no_update;
+    IF NOT EXISTS (SELECT 1 FROM verify_audit_chain('verify') v
+                    WHERE v.problem LIKE 'payload dropped%'
+                      AND v.chain_seq = (SELECT e.chain_seq FROM audit_event e WHERE e.id = ev3)) THEN
+        RAISE EXCEPTION 'VERIFY FAILED: verify_audit_chain missed a payload dropped without a scrub event' USING ERRCODE = 'XX000';
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM verify_audit_chain('verify') WHERE problem LIKE 'row_hash%') THEN
         RAISE EXCEPTION 'VERIFY FAILED: verify_audit_chain missed an edited row' USING ERRCODE = 'XX000';
     END IF;

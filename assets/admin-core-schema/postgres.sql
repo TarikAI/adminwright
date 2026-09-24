@@ -604,6 +604,9 @@ CREATE TRIGGER audit_event_chain_link
 -- starts above chain_seq 1 (earlier segments archived) is checked from its first
 -- row; link it to the archived tail hash separately. Compare the newest row_hash
 -- with the externally anchored head to detect truncation or a rewritten chain.
+-- A payload hash whose payload is gone means the payload was dropped after the
+-- insert (inserts never keep one): that is reported unless an audit.scrub_payload
+-- event names the row, which catches a drop made with the update trigger disabled.
 CREATE OR REPLACE FUNCTION admin_core.verify_audit_chain(p_chain_id text DEFAULT NULL)
 RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
 LANGUAGE plpgsql STABLE AS $$
@@ -649,23 +652,37 @@ BEGIN
             problem := 'after_hash does not match after_state';
             RETURN NEXT;
         END IF;
+        IF ((r.before_state IS NULL AND r.before_hash IS NOT NULL)
+            OR (r.after_state IS NULL AND r.after_hash IS NOT NULL))
+           AND NOT EXISTS (
+               SELECT 1 FROM admin_core.audit_event s
+                WHERE s.target_type = 'audit_event' AND s.target_id = r.id::text
+                  AND s.action = 'audit.scrub_payload') THEN
+            problem := 'payload dropped without an audit.scrub_payload event';
+            RETURN NEXT;
+        END IF;
         prev_seq := r.chain_seq;
         prev_hash := r.row_hash;
     END LOOP;
 END;
 $$;
 
--- The single permitted UPDATE of an audit_event: drop the payload and name the
--- redaction policy. Hashes, and therefore the chain, are untouched. Runs as the
--- function owner so the application role needs no UPDATE grant; the scrub is
--- itself recorded as an audit_event. Register 'audit.scrub_payload' as a
--- permission and grant EXECUTE only to the role that may redact.
+-- The sanctioned UPDATE of an audit_event: drop the payload, once, and name the
+-- redaction policy. Hashes, and therefore the chain, are untouched. The scrub is
+-- recorded FIRST, as an audit.scrub_payload event in the row's own chain, and the
+-- UPDATE then runs with admin_core.scrub set to that event's id: the update guard
+-- below accepts a payload drop only when that setting names such an event for the
+-- row, so no payload leaves without its own audit record, whoever issues the UPDATE.
+-- Runs as the function owner so the application role needs no UPDATE grant
+-- (grants.sql). Register 'audit.scrub_payload' as a permission and grant EXECUTE only
+-- to the role that may redact.
 CREATE OR REPLACE FUNCTION admin_core.scrub_audit_payload(
     p_event_id bigint, p_policy text, p_reason text, p_actor_id bigint DEFAULT NULL)
 RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = admin_core, pg_temp AS $$
 DECLARE
-    ev admin_core.audit_event%ROWTYPE;
+    ev       admin_core.audit_event%ROWTYPE;
+    scrub_id bigint;
 BEGIN
     IF p_policy IS NULL OR p_policy IN ('', 'none') THEN
         RAISE EXCEPTION 'scrub_audit_payload needs a named redaction policy';
@@ -673,22 +690,26 @@ BEGIN
     IF p_reason IS NULL OR btrim(p_reason) = '' THEN
         RAISE EXCEPTION 'scrub_audit_payload needs a reason';
     END IF;
-    PERFORM set_config('admin_core.scrub', 'on', true);
-    UPDATE admin_core.audit_event
-       SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
-     WHERE id = p_event_id
-    RETURNING * INTO ev;
+    SELECT * INTO ev FROM admin_core.audit_event WHERE id = p_event_id FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'audit_event % does not exist', p_event_id;
     END IF;
-    PERFORM set_config('admin_core.scrub', 'off', true);
+    IF ev.before_state IS NULL AND ev.after_state IS NULL THEN
+        RAISE EXCEPTION 'audit_event % has no payload to scrub', p_event_id;
+    END IF;
     -- actor_kind is 'system': the database performed the write; actor_id is who asked.
     INSERT INTO admin_core.audit_event
-        (occurred_at, actor_id, actor_kind, tenant_id, environment,
+        (chain_id, occurred_at, actor_id, actor_kind, tenant_id, environment,
          action, target_type, target_id, reason, result)
     VALUES
-        (now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
-         'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded');
+        (ev.chain_id, now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
+         'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded')
+    RETURNING id INTO scrub_id;
+    PERFORM set_config('admin_core.scrub', scrub_id::text, true);
+    UPDATE admin_core.audit_event
+       SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
+     WHERE id = p_event_id;
+    PERFORM set_config('admin_core.scrub', '', true);
 END;
 $$;
 
@@ -741,18 +762,40 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- UPDATE of audit_event is refused except inside scrub_audit_payload, and even
--- there nothing the row hash covers may change.
+-- UPDATE of audit_event is refused unless it drops a payload that is still there,
+-- names a redaction policy, changes nothing the row hash covers, and runs with
+-- admin_core.scrub naming the audit.scrub_payload event that records the drop of
+-- this row, as scrub_audit_payload does. Any session can set admin_core.scrub, so
+-- it is only a pointer: it must point at such an event, and writing one is itself
+-- the audit record. A session that sets it to 'on', or at another row's event, is
+-- refused.
 CREATE OR REPLACE FUNCTION admin_core.audit_event_guard_update()
 RETURNS trigger AS $$
+DECLARE
+    scrub_event text := current_setting('admin_core.scrub', true);
 BEGIN
-    IF current_setting('admin_core.scrub', true) IS DISTINCT FROM 'on' THEN
+    IF scrub_event IS NULL OR scrub_event !~ '^[0-9]{1,18}$' THEN
         RAISE EXCEPTION 'audit_event is append-only; UPDATE is not permitted (scrub payloads with scrub_audit_payload)';
     END IF;
     IF NEW.before_state IS NOT NULL OR NEW.after_state IS NOT NULL
        OR (to_jsonb(NEW) - 'before_state' - 'after_state' - 'redaction_policy')
           IS DISTINCT FROM (to_jsonb(OLD) - 'before_state' - 'after_state' - 'redaction_policy') THEN
         RAISE EXCEPTION 'audit_event scrub may only drop before_state / after_state and set redaction_policy';
+    END IF;
+    IF OLD.before_state IS NULL AND OLD.after_state IS NULL THEN
+        RAISE EXCEPTION 'audit_event % has no payload left to scrub', OLD.id;
+    END IF;
+    IF NEW.redaction_policy IN ('', 'none') THEN
+        RAISE EXCEPTION 'audit_event scrub needs a named redaction policy';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM admin_core.audit_event s
+         WHERE s.id = scrub_event::bigint
+           AND s.action = 'audit.scrub_payload'
+           AND s.target_type = 'audit_event'
+           AND s.target_id = OLD.id::text
+    ) THEN
+        RAISE EXCEPTION 'audit_event %: a payload drop must name this row''s audit.scrub_payload event (use scrub_audit_payload)', OLD.id;
     END IF;
     RETURN NEW;
 END;
