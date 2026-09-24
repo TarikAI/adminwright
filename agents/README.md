@@ -61,7 +61,7 @@ python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <pr
 | `opencode` | `.opencode/agents/<name>.md` | — | Frontmatter is rebuilt as `description` + `mode: subagent` |
 | `codex` | `.codex/agents/<name>.toml` | `.adminwright/agents/` | TOML with `name`, `description`, `developer_instructions`. Prints a pointer block for `AGENTS.md`; add `--append-pointer` to write it |
 | `antigravity` | `.agents/agents/<name>/agent.md` | `.adminwright/agents/` | Frontmatter `name` + `description`. Pointer block for `AGENTS.md`, same flag |
-| `gemini` | `.gemini/agents/<name>.md` | `.adminwright/agents/` | Frontmatter `name` + `description`. Pointer block for `GEMINI.md`, same flag |
+| `gemini` | `.gemini/agents/<name>.md` | `.adminwright/agents/` | Frontmatter `name` + `description`, plus `max_turns: 200` and `timeout_mins: 120`: Gemini CLI's defaults (30 turns, 10 minutes) stop a pass partway. Pointer block for `GEMINI.md`, same flag |
 | `cursor` | `.cursor/agents/<name>.md` | `.adminwright/agents/`, `.cursor/rules/adminwright.mdc` | The `.mdc` is a project rule, always applied |
 | `pi` | none — Pi has no built-in subagents | `.adminwright/agents/` | Pointer block for `AGENTS.md`, same flag |
 | `generic` | none | `.adminwright/agents/` | Any other harness: point it at the files, in the printed order |

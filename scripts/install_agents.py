@@ -23,7 +23,7 @@ copy and the pointer block; no location is invented for it.
                   + .adminwright/agents/ + pointer block for AGENTS.md
     antigravity   .agents/agents/<name>/agent.md       name, description
                   + .adminwright/agents/ + pointer block for AGENTS.md
-    gemini        .gemini/agents/<name>.md             name, description
+    gemini        .gemini/agents/<name>.md             name, description, max_turns, timeout_mins
                   + .adminwright/agents/ + pointer block for GEMINI.md
     cursor        .cursor/agents/<name>.md             name, description
                   + .adminwright/agents/ + rule .cursor/rules/adminwright.mdc
@@ -142,9 +142,10 @@ HARNESSES = {
     # Custom subagents are Markdown in .gemini/agents/ (project) or
     # ~/.gemini/agents/; `name` (lowercase slug) and `description` are required,
     # an omitted `tools` inherits the parent's, and the frontmatter schema is
-    # strict (an unknown key fails the load). The body is the system prompt and
-    # is templated (see GEMINI_TEMPLATE). GEMINI.md is the default context file;
-    # AGENTS.md is read only if context.fileName lists it.
+    # strict (an unknown key fails the load). `max_turns` and `timeout_mins`
+    # default to 30 and 10 (see GEMINI_RUN_LIMITS). The body is the system prompt
+    # and is templated (see GEMINI_TEMPLATE). GEMINI.md is the default context
+    # file; AGENTS.md is read only if context.fileName lists it.
     "gemini": Harness(
         ".gemini/agents", "gemini", "GEMINI.md", True,
         ("https://geminicli.com/docs/core/subagents/",
@@ -206,6 +207,12 @@ NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 # `query`.
 GEMINI_TEMPLATE = re.compile(r"\$\{(\w+)\}")
 GEMINI_INPUTS = frozenset(("query",))
+# Gemini CLI stops a subagent after 30 turns or 10 minutes unless its
+# frontmatter says otherwise, which cuts an architect's discovery or an
+# implementer's slice short. Both keys take any positive integer; at the limit
+# the subagent gets one grace turn to report. 200 turns of model and tool time
+# (builds, tests) fit well inside 120 minutes, so the turn limit binds first.
+GEMINI_RUN_LIMITS = (("max_turns", "200"), ("timeout_mins", "120"))
 
 
 class InstallError(Exception):
@@ -378,9 +385,12 @@ def render_native(native_format, agent):
     if native_format == "opencode":
         return agent.name + ".md", markdown_agent(
             [("description", quote(agent.description)), ("mode", "subagent")], agent.body)
-    if native_format in ("gemini", "cursor"):
-        if native_format == "gemini":
-            check_gemini_body(agent)
+    if native_format == "gemini":
+        check_gemini_body(agent)
+        return agent.name + ".md", markdown_agent(
+            [("name", agent.name), ("description", quote(agent.description))]
+            + list(GEMINI_RUN_LIMITS), agent.body)
+    if native_format == "cursor":
         return agent.name + ".md", markdown_agent(
             [("name", agent.name), ("description", quote(agent.description))], agent.body)
     if native_format == "antigravity":

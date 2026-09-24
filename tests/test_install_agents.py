@@ -503,6 +503,20 @@ class TestNativeFiles(InstallBase):
         self.assertIn("adminwright-qa.md", err)
         self.assertNotIn("Traceback", err)
 
+    def test_gemini_subagents_get_run_limits_that_fit_a_pass(self):
+        # Gemini CLI stops a subagent after 30 turns or 10 minutes by default,
+        # which truncates an architect or implementer pass; its frontmatter schema
+        # is strict, so only keys it defines may be written.
+        self.install("gemini")
+        schema = {"kind", "name", "description", "display_name", "tools", "mcp_servers",
+                  "model", "temperature", "max_turns", "timeout_mins"}
+        for name in ia.AGENT_ORDER:
+            fields = frontmatter_of((self.project / ".gemini" / "agents" / (name + ".md"))
+                                    .read_text(encoding="utf-8"))
+            self.assertLessEqual(set(fields), schema, name)
+            self.assertGreaterEqual(int(fields["max_turns"]), 100, name)
+            self.assertGreaterEqual(int(fields["timeout_mins"]), 60, name)
+
     def test_gemini_subagent_bodies_hold_no_template_placeholders(self):
         # Gemini CLI runs a subagent's system prompt through templateString, which
         # throws on any ${name} it has no input for; the subagent then fails at
