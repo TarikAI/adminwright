@@ -32,6 +32,8 @@ TEST_PINNED = {
     "profile-decision-missing": "tests/test_round2_rules.py",
     "profile-below-regulated-data": "tests/test_round2_rules.py",
     "project-root-outside": "tests/test_round2_rules.py",
+    # A transition, not a state: only the write guard sees the before and after.
+    "review-transition": "tests/test_review_integrity.py",
 }
 
 

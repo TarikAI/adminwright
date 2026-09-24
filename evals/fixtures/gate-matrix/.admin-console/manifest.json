@@ -663,7 +663,7 @@
     {
       "id": "gap.critical",
       "severity": "critical",
-      "description": "An open critical defect",
+      "description": "An open critical defect in gamma.view.",
       "status": "open",
       "rationale": "",
       "evidence": []

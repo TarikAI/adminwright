@@ -631,8 +631,8 @@ def build_matrix():
         {"topic": "Framework auth", "url": "https://example.test/auth", "appliedTo": []},   # research-source-incomplete
     ]
     m["gaps"] = [
-        {"id": "gap.critical", "severity": "critical", "description": "An open critical defect",
-         "status": "open", "rationale": "", "evidence": []},                    # gap-unresolved
+        {"id": "gap.critical", "severity": "critical", "description": "An open critical defect in gamma.view.",
+         "status": "open", "rationale": "", "evidence": []},                    # gap-unresolved, reviewed-with-blocking-gap
         {"id": "gap.accepted", "severity": "low", "description": "Accepted without saying why",
          "status": "accepted", "rationale": "", "evidence": []},                # gap-rationale-missing
     ]

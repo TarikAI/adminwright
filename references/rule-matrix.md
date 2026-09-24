@@ -22,7 +22,7 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `capability-screen-link`* | error | error | error |
 | `capability-unreviewed`* | warn | warn | error |
 | `contest-self-cleared` | warn | warn | error |
-| `contested-needs-gap` | warn | error | error |
+| `contested-needs-gap` | error | error | error |
 | `crosscutting-evidence` | warn | error | error |
 | `crosscutting-flag` | error | error | error |
 | `crosscutting-section-missing` | error | error | error |
@@ -83,6 +83,8 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `required-field-empty` | error | error | error |
 | `research-source-incomplete` | warn | error | error |
 | `research-sources-missing`* | warn | error | error |
+| `review-transition` | error | error | error |
+| `reviewed-with-blocking-gap` | error | error | error |
 | `reviewer-identity` | warn | warn | error |
 | `role-unused`* | warn | error | error |
 | `screen-accessibility` | error | error | error |

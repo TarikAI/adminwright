@@ -6,7 +6,7 @@
 Standard library only. Runs on Windows and POSIX.
 
 Commands: init, migrate, validate, report, coverage, emit, add, set, remove, rename,
-claim, release-claim, harvest, promote, store, lesson.
+claim, release-claim, review-scope, harvest, promote, store, lesson.
 
 Exit codes: 0 ok, 1 findings at error severity, 2 usage or IO failure,
 3 capability claim conflict.
@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import errno
+import fnmatch
 import hashlib
 import json
 import os
@@ -350,7 +351,7 @@ RULES = {
     "not-applicable-undecided": STRICT_ONLY,
     # The write guard refuses `contested` without its gap at standard and above,
     # which is what the agents' contest protocol says happens.
-    "contested-needs-gap": QUALITY,
+    "contested-needs-gap": E3,
     "contest-self-cleared": LATE,
     # round 2: monorepo and headless layouts
     "project-root-outside": E3,
@@ -363,6 +364,8 @@ RULES = {
     # round 2: evidence is the output of a run
     "evidence-not-output": QUALITY,
     "domain-term-unbacked": E3,
+    "reviewed-with-blocking-gap": E3,
+    "review-transition": E3,
 }
 
 # Rules that describe an UNFINISHED model rather than a malformed one.
@@ -2836,6 +2839,17 @@ def validate_entities(manifest, findings, release, role_ids):
                 + "' (its `capability` field, or its id in the description), so the implementer "
                 "knows what to fix; file the gap first, then contest",
             )
+        blocking = blocking_gap_for(manifest, cid) if capability.get("reviewStatus") == "reviewed" else ""
+        if blocking:
+            # A review verdict and an open blocking finding cannot both stand. Filing
+            # the gap is never refused for this (see VERDICT_FIELD_RULES); the reviewer
+            # moves the capability to contested.
+            findings.add(
+                "reviewed-with-blocking-gap",
+                path + ".reviewStatus",
+                "is 'reviewed' while gap '" + blocking + "' (critical or high, not yet fixed) "
+                "targets '" + cid + "'; set it to 'contested' until an implementer fixes the gap",
+            )
         contester = text_of(capability.get("contestedBy"))
         if (
             capability.get("reviewStatus") == "reviewed"
@@ -3281,6 +3295,33 @@ def validate_agents(manifest, findings):
             findings.add("unknown-capability-reference", path + ".ownsScreens", "unknown screens: " + ", ".join(unknown_screens))
 
 
+def names_capability(text, capability_id):
+    """Whether free text names this capability id as a whole id.
+
+    `user.list` is not named by `user.list.bulk` or `admin.user.list`; a sentence
+    that ends "... in user.list." still names it.
+    """
+    if not capability_id:
+        return False
+    return re.search(
+        r"(?<![\w.-])" + re.escape(capability_id.lower()) + r"(?![\w-]|\.\w)", text.lower()
+    ) is not None
+
+
+def blocking_gap_for(manifest, capability_id):
+    """The id of an open or blocked critical/high gap that targets this capability, or ''."""
+    if not capability_id:
+        return ""
+    for _path, gap in iter_named(manifest, "gaps"):
+        if gap.get("status") not in ("open", "blocked") or gap.get("severity") not in ("critical", "high"):
+            continue
+        if text_of(gap.get("capability")) == capability_id or names_capability(
+            text_of(gap.get("description")) + " " + text_of(gap.get("rationale")), capability_id
+        ):
+            return text_of(gap.get("id")) or "(a gap with no id)"
+    return ""
+
+
 def contested_gap_exists(manifest, capability_id):
     """An open or blocked gap that names the capability a reviewer contested."""
     for _path, gap in iter_named(manifest, "gaps"):
@@ -3288,9 +3329,7 @@ def contested_gap_exists(manifest, capability_id):
             continue
         if text_of(gap.get("capability")) == capability_id:
             return True
-        if capability_id and capability_id in (
-            text_of(gap.get("description")) + " " + text_of(gap.get("rationale"))
-        ):
+        if names_capability(text_of(gap.get("description")) + " " + text_of(gap.get("rationale")), capability_id):
             return True
     return False
 
@@ -4392,6 +4431,56 @@ def parse_json_entries(raw):
     raise ManifestError("--json must be a JSON object or a non-empty array of objects")
 
 
+# Rules that judge one field against other objects. Only the write that changed the
+# field is refused; a write elsewhere that exposes the contradiction -- a reviewer
+# filing a gap against a reviewed capability, an implementer marking a contest's gap
+# fixed, the OCR bridge's all-or-nothing gap batch -- is told about it instead,
+# or the finder could never file its finding and the fixer never record its fix.
+VERDICT_FIELD_RULES = frozenset(("reviewed-with-blocking-gap", "contested-needs-gap"))
+_UNRESOLVED = object()
+
+
+def value_at(manifest, path):
+    """The value a finding path names, or a sentinel when it does not resolve."""
+    try:
+        container, key = resolve_path_parent(manifest, parse_path_expression(path))
+    except ManifestError:
+        return _UNRESOLVED
+    if isinstance(container, list):
+        return container[key]
+    return container.get(key, _UNRESOLVED)
+
+
+def review_transitions(before, after, profile):
+    """reviewStatus moves that no single manifest state can show.
+
+    `contested` -> `reviewed` skips the implementer's fix: the contest's gap may have
+    been low severity (so reviewed-with-blocking-gap does not fire), and the flip
+    erases the only record that the capability was ever disputed.
+    """
+    severity = RULES["review-transition"][PROFILES.index(profile) if profile in PROFILES else 1]
+    if severity != ERROR:
+        return []
+    was = {}
+    for _path, _entity, capability in iter_capabilities(before):
+        cid = text_of(capability.get("id"))
+        if cid:
+            was[cid] = capability.get("reviewStatus")
+    refused = []
+    for path, _entity, capability in iter_capabilities(after):
+        cid = text_of(capability.get("id"))
+        if capability.get("reviewStatus") == "reviewed" and was.get(cid) == "contested":
+            refused.append({
+                "rule": "review-transition",
+                "severity": ERROR,
+                "path": path + ".reviewStatus",
+                "message": "'contested' cannot become 'reviewed' directly: the implementer fixes the "
+                "paired gap and returns the capability to 'unreviewed', then a reviewer other than "
+                "the one who contested it reviews it again",
+            })
+    return refused
+
+
 def new_findings(before, after, project_root, manifest_dir, renamed=None):
     """Errors and warnings an edit introduced, judged at plan phase.
 
@@ -4422,8 +4511,15 @@ def new_findings(before, after, project_root, manifest_dir, renamed=None):
         key = (item["rule"], item["path"], item["message"])
         if known[key] > 0:
             known[key] -= 1
+        elif (
+            item["severity"] == ERROR
+            and item["rule"] in VERDICT_FIELD_RULES
+            and value_at(before, item["path"]) == value_at(after, item["path"])
+        ):
+            fresh.append(dict(item, severity=WARN))
         else:
             fresh.append(item)
+    fresh.extend(review_transitions(before, after, profile))
     return (
         [i for i in fresh if i["severity"] == ERROR],
         # Completeness rules describe an unfinished model, which every incremental
@@ -6295,6 +6391,187 @@ def cmd_release_claim(args):
     return 3 if (skipped or not_held) else 0
 
 
+# `emit --format gap-report` writes here; reviewers publish their reports this way.
+REPORT_PATH_PATTERN = re.compile(r"(?:^|/)docs/admin-[\w.-]+\.md$")
+
+
+def git_text(cwd, *args):
+    try:
+        done = subprocess.run(["git", "-C", str(cwd)] + list(args), capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ManifestError("review-scope needs git: " + str(exc))
+    if done.returncode != 0:
+        raise ManifestError(
+            "`git " + " ".join(args) + "` failed: " + done.stderr.decode("utf-8", "replace").strip()
+        )
+    return done.stdout.decode("utf-8", "replace")
+
+
+def git_paths(cwd, *args):
+    """NUL-separated path output: no quoting of non-ASCII names, no newline ambiguity."""
+    return {entry.replace("\\", "/") for entry in git_text(cwd, *args).split("\0") if entry}
+
+
+def working_hash(candidate):
+    try:
+        return hashlib.sha256(candidate.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def cited_evidence_files(manifest, project_root):
+    """Normalised absolute paths of every file the manifest cites as evidence."""
+    cited = set()
+
+    def take(values):
+        for value in str_items(values):
+            if evidence_kind(value) != "path":
+                continue
+            candidate = evidence_path(value, project_root)
+            if candidate is not None:
+                try:
+                    cited.add(os.path.normcase(str(candidate.resolve())))
+                except OSError:
+                    pass
+
+    for _path, gate in iter_named(manifest, "qualityGates"):
+        take(gate.get("evidence"))
+    for section in CROSS_SECTIONS:
+        take(as_dict(as_dict(manifest.get("crossCutting")).get(section)).get("evidence"))
+    for _path, _entity, capability in iter_capabilities(manifest):
+        take(capability.get("evidence"))
+    for key in ("gaps", "decisions", "declaredStatic"):
+        for _path, item in iter_named(manifest, key):
+            take(item.get("evidence"))
+    return cited
+
+
+def scope_baseline_path(manifest_path, agent_id):
+    return manifest_path.parent / "locks" / (re.sub(r"[^A-Za-z0-9._-]", "_", agent_id) + ".scope.json")
+
+
+def cmd_review_scope(args):
+    """Check from git what a reviewer pass changed, instead of trusting its report.
+
+    Tool restrictions are advisory in Claude Code and absent in other harnesses,
+    and a reviewer that "quickly fixes" what it reviews has reviewed nothing. A
+    reviewer may change the manifest and the tooling's working files, its own
+    worklog, files the manifest cites as evidence (logs, reports, screenshots --
+    never source or project configuration), `docs/admin-*.md` reports, and -- qa
+    only -- files that did not exist when the pass began, if they are tests.
+
+    `--start` at dispatch records what was already uncommitted, so another agent's
+    unfinished work is not blamed on the reviewer; `--base <commit>` compares with a
+    commit instead. Anything else the pass touched exits 1: it becomes a gap for an
+    implementer working under its own claim.
+    """
+    manifest_path = resolve_manifest_path(args.manifest)
+    manifest = load_json(manifest_path)
+    record = find_agent(manifest, args.agent)
+    role = text_of(record.get("role")) if record else (args.role or "")
+    if role not in REVIEWER_ROLES:
+        stderr(
+            "review-scope checks a reviewer pass; agent '" + args.agent + "' "
+            + ("has role '" + role + "'" if record else "is not in agents[]; pass --role")
+            + " (reviewer roles: " + ", ".join(REVIEWER_ROLES) + ")"
+        )
+        return 2
+    root = Path(args.project_root).resolve() if args.project_root else project_root_of(manifest_path, manifest)
+    top = Path(git_text(root, "rev-parse", "--show-toplevel").strip()).resolve()
+    untracked = git_paths(top, "ls-files", "--others", "--exclude-standard", "-z")
+    baseline_file = scope_baseline_path(manifest_path, args.agent)
+
+    if args.start:
+        head = git_text(top, "rev-parse", "HEAD").strip()
+        dirty = git_paths(top, "diff", "--name-only", "--no-renames", "-z", head, "--") | untracked
+        baseline = {"head": head, "paths": {rel: working_hash(top / rel) for rel in sorted(dirty)}}
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        write_json(baseline_file, baseline)
+        print("review-scope: recorded the starting point for " + args.agent + " at " + head[:12]
+              + " (" + str(len(dirty)) + " path(s) already uncommitted)")
+        return 0
+
+    if args.base:
+        try:
+            base = git_text(top, "rev-parse", "--verify", args.base + "^{commit}").strip()
+        except ManifestError:
+            raise ManifestError("--base '" + args.base + "' is not a commit in " + str(top))
+        before = {}
+    else:
+        if not baseline_file.is_file():
+            stderr(
+                "No starting point for '" + args.agent + "': run `review-scope --start` for it when "
+                "the pass is dispatched, or pass --base <commit the pass started from>."
+            )
+            return 2
+        try:
+            stored = json.loads(baseline_file.read_text(encoding="utf-8"))
+            base, before = stored["head"], dict(stored["paths"])
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            raise ManifestError("unreadable review-scope baseline " + str(baseline_file) + ": " + str(exc))
+    changed_since = git_paths(top, "diff", "--name-only", "--no-renames", "-z", base, "--") | untracked
+    added_since = git_paths(top, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", base, "--")
+    touched = []
+    for rel in sorted(changed_since | set(before)):
+        now = working_hash(top / rel)
+        if rel in before and before[rel] == now:
+            continue  # uncommitted before the pass began and not changed by it
+        touched.append(rel)
+    created = {rel for rel in (added_since | untracked) if before.get(rel) is None}
+
+    manifest_dir = manifest_path.parent.resolve()
+    own_worklogs = {
+        os.path.normcase(str(manifest_dir / folder / (args.agent + ".md"))) for folder in ("worklog", "worklogs")
+    }
+    evidence = cited_evidence_files(manifest, root)
+    violations = []
+    for rel in touched:
+        candidate = (top / rel).resolve()
+        key = os.path.normcase(str(candidate))
+        if any(fnmatch.fnmatchcase(rel, pattern.replace("\\", "/")) for pattern in args.ignore or ()):
+            continue
+        if candidate.parent.name in ("worklog", "worklogs") and candidate.parent.parent == manifest_dir:
+            if key not in own_worklogs:
+                violations.append(rel + "  (another agent's worklog)")
+            continue
+        if inside_manifest_dir(candidate, manifest_dir, manifest_path):
+            continue
+        if REPORT_PATH_PATTERN.search(rel):
+            continue
+        if (
+            key in evidence
+            and candidate.suffix.lower() not in SOURCE_SUFFIXES
+            and not non_evidence_reason(candidate, "gate")
+        ):
+            continue
+        if role == "qa" and rel in created:
+            body = read_head(candidate) if candidate.is_file() else ""
+            if looks_like_test_file(candidate, body) or TEST_DIR_PATTERN.search(rel):
+                continue
+        if role == "qa" and rel not in created and candidate.is_file() and looks_like_test_file(
+            candidate, read_head(candidate)
+        ):
+            violations.append(rel + "  (an existing test: qa adds tests, an implementer changes them)")
+            continue
+        violations.append(rel)
+    if violations:
+        stderr(
+            "review-scope: " + args.agent + " (" + role + ") changed " + str(len(violations))
+            + " file(s) a reviewer may not change since " + base[:12] + ":"
+        )
+        for line in violations:
+            stderr("  " + line)
+        stderr(
+            "A reviewer files a gap and an implementer makes the change under its own claim. "
+            "Revert these (or have an implementer adopt them), then file the gaps; if another "
+            "agent made them during this pass, re-run with --ignore <glob> for its paths."
+        )
+        return 1
+    print("review-scope: " + args.agent + " (" + role + ") touched " + str(len(touched))
+          + " path(s) since " + base[:12] + ", all within a reviewer's write surface")
+    return 0
+
+
 def feedback_content_hash(item):
     """Identity of what an agent actually wrote, so an edit is noticed."""
     basis = "|".join(
@@ -7045,6 +7322,26 @@ def build_parser():
     )
     claim_parser.add_argument("--reason", help="why the claim is being stolen (required with --force-steal)")
     claim_parser.set_defaults(func=cmd_claim)
+
+    scope_parser = subparsers.add_parser(
+        "review-scope",
+        help="Check from git that a reviewer pass changed only what a reviewer may change",
+        description=(
+            "Run with --start when a reviewer is dispatched, and again without it when the "
+            "pass returns; exit 1 lists every file the reviewer changed outside its write surface."
+        ),
+    )
+    scope_parser.add_argument("--manifest", required=True, help="path to manifest.json")
+    scope_parser.add_argument("--agent", required=True, help="the reviewer's agent id")
+    scope_parser.add_argument("--start", action="store_true",
+                              help="record the starting point (uncommitted work already present) at dispatch")
+    scope_parser.add_argument("--base", help="compare with this commit instead of a recorded --start")
+    scope_parser.add_argument("--role", choices=REVIEWER_ROLES,
+                              help="the pass's role when the agent is not in agents[] (single-agent runs)")
+    scope_parser.add_argument("--ignore", action="append", metavar="GLOB",
+                              help="repository-relative paths another agent changed during this pass")
+    scope_parser.add_argument("--project-root", help="defaults to the manifest's project root")
+    scope_parser.set_defaults(func=cmd_review_scope)
 
     release_parser = subparsers.add_parser("release-claim", help="Release capability ownership")
     release_parser.add_argument("--manifest", required=True, help="path to manifest.json")
