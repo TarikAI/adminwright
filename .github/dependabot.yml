@@ -1,11 +1,19 @@
 # Keep the first-party actions current. They are referenced by major-version tag
 # (actions/checkout@v4, ...) rather than by SHA, so a weekly update PR is what keeps
-# a compromised or yanked tag from sitting unnoticed. The one third-party action,
-# in ocr-advisory.yml, is pinned to a release SHA and bumped by hand together with
-# its `ocr_version`.
+# a compromised or yanked tag from sitting unnoticed.
+#
+# The one third-party action, alibaba/open-code-review in ocr-advisory.yml, is
+# ignored on purpose. It is pinned to a release SHA whose `ocr_version` input pins
+# the npm package the action installs, and the two must move together. Dependabot
+# rewrites a SHA pin and its version comment but not that input, so its PR would
+# leave the wrapper and the CLI on different releases. Bump both by hand (see
+# INTEGRATIONS.md "Advisory OCR review"); tests/test_code_review.py checks that they
+# agree, and that this ignore rule is still here.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      - dependency-name: "alibaba/open-code-review"

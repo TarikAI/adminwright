@@ -24,6 +24,7 @@ import codecs
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2078,6 +2079,74 @@ class BatchIoErrors(unittest.TestCase):
             with self.assertRaises(bridge.ReviewError) as caught:
                 self.persist()
         self.assertIn("disk full", str(caught.exception))
+
+
+GITHUB = SKILL_ROOT / ".github"
+
+
+class AdvisoryPins(unittest.TestCase):
+    """Audit 6.16: the pinned OCR action, the CLI version it installs, and CI agree.
+
+    The action SHA and its `ocr_version` input must move together. Dependabot
+    would move only the SHA, so it ignores the action, and this checks what a
+    hand bump must keep consistent. It also pins the secret scoping: only a
+    true/false is in the job env, and the token reaches the review step alone.
+    """
+
+    def text(self, *parts):
+        return GITHUB.joinpath(*parts).read_text(encoding="utf-8")
+
+    def pinned(self):
+        workflow = self.text("workflows", "ocr-advisory.yml")
+        match = re.search(
+            r"uses:\s*alibaba/open-code-review@([0-9a-f]{40})\s*#\s*v(\d+\.\d+\.\d+)", workflow
+        )
+        self.assertIsNotNone(match, "the action must be pinned to a full SHA with a '# vX.Y.Z' comment")
+        return workflow, match.group(2)
+
+    def test_the_action_sha_comment_and_ocr_version_name_the_same_release(self):
+        workflow, tag = self.pinned()
+        self.assertEqual(re.findall(r"ocr_version:\s*'([^']+)'", workflow), [tag])
+
+    def test_the_ci_smoke_runs_the_pinned_version(self):
+        _workflow, tag = self.pinned()
+        ci = self.text("workflows", "ci.yml")
+        smoke = ci[ci.index("\n  ocr-smoke:"):]
+        smoke = smoke[:smoke.index("\n  integrity:")]
+        self.assertIn(tag, smoke)
+
+    def test_dependabot_leaves_the_action_to_a_hand_bump(self):
+        self.assertRegex(self.text("dependabot.yml"), r'dependency-name:\s*"alibaba/open-code-review"')
+
+    def test_the_token_reaches_the_review_step_only(self):
+        workflow, _tag = self.pinned()
+        uses_of_secrets = [
+            line.strip() for line in workflow.splitlines()
+            if "secrets." in line and not line.strip().startswith("#")
+        ]
+        self.assertTrue(uses_of_secrets)
+        for line in uses_of_secrets:
+            self.assertTrue(line.startswith(("HAS_OCR:", "llm_url:", "llm_auth_token:")), line)
+        self.assertIn("llm_auth_token: ${{ secrets.OCR_LLM_TOKEN }}", workflow)
+        self.assertNotRegex(workflow, r"OCR_LLM_(TOKEN|URL):\s*\$\{\{\s*secrets\.")
+
+    def test_the_workflow_files_are_valid_yaml_with_that_shape(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML is not installed (CI installs it)")
+        for parts in (("workflows", "ocr-advisory.yml"), ("workflows", "ci.yml"), ("dependabot.yml",)):
+            self.assertIsInstance(yaml.safe_load(self.text(*parts)), dict, parts)
+        job = yaml.safe_load(self.text("workflows", "ocr-advisory.yml"))["jobs"]["ocr-advisory"]
+        self.assertEqual(sorted(job["env"]), ["HAS_OCR", "OCR_NO_UPDATE"])
+        review = [step for step in job["steps"] if "uses" in step][0]
+        self.assertEqual(review["if"], "${{ env.HAS_OCR == 'true' }}")
+        self.assertEqual(review["with"]["llm_auth_token"], "${{ secrets.OCR_LLM_TOKEN }}")
+        notice = [step for step in job["steps"] if "run" in step][0]
+        self.assertEqual(notice["if"], "${{ env.HAS_OCR != 'true' }}")
+        updates = yaml.safe_load(self.text("dependabot.yml"))["updates"]
+        actions = [entry for entry in updates if entry["package-ecosystem"] == "github-actions"][0]
+        self.assertIn({"dependency-name": "alibaba/open-code-review"}, actions["ignore"])
 
 
 @unittest.skipUnless(

@@ -348,10 +348,12 @@ bundle is yours alone.
 
 Pull requests to adminwright itself get a non-blocking OCR review via
 [.github/workflows/ocr-advisory.yml](.github/workflows/ocr-advisory.yml) — findings as
-PR comments, never a required check, skipped until the `OCR_LLM_URL`/`OCR_LLM_TOKEN`
-secrets exist (they are mapped into job `env`, because a job-level `if` cannot see the
-`secrets` context; the review step gates on `env`). The action is pinned to a release
-SHA, and its `ocr_version` input pins the npm package it installs to the same release
+PR comments, never a required check. The job always runs; its review step is skipped
+until the `OCR_LLM_URL`/`OCR_LLM_TOKEN` secrets exist. An `if` cannot read the `secrets`
+context, so the job `env` holds only `HAS_OCR`, a true/false derived from them, and the
+secret values are passed to the review step alone, in its `with:` (the composite action
+maps them into the environment of its own `ocr review` step only). The action is pinned to
+a release SHA, and its `ocr_version` input pins the npm package it installs to the same release
 (`1.9.6`), so the workflow no longer installs `latest` at run time; `OCR_NO_UPDATE=1` in
 the job environment stops the launcher's own background update, which would otherwise run
 `npm i -g` for the newest version even after this pin. Residual exposure, stated plainly:
@@ -361,5 +363,8 @@ binary comes from a per-platform optional package at the same version or, when t
 unavailable, from the release's GitHub assets checked against a checksum file published
 beside them (same origin: it detects corruption, not a compromised release); and the
 reviewed PR contents plus `OCR_LLM_TOKEN` are visible to that code and to the configured
-LLM endpoint. Bump the action SHA and `ocr_version` together, and read the release notes
-when you do. See [CONTRIBUTING.md](CONTRIBUTING.md) "Advisory OCR review".
+LLM endpoint. Bump the action SHA and `ocr_version` together, by hand, and read the release
+notes when you do: Dependabot ignores this action because it would move the SHA without the
+input, and `tests/test_code_review.py` (`AdvisoryPins`) fails when the SHA's version comment,
+`ocr_version` and the `ocr-smoke` CI pin disagree. See [CONTRIBUTING.md](CONTRIBUTING.md)
+"Advisory OCR review".

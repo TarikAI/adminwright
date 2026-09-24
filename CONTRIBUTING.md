@@ -86,8 +86,9 @@ reproduces it. See [SECURITY.md](SECURITY.md) for anything you would rather not 
 Pull requests get a non-blocking code review from
 [Alibaba Open Code Review](https://github.com/alibaba/open-code-review) via
 [ocr-advisory.yml](.github/workflows/ocr-advisory.yml). It posts findings as PR comments
-and never gates a merge; no step in it is a required check. The job is skipped entirely
-until the repository secrets exist:
+and never gates a merge; no step in it is a required check. The job always runs, but its
+review step is skipped (a notice step says so) until these repository secrets exist, and
+only that step receives them:
 
 - `OCR_LLM_URL` — an OpenAI-compatible endpoint URL (or an Anthropic one, with the repo
   variable `OCR_USE_ANTHROPIC=true`)
