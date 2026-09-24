@@ -504,6 +504,32 @@ class TestNativeFiles(InstallBase):
         self.assertIn("adminwright-qa.md", err)
         self.assertNotIn("Traceback", err)
 
+    def test_gemini_subagent_bodies_hold_no_template_placeholders(self):
+        # Gemini CLI runs a subagent's system prompt through templateString, which
+        # throws on any ${name} it has no input for; the subagent then fails at
+        # dispatch, long after the install reported success.
+        inside = make_skill(self.project / ".agents" / "skills" / "adminwright")
+        for skill in (None, inside):
+            with self.subTest(skill="outside" if skill is None else "inside"):
+                self.install("gemini", skill)
+                for path in (self.project / ".gemini" / "agents").glob("*.md"):
+                    body = path.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+                    self.assertEqual(ia.GEMINI_TEMPLATE.findall(body), [], path.name)
+
+    def test_a_body_gemini_would_fail_to_template_is_refused_for_gemini_only(self):
+        skill = make_tricky_skill(self.scratch())
+        qa = skill / "agents" / "adminwright-qa.md"
+        with open(str(qa), "a", encoding="utf-8", newline="\n") as handle:
+            handle.write("Keep state in ${ADMINWRIGHT_HOME}.\n")
+        code, _out, err = run("--harness", "gemini", "--project-root", self.project,
+                              "--skill-dir", skill)
+        self.assertEqual(code, 2)
+        self.assertIn("adminwright-qa.md", err)
+        self.assertIn("${ADMINWRIGHT_HOME}", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse((self.project / ".gemini").exists(), "nothing is written on refusal")
+        self.install("codex", skill)  # no template step there
+
 
 class TestPointerPaths(InstallBase):
     """The pointer never bakes a machine path into a committed file (6.18)."""

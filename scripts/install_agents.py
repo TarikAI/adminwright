@@ -190,6 +190,12 @@ AGENT_ORDER = (
 
 NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
+# Gemini CLI fills ${name} placeholders in a subagent's system prompt from its
+# inputs and fails the dispatch on any it lacks; a Markdown subagent has only
+# `query`.
+GEMINI_TEMPLATE = re.compile(r"\$\{(\w+)\}")
+GEMINI_INPUTS = frozenset(("query",))
+
 
 class InstallError(Exception):
     """A problem the user can act on; reported as ERROR: ..., exit 2."""
@@ -344,6 +350,16 @@ def markdown_agent(fields, body):
     return "---\n" + front + "---\n\n" + body
 
 
+def check_gemini_body(agent):
+    """Refuse a body Gemini CLI would fail to template at dispatch time."""
+    unknown = sorted(set(GEMINI_TEMPLATE.findall(agent.body)) - GEMINI_INPUTS)
+    if unknown:
+        raise InstallError(
+            agent.stem + ".md: Gemini CLI reads ${" + unknown[0] + "} in a subagent body as a "
+            "template input and refuses to start the subagent without it; write it another "
+            "way (for example $" + unknown[0] + " or <" + unknown[0] + ">) and rerun")
+
+
 def render_native(native_format, agent):
     """(path relative to the native directory, file text) for one agent."""
     if native_format == "claude":
@@ -352,6 +368,8 @@ def render_native(native_format, agent):
         return agent.name + ".md", markdown_agent(
             [("description", quote(agent.description)), ("mode", "subagent")], agent.body)
     if native_format in ("gemini", "cursor"):
+        if native_format == "gemini":
+            check_gemini_body(agent)
         return agent.name + ".md", markdown_agent(
             [("name", agent.name), ("description", quote(agent.description))], agent.body)
     if native_format == "antigravity":
