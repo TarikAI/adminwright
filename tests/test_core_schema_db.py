@@ -131,6 +131,21 @@ ROLLBACK;
         result = self.psql(db, "-f", script)
         self.assertIn("ok: denied", result.stderr + result.stdout)
 
+    def test_grants_sql_without_an_app_role_fails_loudly(self):
+        # A deploy script that forgets -v app_role must not report success with nothing granted,
+        # whether or not the caller passed -v ON_ERROR_STOP=1.
+        db = self.new_database()
+        for caller_flags in ([], ["-v", "ON_ERROR_STOP=1"]):
+            result = subprocess.run(
+                [PSQL, "-X", "-q", *caller_flags, "-d", db, "-f", str(SCHEMA / "grants.sql")],
+                capture_output=True, encoding="utf-8", errors="replace", timeout=300,
+            )
+            with self.subTest(caller_flags=caller_flags):
+                self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+                self.assertIn("pass -v app_role", result.stderr)
+        self.assertEqual(self.scalar(db, "SELECT relacl IS NULL FROM pg_class WHERE oid = 'admin_core.audit_event'::regclass"),
+                         "t")
+
     def test_concurrent_writers_produce_a_gap_free_chain(self):
         db = self.new_database()
         insert = ("INSERT INTO admin_core.audit_event (chain_id, occurred_at, environment, action, target_type, result) "
