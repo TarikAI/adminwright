@@ -50,6 +50,7 @@ class TestPrismaTranslationOnPostgres(PgCase):
             encoding="utf-8",
         )
         self.run_cmd(project, NPM, "init", "-y")
+        # Pinned to the major this was checked on (npm's `latest` tag already points at an 8.0 RC).
         self.run_cmd(project, NPM, "install", "--no-audit", "--no-fund", "prisma@7")
 
         validated = self.run_cmd(project, NPX, "prisma", "validate")  # audit 5.7

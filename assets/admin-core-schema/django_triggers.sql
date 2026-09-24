@@ -5,8 +5,9 @@
 -- django_models.py). Table and column names are the canonical ones (the models set
 -- db_column= wherever Django's default <field>_id would differ), and nothing is
 -- schema-qualified: the tables are assumed to be in the default (public) schema. If
--- yours are elsewhere, change the SET search_path line in scrub_audit_payload() and
--- qualify the table names in the functions.
+-- yours are elsewhere, change every SET search_path = public, pg_temp line to that
+-- schema. Keep pg_temp last: it is what stops a session's temporary table named
+-- approval_request or audit_event from standing in for the real one inside a trigger.
 --
 -- The statements below are copied verbatim from postgres.sql (schema qualifier
 -- removed) and tests/test_core_schema.py fails if the two drift apart.
@@ -14,14 +15,18 @@
 --   * audit_event_chain_link assigns chain_seq, prev_hash, the payload hashes and
 --     row_hash on INSERT; leave those columns out of your writes.
 --   * verify_audit_chain() re-computes the chain and lists problems.
---   * scrub_audit_payload() is the single permitted UPDATE of an audit_event.
+--   * scrub_audit_payload() is the sanctioned UPDATE of an audit_event: it records an
+--     audit.scrub_payload event first, and audit_event_guard_update refuses any payload
+--     drop that does not name such an event for the row.
 --   * audit_event and approval_decision reject UPDATE, DELETE and TRUNCATE.
 --   * approval_decision_sod rejects a requester approving their own request.
+--   * approval_request_immutable lets only state, executed_at and execution_result
+--     of an approval_request change, so it cannot be re-attributed or rewritten.
 --
 -- Then run grants.sql (psql) for the regulated profile.
 
 CREATE OR REPLACE FUNCTION enforce_separation_of_duties()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = public, pg_temp AS $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM approval_request r
@@ -37,6 +42,21 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER approval_decision_sod
     BEFORE INSERT ON approval_decision
     FOR EACH ROW EXECUTE FUNCTION enforce_separation_of_duties();
+
+CREATE OR REPLACE FUNCTION approval_request_guard_update()
+RETURNS trigger AS $$
+BEGIN
+    IF (to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
+       IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
+        RAISE EXCEPTION 'approval_request % is immutable except state, executed_at and execution_result', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER approval_request_immutable
+    BEFORE UPDATE ON approval_request
+    FOR EACH ROW EXECUTE FUNCTION approval_request_guard_update();
 
 CREATE OR REPLACE FUNCTION audit_event_hash_input(e audit_event)
 RETURNS text
@@ -56,7 +76,7 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION audit_event_chain_link()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = public, pg_temp AS $$
 DECLARE
     last_seq  bigint;
     last_hash text;
@@ -72,11 +92,12 @@ BEGIN
      LIMIT 1;
     NEW.chain_seq := COALESCE(last_seq, 0) + 1;
     NEW.prev_hash := last_hash;
-    IF NEW.before_state IS NOT NULL THEN
-        NEW.before_hash := encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex');
-    END IF;
-    IF NEW.after_state IS NOT NULL THEN
-        NEW.after_hash := encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex');
+    NEW.before_hash := CASE WHEN NEW.before_state IS NULL THEN NULL
+        ELSE encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex') END;
+    NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL
+        ELSE encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex') END;
+    IF NEW.before_state IS NULL AND NEW.after_state IS NULL THEN
+        NEW.redaction_policy := 'none';
     END IF;
     NEW.row_hash := encode(
         sha256(convert_to(audit_event_hash_input(NEW), 'UTF8')), 'hex');
@@ -90,7 +111,7 @@ CREATE TRIGGER audit_event_chain_link
 
 CREATE OR REPLACE FUNCTION verify_audit_chain(p_chain_id text DEFAULT NULL)
 RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
-LANGUAGE plpgsql STABLE AS $$
+LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $$
 DECLARE
     r         audit_event%ROWTYPE;
     cur_chain text;
@@ -133,6 +154,15 @@ BEGIN
             problem := 'after_hash does not match after_state';
             RETURN NEXT;
         END IF;
+        IF ((r.before_state IS NULL AND r.before_hash IS NOT NULL)
+            OR (r.after_state IS NULL AND r.after_hash IS NOT NULL))
+           AND NOT EXISTS (
+               SELECT 1 FROM audit_event s
+                WHERE s.target_type = 'audit_event' AND s.target_id = r.id::text
+                  AND s.action = 'audit.scrub_payload') THEN
+            problem := 'payload dropped without an audit.scrub_payload event';
+            RETURN NEXT;
+        END IF;
         prev_seq := r.chain_seq;
         prev_hash := r.row_hash;
     END LOOP;
@@ -144,7 +174,8 @@ CREATE OR REPLACE FUNCTION scrub_audit_payload(
 RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
-    ev audit_event%ROWTYPE;
+    ev       audit_event%ROWTYPE;
+    scrub_id bigint;
 BEGIN
     IF p_policy IS NULL OR p_policy IN ('', 'none') THEN
         RAISE EXCEPTION 'scrub_audit_payload needs a named redaction policy';
@@ -152,22 +183,26 @@ BEGIN
     IF p_reason IS NULL OR btrim(p_reason) = '' THEN
         RAISE EXCEPTION 'scrub_audit_payload needs a reason';
     END IF;
-    PERFORM set_config('admin_core.scrub', 'on', true);
-    UPDATE audit_event
-       SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
-     WHERE id = p_event_id
-    RETURNING * INTO ev;
+    SELECT * INTO ev FROM audit_event WHERE id = p_event_id FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'audit_event % does not exist', p_event_id;
     END IF;
-    PERFORM set_config('admin_core.scrub', 'off', true);
-
+    IF ev.before_state IS NULL AND ev.after_state IS NULL THEN
+        RAISE EXCEPTION 'audit_event % has no payload to scrub', p_event_id;
+    END IF;
+    -- actor_kind is 'system': the database performed the write; actor_id is who asked.
     INSERT INTO audit_event
-        (occurred_at, actor_id, actor_kind, tenant_id, environment,
+        (chain_id, occurred_at, actor_id, actor_kind, tenant_id, environment,
          action, target_type, target_id, reason, result)
     VALUES
-        (now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
-         'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded');
+        (ev.chain_id, now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
+         'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded')
+    RETURNING id INTO scrub_id;
+    PERFORM set_config('admin_core.scrub', scrub_id::text, true);
+    UPDATE audit_event
+       SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
+     WHERE id = p_event_id;
+    PERFORM set_config('admin_core.scrub', '', true);
 END;
 $$;
 
@@ -181,15 +216,32 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION audit_event_guard_update()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = public, pg_temp AS $$
+DECLARE
+    scrub_event text := current_setting('admin_core.scrub', true);
 BEGIN
-    IF current_setting('admin_core.scrub', true) IS DISTINCT FROM 'on' THEN
+    IF scrub_event IS NULL OR scrub_event !~ '^[0-9]{1,18}$' THEN
         RAISE EXCEPTION 'audit_event is append-only; UPDATE is not permitted (scrub payloads with scrub_audit_payload)';
     END IF;
     IF NEW.before_state IS NOT NULL OR NEW.after_state IS NOT NULL
        OR (to_jsonb(NEW) - 'before_state' - 'after_state' - 'redaction_policy')
           IS DISTINCT FROM (to_jsonb(OLD) - 'before_state' - 'after_state' - 'redaction_policy') THEN
         RAISE EXCEPTION 'audit_event scrub may only drop before_state / after_state and set redaction_policy';
+    END IF;
+    IF OLD.before_state IS NULL AND OLD.after_state IS NULL THEN
+        RAISE EXCEPTION 'audit_event % has no payload left to scrub', OLD.id;
+    END IF;
+    IF NEW.redaction_policy IN ('', 'none') THEN
+        RAISE EXCEPTION 'audit_event scrub needs a named redaction policy';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM audit_event s
+         WHERE s.id = scrub_event::bigint
+           AND s.action = 'audit.scrub_payload'
+           AND s.target_type = 'audit_event'
+           AND s.target_id = OLD.id::text
+    ) THEN
+        RAISE EXCEPTION 'audit_event %: a payload drop must name this row''s audit.scrub_payload event (use scrub_audit_payload)', OLD.id;
     END IF;
     RETURN NEW;
 END;

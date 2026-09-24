@@ -7,10 +7,13 @@
 //
 //   1. Triggers and functions. Append-only enforcement on auditEvent and
 //      approvalDecision, the audit hash chain (chain_seq / prev_hash / row_hash are
-//      assigned by a BEFORE INSERT trigger; leave them out of your inserts),
-//      verify_audit_chain(), scrub_audit_payload(), and the separation-of-duties
-//      trigger. Application-level guards are bypassed by raw queries and other
-//      services.
+//      assigned by a BEFORE INSERT trigger; leave them out of your inserts: chainSeq
+//      and rowHash carry client-side $defaultFn placeholders so the insert type
+//      allows that, and the trigger overwrites them),
+//      verify_audit_chain(), scrub_audit_payload(), the separation-of-duties
+//      trigger, and the trigger that keeps an approval_request as written (only
+//      state, executed_at and execution_result change). Application-level guards
+//      are bypassed by raw queries and other services.
 //   2. Nothing else. Drizzle expresses CHECK constraints (`check()`), partial
 //      unique indexes (`.where()`) and expression indexes (a sql template inside
 //      `.on()`) natively, and all three are used below.
@@ -229,7 +232,9 @@ export const auditEvent = adminCore.table("audit_event", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
   eventUuid: uuid("event_uuid").notNull().defaultRandom().unique(),
   chainId: text("chain_id").notNull().default("default"),
-  chainSeq: bigint("chain_seq", { mode: "bigint" }).notNull(), // assigned by trigger
+  // Placeholder so inserts can leave it out; the BEFORE INSERT trigger assigns the real
+  // value. $defaultFn is client-side only: the column has no DEFAULT in the DDL.
+  chainSeq: bigint("chain_seq", { mode: "bigint" }).notNull().$defaultFn(() => BigInt(0)),
 
   occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
@@ -278,7 +283,7 @@ export const auditEvent = adminCore.table("audit_event", {
   policyVersion: text("policy_version"),
 
   prevHash: text("prev_hash"), // assigned by trigger
-  rowHash: text("row_hash").notNull(), // assigned by trigger
+  rowHash: text("row_hash").notNull().$defaultFn(() => ""), // placeholder, as chainSeq; the trigger assigns it
   hashAlgorithm: text("hash_algorithm").notNull().default("sha256"),
 }, (t) => [
   check("audit_event_actor_kind_check", sql`${t.actorKind} IN ('human','service','agent','system')`),
@@ -417,13 +422,14 @@ export const adminJob = adminCore.table("admin_job", {
 
 /**
  * Per-item failures. A job that reports only an aggregate count cannot tell the
- * operator which rows to retry.
+ * operator which rows to retry. RESTRICT, not CASCADE: deleting the job must not
+ * erase its failure history.
  */
 export const adminJobFailure = adminCore.table("admin_job_failure", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
   jobId: bigint("job_id", { mode: "bigint" })
     .notNull()
-    .references(() => adminJob.id, { onDelete: "cascade" }),
+    .references(() => adminJob.id, { onDelete: "restrict" }),
   targetType: text("target_type").notNull(),
   targetId: text("target_id").notNull(),
   errorCode: text("error_code").notNull(),
@@ -564,8 +570,9 @@ export const exportRequest = adminCore.table("export_request", {
 ]);
 
 /**
- * Erasure interacts with retention, legal hold and backups. legalHold blocks
- * fulfilment; it does not silently drop the request.
+ * Erasure interacts with retention, legal hold and backups. A request under legal
+ * hold cannot be marked fulfilled; the hold never silently drops it. Access and
+ * portability requests link their exportRequest, erasure its adminJob.
  */
 export const dataSubjectRequest = adminCore.table("data_subject_request", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
@@ -578,6 +585,8 @@ export const dataSubjectRequest = adminCore.table("data_subject_request", {
   state: text("state").notNull().default("open"),
   legalHold: boolean("legal_hold").notNull().default(false),
   assignedTo: bigint("assigned_to", { mode: "bigint" }).references(() => adminActor.id),
+  exportRequestId: bigint("export_request_id", { mode: "bigint" }).references(() => exportRequest.id),
+  adminJobId: bigint("admin_job_id", { mode: "bigint" }).references(() => adminJob.id),
   resolution: text("resolution"),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
 }, (t) => [
@@ -588,6 +597,10 @@ export const dataSubjectRequest = adminCore.table("data_subject_request", {
   check(
     "data_subject_request_state_check",
     sql`${t.state} IN ('open','in-progress','fulfilled','refused','withdrawn')`,
+  ),
+  check(
+    "data_subject_request_hold_blocks_fulfilment",
+    sql`NOT (${t.legalHold} AND ${t.state} = 'fulfilled')`,
   ),
   index("data_subject_request_queue").on(t.state, t.dueAt),
 ]);

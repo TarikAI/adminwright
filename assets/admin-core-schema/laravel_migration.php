@@ -14,9 +14,11 @@
  *   3. Triggers and functions. Append-only enforcement on audit_event and
  *      approval_decision, the audit hash chain (chain_seq / prev_hash / row_hash
  *      are assigned by a BEFORE INSERT trigger; leave them out of your inserts),
- *      verify_audit_chain(), scrub_audit_payload(), and the separation-of-duties
- *      trigger. Model events and observers are bypassed by query-builder writes,
- *      bulk operations, and other services.
+ *      verify_audit_chain(), scrub_audit_payload(), the separation-of-duties
+ *      trigger, and the trigger that keeps an approval_request as written (only
+ *      state, executed_at and execution_result change). Model events and
+ *      observers are bypassed by query-builder writes, bulk operations, and other
+ *      services.
  *
  * All three are included below. Do not drop them: they are the controls, not
  * decoration. Then run grants.sql (least-privilege grants for the application
@@ -24,7 +26,13 @@
  *
  * PostgreSQL only; tables land in the default (public) schema and admin_actor.email
  * is text rather than citext. Adapt table names to project convention, but keep
- * admin_permission.key equal to the manifest capability id.
+ * admin_permission.key equal to the manifest capability id. If the tables live in
+ * another schema, change every SET search_path = public, pg_temp line to it, keeping
+ * pg_temp last (it stops a session's temporary tables shadowing the real ones inside
+ * the triggers).
+ *
+ * VERSIONS. Laravel 11+. On Laravel 10, timestampTz() defaults to precision 0 (whole
+ * seconds, unlike postgres.sql's timestamptz); pass 6 as its second argument there.
  */
 
 use Illuminate\Database\Migrations\Migration;
@@ -341,9 +349,11 @@ return new class extends Migration
 
         // Separation of duties: the requester may not approve their own request.
         // Enforced in the database because that is the whole point of the control.
+        // The request itself is fixed once written (only state, executed_at and
+        // execution_result change), so it cannot be re-attributed to get past it.
         DB::unprepared(<<<'SQL'
             CREATE OR REPLACE FUNCTION enforce_separation_of_duties()
-            RETURNS trigger AS $$
+            RETURNS trigger SET search_path = public, pg_temp AS $$
             BEGIN
                 IF EXISTS (
                     SELECT 1 FROM approval_request r
@@ -359,6 +369,21 @@ return new class extends Migration
             CREATE TRIGGER approval_decision_sod
                 BEFORE INSERT ON approval_decision
                 FOR EACH ROW EXECUTE FUNCTION enforce_separation_of_duties();
+
+            CREATE OR REPLACE FUNCTION approval_request_guard_update()
+            RETURNS trigger AS $$
+            BEGIN
+                IF (to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
+                   IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
+                    RAISE EXCEPTION 'approval_request % is immutable except state, executed_at and execution_result', OLD.id;
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+
+            CREATE TRIGGER approval_request_immutable
+                BEFORE UPDATE ON approval_request
+                FOR EACH ROW EXECUTE FUNCTION approval_request_guard_update();
         SQL);
 
         // -------------------------------------------------------------------
@@ -401,7 +426,8 @@ return new class extends Migration
             ON admin_job (state, queued_at DESC) WHERE state IN ('queued','running')");
 
         // Per-item failures. A job reporting only an aggregate count cannot tell
-        // the operator which rows to retry.
+        // the operator which rows to retry. RESTRICT, not CASCADE: deleting the job
+        // must not erase its failure history.
         Schema::create('admin_job_failure', function (Blueprint $table) {
             $table->bigIncrements('id');
             $table->unsignedBigInteger('job_id');
@@ -411,7 +437,7 @@ return new class extends Migration
             $table->text('error_detail')->nullable();
             $table->timestampTz('failed_at')->useCurrent();
 
-            $table->foreign('job_id')->references('id')->on('admin_job')->cascadeOnDelete();
+            $table->foreign('job_id')->references('id')->on('admin_job')->restrictOnDelete();
             $table->index(['job_id', 'failed_at'], 'admin_job_failure_job');
         });
 
@@ -535,8 +561,10 @@ return new class extends Migration
         DB::statement("ALTER TABLE export_request ADD CONSTRAINT export_request_state_check
             CHECK (state IN ('queued','running','ready','failed','expired','revoked'))");
 
-        // Erasure interacts with retention, legal hold and backups. legal_hold
-        // blocks fulfilment; it does not silently drop the request.
+        // Erasure interacts with retention, legal hold and backups. A request under
+        // legal hold cannot be marked fulfilled; the hold never silently drops it.
+        // Access and portability requests link their export_request, erasure its
+        // admin_job.
         Schema::create('data_subject_request', function (Blueprint $table) {
             $table->bigIncrements('id');
             $table->uuid('request_uuid')->unique()->default(DB::raw('gen_random_uuid()'));
@@ -548,10 +576,14 @@ return new class extends Migration
             $table->string('state', 16)->default('open');
             $table->boolean('legal_hold')->default(false);
             $table->unsignedBigInteger('assigned_to')->nullable();
+            $table->unsignedBigInteger('export_request_id')->nullable();
+            $table->unsignedBigInteger('admin_job_id')->nullable();
             $table->text('resolution')->nullable();
             $table->timestampTz('resolved_at')->nullable();
 
             $table->foreign('assigned_to')->references('id')->on('admin_actor');
+            $table->foreign('export_request_id')->references('id')->on('export_request');
+            $table->foreign('admin_job_id')->references('id')->on('admin_job');
             $table->index(['state', 'due_at'], 'data_subject_request_queue');
         });
 
@@ -559,6 +591,8 @@ return new class extends Migration
             CHECK (kind IN ('access','erasure','rectification','portability','restriction','objection'))");
         DB::statement("ALTER TABLE data_subject_request ADD CONSTRAINT data_subject_request_state_check
             CHECK (state IN ('open','in-progress','fulfilled','refused','withdrawn'))");
+        DB::statement("ALTER TABLE data_subject_request ADD CONSTRAINT data_subject_request_hold_blocks_fulfilment
+            CHECK (NOT (legal_hold AND state = 'fulfilled'))");
 
         // -------------------------------------------------------------------
         // Integrity: hash chain, payload scrub, append-only enforcement
@@ -570,7 +604,9 @@ return new class extends Migration
         //
         // The database owns chain_seq, prev_hash, row_hash and the payload hashes
         // (audit_event_chain_link). verify_audit_chain() re-computes the chain;
-        // scrub_audit_payload() is the single permitted UPDATE of an audit_event.
+        // scrub_audit_payload() is the sanctioned UPDATE of an audit_event: it records
+        // an audit.scrub_payload event first, and the update trigger refuses any payload
+        // drop that does not name such an event for the row.
         // Copied verbatim from postgres.sql (a test keeps them in step).
         DB::unprepared(<<<'SQL'
             CREATE OR REPLACE FUNCTION audit_event_hash_input(e audit_event)
@@ -591,7 +627,7 @@ return new class extends Migration
             $$;
 
             CREATE OR REPLACE FUNCTION audit_event_chain_link()
-            RETURNS trigger AS $$
+            RETURNS trigger SET search_path = public, pg_temp AS $$
             DECLARE
                 last_seq  bigint;
                 last_hash text;
@@ -607,11 +643,12 @@ return new class extends Migration
                  LIMIT 1;
                 NEW.chain_seq := COALESCE(last_seq, 0) + 1;
                 NEW.prev_hash := last_hash;
-                IF NEW.before_state IS NOT NULL THEN
-                    NEW.before_hash := encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex');
-                END IF;
-                IF NEW.after_state IS NOT NULL THEN
-                    NEW.after_hash := encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex');
+                NEW.before_hash := CASE WHEN NEW.before_state IS NULL THEN NULL
+                    ELSE encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex') END;
+                NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL
+                    ELSE encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex') END;
+                IF NEW.before_state IS NULL AND NEW.after_state IS NULL THEN
+                    NEW.redaction_policy := 'none';
                 END IF;
                 NEW.row_hash := encode(
                     sha256(convert_to(audit_event_hash_input(NEW), 'UTF8')), 'hex');
@@ -625,7 +662,7 @@ return new class extends Migration
 
             CREATE OR REPLACE FUNCTION verify_audit_chain(p_chain_id text DEFAULT NULL)
             RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
-            LANGUAGE plpgsql STABLE AS $$
+            LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $$
             DECLARE
                 r         audit_event%ROWTYPE;
                 cur_chain text;
@@ -668,6 +705,15 @@ return new class extends Migration
                         problem := 'after_hash does not match after_state';
                         RETURN NEXT;
                     END IF;
+                    IF ((r.before_state IS NULL AND r.before_hash IS NOT NULL)
+                        OR (r.after_state IS NULL AND r.after_hash IS NOT NULL))
+                       AND NOT EXISTS (
+                           SELECT 1 FROM audit_event s
+                            WHERE s.target_type = 'audit_event' AND s.target_id = r.id::text
+                              AND s.action = 'audit.scrub_payload') THEN
+                        problem := 'payload dropped without an audit.scrub_payload event';
+                        RETURN NEXT;
+                    END IF;
                     prev_seq := r.chain_seq;
                     prev_hash := r.row_hash;
                 END LOOP;
@@ -679,7 +725,8 @@ return new class extends Migration
             RETURNS void
             LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
             DECLARE
-                ev audit_event%ROWTYPE;
+                ev       audit_event%ROWTYPE;
+                scrub_id bigint;
             BEGIN
                 IF p_policy IS NULL OR p_policy IN ('', 'none') THEN
                     RAISE EXCEPTION 'scrub_audit_payload needs a named redaction policy';
@@ -687,22 +734,26 @@ return new class extends Migration
                 IF p_reason IS NULL OR btrim(p_reason) = '' THEN
                     RAISE EXCEPTION 'scrub_audit_payload needs a reason';
                 END IF;
-                PERFORM set_config('admin_core.scrub', 'on', true);
-                UPDATE audit_event
-                   SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
-                 WHERE id = p_event_id
-                RETURNING * INTO ev;
+                SELECT * INTO ev FROM audit_event WHERE id = p_event_id FOR UPDATE;
                 IF NOT FOUND THEN
                     RAISE EXCEPTION 'audit_event % does not exist', p_event_id;
                 END IF;
-                PERFORM set_config('admin_core.scrub', 'off', true);
-
+                IF ev.before_state IS NULL AND ev.after_state IS NULL THEN
+                    RAISE EXCEPTION 'audit_event % has no payload to scrub', p_event_id;
+                END IF;
+                -- actor_kind is 'system': the database performed the write; actor_id is who asked.
                 INSERT INTO audit_event
-                    (occurred_at, actor_id, actor_kind, tenant_id, environment,
+                    (chain_id, occurred_at, actor_id, actor_kind, tenant_id, environment,
                      action, target_type, target_id, reason, result)
                 VALUES
-                    (now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
-                     'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded');
+                    (ev.chain_id, now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
+                     'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded')
+                RETURNING id INTO scrub_id;
+                PERFORM set_config('admin_core.scrub', scrub_id::text, true);
+                UPDATE audit_event
+                   SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
+                 WHERE id = p_event_id;
+                PERFORM set_config('admin_core.scrub', '', true);
             END;
             $$;
 
@@ -716,15 +767,32 @@ return new class extends Migration
             $$ LANGUAGE plpgsql;
 
             CREATE OR REPLACE FUNCTION audit_event_guard_update()
-            RETURNS trigger AS $$
+            RETURNS trigger SET search_path = public, pg_temp AS $$
+            DECLARE
+                scrub_event text := current_setting('admin_core.scrub', true);
             BEGIN
-                IF current_setting('admin_core.scrub', true) IS DISTINCT FROM 'on' THEN
+                IF scrub_event IS NULL OR scrub_event !~ '^[0-9]{1,18}$' THEN
                     RAISE EXCEPTION 'audit_event is append-only; UPDATE is not permitted (scrub payloads with scrub_audit_payload)';
                 END IF;
                 IF NEW.before_state IS NOT NULL OR NEW.after_state IS NOT NULL
                    OR (to_jsonb(NEW) - 'before_state' - 'after_state' - 'redaction_policy')
                       IS DISTINCT FROM (to_jsonb(OLD) - 'before_state' - 'after_state' - 'redaction_policy') THEN
                     RAISE EXCEPTION 'audit_event scrub may only drop before_state / after_state and set redaction_policy';
+                END IF;
+                IF OLD.before_state IS NULL AND OLD.after_state IS NULL THEN
+                    RAISE EXCEPTION 'audit_event % has no payload left to scrub', OLD.id;
+                END IF;
+                IF NEW.redaction_policy IN ('', 'none') THEN
+                    RAISE EXCEPTION 'audit_event scrub needs a named redaction policy';
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM audit_event s
+                     WHERE s.id = scrub_event::bigint
+                       AND s.action = 'audit.scrub_payload'
+                       AND s.target_type = 'audit_event'
+                       AND s.target_id = OLD.id::text
+                ) THEN
+                    RAISE EXCEPTION 'audit_event %: a payload drop must name this row''s audit.scrub_payload event (use scrub_audit_payload)', OLD.id;
                 END IF;
                 RETURN NEW;
             END;
@@ -770,6 +838,8 @@ return new class extends Migration
         DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_no_delete ON approval_decision');
         DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_no_truncate ON approval_decision');
         DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_sod ON approval_decision');
+        DB::unprepared('DROP TRIGGER IF EXISTS approval_request_immutable ON approval_request');
+        DB::unprepared('DROP FUNCTION IF EXISTS approval_request_guard_update()');
         DB::unprepared('DROP FUNCTION IF EXISTS scrub_audit_payload(bigint, text, text, bigint)');
         DB::unprepared('DROP FUNCTION IF EXISTS verify_audit_chain(text)');
         DB::unprepared('DROP FUNCTION IF EXISTS audit_event_guard_update()');

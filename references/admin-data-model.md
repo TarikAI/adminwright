@@ -201,7 +201,8 @@ Non-obvious requirements:
   impersonated identity — that is the single most common way impersonation audit is destroyed.
   It is text in the identity space of `impersonation_session.target_subject_id`, not a foreign
   key to `admin_actor`: the acted-as subject is usually a customer.
-- `before_hash` / `after_hash` are hashes of the payloads (the insert trigger computes them),
+- `before_hash` / `after_hash` are hashes of the payloads, always computed by the insert trigger
+  (a missing payload gets no hash, and a row with no payload records `redaction_policy` `none`),
   and the row hash covers the hashes rather than the payload text. This is what makes later
   payload redaction possible without invalidating the chain.
 - Redaction is not optional. Audit payloads become the least-governed copy of sensitive data in
@@ -209,10 +210,9 @@ Non-obvious requirements:
 
 ## Hash chaining: what it proves and what it does not
 
-Each row stores `prev_hash` (the previous row's `row_hash` in the same `chain_id`) and a
-`row_hash` over its own fields. An unspecified serialization makes verification irreproducible,
-so the reference schema pins it in the database (`audit_event_hash_input()` and the
-`audit_event_chain_link` trigger):
+Each row stores `prev_hash` (the previous `row_hash` in its `chain_id`) and a `row_hash` over its
+own fields. An unspecified serialization makes verification irreproducible, so the reference
+schema pins it (`audit_event_hash_input()`, the `audit_event_chain_link` trigger):
 
 - **Fields**: every column except `id`, `row_hash` and `before_state` / `after_state` /
   `redaction_policy` (the hashes stand in for the payloads); `chain_seq`, `prev_hash` are inside.
@@ -220,9 +220,10 @@ so the reference schema pins it in the database (`audit_event_hash_input()` and 
   ISO-8601 with microseconds, `NULL` as JSON `null`; `row_hash` is hex SHA-256 of its UTF-8 bytes.
   An external verifier calls `audit_event_hash_input()` or replicates it.
 - **`chain_seq`**: last + 1 under a per-`chain_id` advisory lock: gap-free, and inserts in one
-  chain serialize. Writers omit `chain_seq`, `prev_hash` and `row_hash`.
-- **Verifier**: `verify_audit_chain([chain_id])` recomputes every row and lists gaps, broken links,
-  edited rows and payload-hash mismatches; empty means internally consistent.
+  chain serialize (shard by tenant, region or day if write throughput matters, and verify per
+  chain). Writers omit `chain_seq`, `prev_hash` and `row_hash`.
+- **Verifier**: `verify_audit_chain([chain_id])` lists gaps, broken links, edited rows, hash
+  mismatches and payloads dropped without an `audit.scrub_payload` event; empty means consistent.
 
 It proves, given an independently held anchor:
 
@@ -244,9 +245,6 @@ Anchoring options, cheapest first: replicate events to a separate account or sys
 write the head hash periodically to append-only or object-lock storage; sign the head hash with a
 key held outside the database; obtain an RFC 3161 timestamp for the head hash. Choose one and
 record it in `crossCutting.audit`. A chain with no anchor is documentation, not a control.
-
-Cost: chaining serializes inserts within a `chain_id`. Shard by tenant, region, or day if audit
-write throughput matters, and verify per chain.
 
 ## Audit retention and partitioning
 
@@ -319,11 +317,12 @@ requester's grants may have been revoked in between.
 Separation of duties belongs in the database. The reference schema uses a trigger on
 `approval_decision`; the declarative alternative is to denormalize `requested_by` onto it, add a
 composite foreign key back to `approval_request (id, requested_by)`, and add
-`CHECK (approver_id <> requested_by)`. Either way the database refuses self-approval whichever
-service writes the row. `required_approvals` covers n-of-m; a unique constraint on
-`(request_id, approver_id)` stops one approver counting twice. Decisions are append-only (update,
-delete and truncate denied, request FK `RESTRICT`), or a rejection could be deleted with its
-request and re-entered as an approval.
+`CHECK (approver_id <> requested_by)`. Either way the database refuses approval by the recorded
+requester, and `approval_request_immutable` stops a request being re-attributed, re-targeted or
+given a lower `required_approvals` later (that the recorded requester is real is authentication's
+job). `required_approvals` covers n-of-m; a unique constraint on `(request_id, approver_id)` stops
+one approver counting twice. Decisions are append-only (update, delete and truncate denied, request
+FK `RESTRICT`), or a rejection could be deleted with its request and re-entered as an approval.
 
 ## Jobs, saved views, configuration
 
@@ -363,9 +362,10 @@ key, never the payload. `expires_at` is mandatory. Downloads are audit events wi
 `target_type = 'export_request'`; the counters on the row are a convenience, not the record.
 
 `data_subject_request` tracks privacy obligations with a due date, a state machine, and an
-explicit legal-hold interaction. The hold conflict is real and must be encoded, not left to
-process: an erasure request cannot be marked fulfilled while a hold blocks it. Access and
-portability requests link to an `export_request`; erasure links to an `admin_job`, because
+explicit legal-hold interaction, encoded rather than left to process: a request under
+`legal_hold` cannot be marked `fulfilled` (`data_subject_request_hold_blocks_fulfilment`); it
+stays open, or is refused, while the hold lasts. Access and portability requests link their
+`export_request` (`export_request_id`); erasure links its `admin_job` (`admin_job_id`), because
 erasure across a real system is a long-running job with partial failures.
 
 ## Indexing for real access patterns
@@ -395,9 +395,9 @@ operator search belongs on the domain tables, not on `audit_event`.
 
 | Table | Immutable after write | Permitted later change |
 |---|---|---|
-| `audit_event` | Every column | Payload drop via `scrub_audit_payload()` only, itself audited, hashes retained |
+| `audit_event` | Every column | One payload drop that names the row's `audit.scrub_payload` event (`scrub_audit_payload()` writes it first); hashes kept |
 | `admin_job` | `input_summary`, `input_hash`, `initiated_by` | State, progress, result |
-| `approval_request` | `payload`, `payload_hash`, `requested_by`, `command_key` | State, decision and execution timestamps |
+| `approval_request` | Every other column, including `payload`, `payload_hash`, `requested_by`, `command_key` | `state`, `executed_at`, `execution_result` |
 | `approval_decision` | Whole row | None; a reversal is a new request |
 | `impersonation_session` | Real actor, target, reason, `started_at` | End state and revocation |
 | `export_request` | `filters`, `row_policy`, `field_policy` after generation | State, download counters |
@@ -405,8 +405,10 @@ operator search belongs on the domain tables, not on `audit_event`.
 | `config_change`, `admin_job_failure` | Whole row | None |
 
 Deleting from any of these is a defect, not a cleanup. Retention removes whole partitions or
-whole archived segments under a stated policy. The reference schema enforces only the `audit_event`
-and `approval_decision` rows (triggers plus `grants.sql`); the rest are application rules.
+whole archived segments under a stated policy. The reference schema enforces the `audit_event`,
+`approval_request` and `approval_decision` rows with triggers; `grants.sql` also takes UPDATE,
+DELETE and TRUNCATE on `audit_event`, `approval_decision`, `config_change` and `admin_job_failure`
+(job key `RESTRICT`) from the application role. The rest are application rules.
 
 ## Manifest mapping
 

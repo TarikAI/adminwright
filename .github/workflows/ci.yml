@@ -137,8 +137,9 @@ jobs:
           print("no broken links")
           PY
 
-      # Compares postgres.sql with the five translations: tables, columns, CHECK constraint
-      # names and enum value sets, index names (partial and expression ones too), single-column
+      # Compares postgres.sql with the five translations: tables, columns and their types,
+      # CHECK constraints (names, enum value sets, expressions by logical equivalence), index
+      # names and definitions (UNIQUE, key columns and expressions, WHERE), single-column
       # UNIQUEs, foreign-key ON DELETE actions, and the text of every trigger and function.
       # The same file runs in the `test` job; it is stdlib-only and needs no database.
       - name: Schema translations cover the same tables
@@ -165,7 +166,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: ["14", "16"]
+        # Django 6.1 needs PostgreSQL 15+, so the PostgreSQL 14 leg runs the Django
+        # translation on Django 5.2 LTS (which supports 14) rather than skipping it.
+        include:
+          - postgres: "14"
+            django: "django>=5.2,<6"
+          - postgres: "16"
+            django: "django>=6,<7"
+          # 18 reports ON DELETE RESTRICT refusals as 23001, not 23503: keep it in the matrix.
+          - postgres: "18"
+            django: "django>=6,<7"
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -193,7 +203,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Network-bound steps get their own timeouts, so a stalled mirror fails the step that
+      # stalled instead of eating the job's 20 minutes.
       - name: psql is available
+        timeout-minutes: 5
         run: |
           command -v psql >/dev/null || { sudo apt-get update && sudo apt-get install -y postgresql-client; }
           psql --version
@@ -212,12 +225,17 @@ jobs:
           psql -d core_schema -v ON_ERROR_STOP=1 -f verify.sql
 
       # Django is installed only for the Django translation test; nothing in the skill needs it.
+      # Majors are pinned (the matrix picks Django's); the npm tools are pinned in their tests.
       - name: Install Django and psycopg for the translation test
-        run: python -m pip install "django>=6" "psycopg[binary]"
+        timeout-minutes: 5
+        run: python -m pip install "${{ matrix.django }}" "psycopg[binary]>=3.1,<4"
 
-      # test_core_schema_db.py     postgres.sql: verification is not vacuous, grants.sql, concurrent chain writers
-      # test_core_schema_django.py django_models.py: check, sqlmigrate, migrate, django_triggers.sql, verification
-      # test_core_schema_prisma.py prisma.schema on Prisma 7: validate, no SET NULL, DDL + prisma_raw.sql, verification
-      # test_core_schema_drizzle.py drizzle.ts via drizzle-kit: generate, append the Integrity section, verification
+      # test_core_schema_db.py     postgres.sql: verification is not vacuous, scrub paths, temp-table
+      #                            shadowing, grants.sql, concurrent chain writers
+      # test_core_schema_django.py django_models.py: check, sqlmigrate, migrate with the docstring's
+      #                            trigger migration, verification, ORM timestamps, index set
+      # test_core_schema_prisma.py prisma.schema on prisma@7: validate, no SET NULL, DDL + prisma_raw.sql, verification
+      # test_core_schema_drizzle.py drizzle.ts via drizzle-kit@0.31: generate, tsc, Integrity section, verification
       - name: Core schema tests against the service container
+        timeout-minutes: 15
         run: python -m unittest discover -s tests -p "test_core_schema_*.py" -v

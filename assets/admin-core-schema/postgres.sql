@@ -360,10 +360,11 @@ CREATE INDEX admin_job_active
     WHERE state IN ('queued', 'running');
 
 -- Per-item failures. A job that reports only an aggregate count cannot tell the
--- operator which rows to retry.
+-- operator which rows to retry. Immutable history (grants.sql): RESTRICT, not
+-- CASCADE, or deleting the job would erase its failures with it.
 CREATE TABLE admin_job_failure (
     id          bigserial PRIMARY KEY,
-    job_id      bigint      NOT NULL REFERENCES admin_job(id) ON DELETE CASCADE,
+    job_id      bigint      NOT NULL REFERENCES admin_job(id) ON DELETE RESTRICT,
     target_type text        NOT NULL,
     target_id   text        NOT NULL,
     error_code  text        NOT NULL,
@@ -487,6 +488,11 @@ CREATE TABLE export_request (
 
 CREATE INDEX export_request_state ON export_request (state, expires_at);
 
+-- Erasure interacts with retention, legal hold and backups. A request under legal hold
+-- cannot be marked fulfilled: it stays open (or is refused) while the hold lasts, and the
+-- hold never silently drops it. Access and portability requests link the export_request
+-- that answered them; erasure links the admin_job that carried it out, because erasure
+-- across a real system is a long-running job with partial failures.
 CREATE TABLE data_subject_request (
     id            bigserial PRIMARY KEY,
     request_uuid  uuid        NOT NULL DEFAULT gen_random_uuid() UNIQUE,
@@ -502,14 +508,15 @@ CREATE TABLE data_subject_request (
                   CHECK (state IN ('open','in-progress','fulfilled','refused','withdrawn')),
     legal_hold    boolean     NOT NULL DEFAULT false,
     assigned_to   bigint      NULL REFERENCES admin_actor(id),
+    export_request_id bigint  NULL REFERENCES export_request(id),
+    admin_job_id  bigint      NULL REFERENCES admin_job(id),
     resolution    text        NULL,
-    resolved_at   timestamptz NULL
+    resolved_at   timestamptz NULL,
+    CONSTRAINT data_subject_request_hold_blocks_fulfilment
+        CHECK (NOT (legal_hold AND state = 'fulfilled'))
 );
 
 CREATE INDEX data_subject_request_queue ON data_subject_request (state, due_at);
-
--- Erasure interacts with retention, legal hold and backups. legal_hold blocks
--- fulfilment; it does not silently drop the request.
 
 -- ---------------------------------------------------------------------------
 -- Integrity: hash chain, payload scrub, append-only enforcement
@@ -524,6 +531,11 @@ CREATE INDEX data_subject_request_queue ON data_subject_request (state, due_at);
 --     chain does and does not prove.
 --   * At regulated profile, pair this with grants.sql: revoked UPDATE / DELETE /
 --     TRUNCATE for a separate application role.
+--   * Every function that reads a table pins SET search_path = <schema>, pg_temp.
+--     A trigger runs with the caller's search_path, where the caller's own temporary
+--     tables come first: in the unqualified copies (Django, Prisma, Laravel, Rails) a
+--     session could otherwise CREATE TEMP TABLE approval_request and approve its own
+--     request. Listing pg_temp last is what stops that.
 
 -- Canonical hash input for one audit_event row: the JSON array (jsonb canonical
 -- text form) of the values below, in this order; timestamps as UTC ISO-8601 with
@@ -554,8 +566,12 @@ $$;
 -- chain_seq gap-free; use several chain_ids to shard write throughput. Under
 -- REPEATABLE READ or SERIALIZABLE a stale snapshot can pick an already-used
 -- chain_seq: the unique index then rejects the insert and the writer retries.
+-- The payload hashes are derived, never taken from the writer: a hash without its
+-- payload is what a scrubbed row looks like, so an INSERT must not be able to forge
+-- one. A row inserted with no payload at all records redaction_policy 'none', since
+-- no policy was applied to anything.
 CREATE OR REPLACE FUNCTION admin_core.audit_event_chain_link()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = admin_core, pg_temp AS $$
 DECLARE
     last_seq  bigint;
     last_hash text;
@@ -571,11 +587,12 @@ BEGIN
      LIMIT 1;
     NEW.chain_seq := COALESCE(last_seq, 0) + 1;
     NEW.prev_hash := last_hash;
-    IF NEW.before_state IS NOT NULL THEN
-        NEW.before_hash := encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex');
-    END IF;
-    IF NEW.after_state IS NOT NULL THEN
-        NEW.after_hash := encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex');
+    NEW.before_hash := CASE WHEN NEW.before_state IS NULL THEN NULL
+        ELSE encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex') END;
+    NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL
+        ELSE encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex') END;
+    IF NEW.before_state IS NULL AND NEW.after_state IS NULL THEN
+        NEW.redaction_policy := 'none';
     END IF;
     NEW.row_hash := encode(
         sha256(convert_to(admin_core.audit_event_hash_input(NEW), 'UTF8')), 'hex');
@@ -592,9 +609,12 @@ CREATE TRIGGER audit_event_chain_link
 -- starts above chain_seq 1 (earlier segments archived) is checked from its first
 -- row; link it to the archived tail hash separately. Compare the newest row_hash
 -- with the externally anchored head to detect truncation or a rewritten chain.
+-- A payload hash whose payload is gone means the payload was dropped after the
+-- insert (inserts never keep one): that is reported unless an audit.scrub_payload
+-- event names the row, which catches a drop made with the update trigger disabled.
 CREATE OR REPLACE FUNCTION admin_core.verify_audit_chain(p_chain_id text DEFAULT NULL)
 RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
-LANGUAGE plpgsql STABLE AS $$
+LANGUAGE plpgsql STABLE SET search_path = admin_core, pg_temp AS $$
 DECLARE
     r         admin_core.audit_event%ROWTYPE;
     cur_chain text;
@@ -637,23 +657,37 @@ BEGIN
             problem := 'after_hash does not match after_state';
             RETURN NEXT;
         END IF;
+        IF ((r.before_state IS NULL AND r.before_hash IS NOT NULL)
+            OR (r.after_state IS NULL AND r.after_hash IS NOT NULL))
+           AND NOT EXISTS (
+               SELECT 1 FROM admin_core.audit_event s
+                WHERE s.target_type = 'audit_event' AND s.target_id = r.id::text
+                  AND s.action = 'audit.scrub_payload') THEN
+            problem := 'payload dropped without an audit.scrub_payload event';
+            RETURN NEXT;
+        END IF;
         prev_seq := r.chain_seq;
         prev_hash := r.row_hash;
     END LOOP;
 END;
 $$;
 
--- The single permitted UPDATE of an audit_event: drop the payload and name the
--- redaction policy. Hashes, and therefore the chain, are untouched. Runs as the
--- function owner so the application role needs no UPDATE grant; the scrub is
--- itself recorded as an audit_event. Register 'audit.scrub_payload' as a
--- permission and grant EXECUTE only to the role that may redact.
+-- The sanctioned UPDATE of an audit_event: drop the payload, once, and name the
+-- redaction policy. Hashes, and therefore the chain, are untouched. The scrub is
+-- recorded FIRST, as an audit.scrub_payload event in the row's own chain, and the
+-- UPDATE then runs with admin_core.scrub set to that event's id: the update guard
+-- below accepts a payload drop only when that setting names such an event for the
+-- row, so no payload leaves without its own audit record, whoever issues the UPDATE.
+-- Runs as the function owner so the application role needs no UPDATE grant
+-- (grants.sql). Register 'audit.scrub_payload' as a permission and grant EXECUTE only
+-- to the role that may redact.
 CREATE OR REPLACE FUNCTION admin_core.scrub_audit_payload(
     p_event_id bigint, p_policy text, p_reason text, p_actor_id bigint DEFAULT NULL)
 RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = admin_core, pg_temp AS $$
 DECLARE
-    ev admin_core.audit_event%ROWTYPE;
+    ev       admin_core.audit_event%ROWTYPE;
+    scrub_id bigint;
 BEGIN
     IF p_policy IS NULL OR p_policy IN ('', 'none') THEN
         RAISE EXCEPTION 'scrub_audit_payload needs a named redaction policy';
@@ -661,22 +695,26 @@ BEGIN
     IF p_reason IS NULL OR btrim(p_reason) = '' THEN
         RAISE EXCEPTION 'scrub_audit_payload needs a reason';
     END IF;
-    PERFORM set_config('admin_core.scrub', 'on', true);
-    UPDATE admin_core.audit_event
-       SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
-     WHERE id = p_event_id
-    RETURNING * INTO ev;
+    SELECT * INTO ev FROM admin_core.audit_event WHERE id = p_event_id FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'audit_event % does not exist', p_event_id;
     END IF;
-    PERFORM set_config('admin_core.scrub', 'off', true);
+    IF ev.before_state IS NULL AND ev.after_state IS NULL THEN
+        RAISE EXCEPTION 'audit_event % has no payload to scrub', p_event_id;
+    END IF;
     -- actor_kind is 'system': the database performed the write; actor_id is who asked.
     INSERT INTO admin_core.audit_event
-        (occurred_at, actor_id, actor_kind, tenant_id, environment,
+        (chain_id, occurred_at, actor_id, actor_kind, tenant_id, environment,
          action, target_type, target_id, reason, result)
     VALUES
-        (now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
-         'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded');
+        (ev.chain_id, now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
+         'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded')
+    RETURNING id INTO scrub_id;
+    PERFORM set_config('admin_core.scrub', scrub_id::text, true);
+    UPDATE admin_core.audit_event
+       SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
+     WHERE id = p_event_id;
+    PERFORM set_config('admin_core.scrub', '', true);
 END;
 $$;
 
@@ -685,7 +723,7 @@ REVOKE ALL ON FUNCTION admin_core.scrub_audit_payload(bigint, text, text, bigint
 -- Separation of duties: the requester may not approve their own request. Enforced
 -- here rather than in application code because it is the whole point of the control.
 CREATE OR REPLACE FUNCTION admin_core.enforce_separation_of_duties()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = admin_core, pg_temp AS $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM admin_core.approval_request r
@@ -702,6 +740,25 @@ CREATE TRIGGER approval_decision_sod
     BEFORE INSERT ON admin_core.approval_decision
     FOR EACH ROW EXECUTE FUNCTION admin_core.enforce_separation_of_duties();
 
+-- An approval_request is a record of what was asked. Only its lifecycle columns change;
+-- rewriting requested_by would let the requester approve their own request past the
+-- check above, and rewriting the payload, its hash, the target or required_approvals
+-- would change what the approvals were given for.
+CREATE OR REPLACE FUNCTION admin_core.approval_request_guard_update()
+RETURNS trigger AS $$
+BEGIN
+    IF (to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
+       IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
+        RAISE EXCEPTION 'approval_request % is immutable except state, executed_at and execution_result', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER approval_request_immutable
+    BEFORE UPDATE ON admin_core.approval_request
+    FOR EACH ROW EXECUTE FUNCTION admin_core.approval_request_guard_update();
+
 -- Append-only enforcement.
 CREATE OR REPLACE FUNCTION admin_core.deny_audit_mutation()
 RETURNS trigger AS $$
@@ -710,18 +767,40 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- UPDATE of audit_event is refused except inside scrub_audit_payload, and even
--- there nothing the row hash covers may change.
+-- UPDATE of audit_event is refused unless it drops a payload that is still there,
+-- names a redaction policy, changes nothing the row hash covers, and runs with
+-- admin_core.scrub naming the audit.scrub_payload event that records the drop of
+-- this row, as scrub_audit_payload does. Any session can set admin_core.scrub, so
+-- it is only a pointer: it must point at such an event, and writing one is itself
+-- the audit record. A session that sets it to 'on', or at another row's event, is
+-- refused.
 CREATE OR REPLACE FUNCTION admin_core.audit_event_guard_update()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = admin_core, pg_temp AS $$
+DECLARE
+    scrub_event text := current_setting('admin_core.scrub', true);
 BEGIN
-    IF current_setting('admin_core.scrub', true) IS DISTINCT FROM 'on' THEN
+    IF scrub_event IS NULL OR scrub_event !~ '^[0-9]{1,18}$' THEN
         RAISE EXCEPTION 'audit_event is append-only; UPDATE is not permitted (scrub payloads with scrub_audit_payload)';
     END IF;
     IF NEW.before_state IS NOT NULL OR NEW.after_state IS NOT NULL
        OR (to_jsonb(NEW) - 'before_state' - 'after_state' - 'redaction_policy')
           IS DISTINCT FROM (to_jsonb(OLD) - 'before_state' - 'after_state' - 'redaction_policy') THEN
         RAISE EXCEPTION 'audit_event scrub may only drop before_state / after_state and set redaction_policy';
+    END IF;
+    IF OLD.before_state IS NULL AND OLD.after_state IS NULL THEN
+        RAISE EXCEPTION 'audit_event % has no payload left to scrub', OLD.id;
+    END IF;
+    IF NEW.redaction_policy IN ('', 'none') THEN
+        RAISE EXCEPTION 'audit_event scrub needs a named redaction policy';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM admin_core.audit_event s
+         WHERE s.id = scrub_event::bigint
+           AND s.action = 'audit.scrub_payload'
+           AND s.target_type = 'audit_event'
+           AND s.target_id = OLD.id::text
+    ) THEN
+        RAISE EXCEPTION 'audit_event %: a payload drop must name this row''s audit.scrub_payload event (use scrub_audit_payload)', OLD.id;
     END IF;
     RETURN NEW;
 END;

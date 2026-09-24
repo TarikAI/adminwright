@@ -1,4 +1,4 @@
--- Least-privilege grants for the application role (PostgreSQL 14+; run with psql 13+,
+-- Least-privilege grants for the application role (PostgreSQL 14+; run with psql 11+,
 -- which added the :{?variable} existence test used below).
 --
 -- The regulated profile requires this: the append-only triggers in postgres.sql
@@ -19,11 +19,15 @@
 --
 -- This grants only what the append-only tables need. Grants on the remaining
 -- tables (SELECT/INSERT/UPDATE on the mutable ones) are project-specific.
+--
+-- A missing app_role is an error (psql exits 3), never a silent success: a deploy
+-- script must not report grants that were not applied. The script stops at its first
+-- error even when the caller forgot -v ON_ERROR_STOP=1.
 
+\set ON_ERROR_STOP on
 \if :{?app_role}
 \else
-    \echo 'grants.sql: pass -v app_role=<role>'
-    \quit
+    DO $$ BEGIN RAISE EXCEPTION 'grants.sql: pass -v app_role=<role>; no grants were applied'; END $$;
 \endif
 \if :{?schema}
 \else
@@ -36,7 +40,9 @@ GRANT USAGE ON SCHEMA :"schema" TO :"app_role";
 
 -- Append-only: the application inserts and reads, and can never rewrite, delete or
 -- truncate. audit_event and approval_decision are also protected by triggers;
--- config_change and admin_job_failure are immutable by rule (see the model doc).
+-- config_change and admin_job_failure are immutable by rule (see the model doc), and
+-- admin_job_failure's job key is ON DELETE RESTRICT, so deleting a job cannot take
+-- its failures with it.
 REVOKE ALL ON
     :"schema".audit_event,
     :"schema".approval_decision,
