@@ -101,7 +101,7 @@ Commands, and exactly what each writes:
 | Weigh contributions | `promote --include-community` | nothing; adds contributed evidence to the bar calculation |
 | Read the queue | `lesson list --status proposed` | nothing |
 | Adopt | edit of the one file named in `scope`, or in `Proposed edit` for an area scope | the guidance change |
-| Close the lesson | edit of the lesson frontmatter and its index row to `status: adopted` | the lesson and the index |
+| Close the lesson | edit of the lesson frontmatter to `status: adopted`, then `lesson index` | the lesson, and the index rebuilt from the files |
 | Close the project entry | `set --manifest <path> --path 'feedback[fb-003].status' --value promoted` | the manifest entry |
 
 Invocation form:

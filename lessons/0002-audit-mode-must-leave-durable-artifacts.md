@@ -32,4 +32,6 @@ With: the requirement to initialize the manifest, model findings at `discovered`
 
 ## Review notes
 
-- 2026-08-08 maintainer (TarikAI): adopted in commit `9a0a571`. Confidence corrected from `high`, which is not in the format's vocabulary, to `repeated` (two distinct projects). Project names replaced with neutral labels. backfilled 2026-09-23 by the audit that found this lesson adopted without the sections the format requires; the adopting agent was not recorded at the time.
+- 2026-08-09 maintainer (TarikAI): adopted in commit `9a0a571`. The commit message gives the route: the audit gap was seen on two distinct projects.
+- 2026-09-23 audit backfill (an agent, not the maintainer): brought the file into the format by removing the frontmatter copies of trigger, rule and evidence and replacing the Promotion section with Proposed edit (written from commit `9a0a571`) and Review notes, changed confidence `high` (not in the vocabulary) to `repeated` for two projects, and replaced the project names with neutral labels. The adopting agent was not recorded at the time.
+- 2026-09-24 audit round 2 (an agent): the adoption line above had been dated 2026-08-08 and merged with the backfill; it now carries the commit's date and only what the commit says, and the backfill is its own line.

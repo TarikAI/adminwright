@@ -29,4 +29,6 @@ Add: a stderr warning when plan validation finds errors, a manifest-health line 
 
 ## Review notes
 
-- 2026-08-09 maintainer (TarikAI): adopted in commit `b35d956` on the correction route (a defect in the tool). Confidence corrected from `high` to `observed-once`. Project name replaced with a neutral label. backfilled 2026-09-23 by the audit that found this lesson adopted without the sections the format requires; the adopting agent was not recorded at the time.
+- 2026-08-09 maintainer (TarikAI): adopted in commit `b35d956`. The commit message names no promotion route. One project.
+- 2026-09-23 audit backfill (an agent, not the maintainer): brought the file into the format by removing the frontmatter copies of trigger, rule and evidence and replacing the Promotion section with Proposed edit (written from commit `b35d956`) and Review notes, changed confidence `high` (not in the vocabulary) to `observed-once` for one project, and replaced the project name with a neutral label. The adopting agent was not recorded at the time.
+- 2026-09-24 audit round 2 (an agent): the adoption line above had named the correction route, which commit `b35d956` does not; it now says only what the commit says. A `tooling` finding seen on one project with no route recorded: adopted outside the promotion bar in references/skill-evolution.md.

@@ -119,8 +119,9 @@ arguments and creates the last two empty.
    If yes, scope it or reject it.
 6. Edit the one file named in `scope` (for an area scope such as `scripts`, the file
    `Proposed edit` names). One lesson, one file, one edit.
-7. Set `status: adopted`, append a dated review note, and update the row in
-   [index.md](index.md) in the same edit.
+7. Set `status: adopted`, append a dated review note, and run `lesson index` in the same
+   edit: it rebuilds the row in [index.md](index.md) and the `Guidance level` from the files.
+   Never edit the index by hand.
 8. Close the originating manifest entry with
    `set --manifest <path> --path 'feedback[fb-003].status' --value promoted`.
 

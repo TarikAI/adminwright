@@ -1044,6 +1044,22 @@ class TestLessonFormat(unittest.TestCase):
                 evidence = body.split("## Evidence", 1)[1].split("## Proposed edit", 1)[0]
                 self.assertNotIn("none recorded", evidence, path.name + ": adopted needs evidence")
 
+    def test_review_notes_never_put_words_in_the_maintainers_mouth(self):
+        # The backfill of 0002-0005 wrote its own edits, and a reason the commit
+        # never gave, into lines signed by the maintainer at an adoption date.
+        for path in sorted((SKILL_ROOT / "lessons").glob("[0-9][0-9][0-9][0-9]-*.md")):
+            body = path.read_text(encoding="utf-8").split("\n## Review notes\n", 1)[1]
+            notes = [line for line in body.splitlines() if line.startswith("- ")]
+            for note in notes:
+                signed = re.match(r"^- \d{4}-\d{2}-\d{2} ([^:]+):", note)
+                self.assertTrue(signed, path.name + ": every note is dated and signed: " + note[:60])
+                if signed.group(1).startswith("maintainer"):
+                    self.assertNotIn("backfill", note.lower(), path.name + ": " + note[:80])
+        readme = (SKILL_ROOT / "lessons" / "README.md").read_text(encoding="utf-8")
+        step = [line for line in readme.splitlines() if line.startswith("7. Set `status: adopted`")]
+        self.assertEqual(len(step), 1)
+        self.assertIn("lesson index", readme.split(step[0], 1)[1].split("\n8.", 1)[0] + step[0])
+
     def test_the_shipped_index_matches_a_rebuild(self):
         rebuilt = self.tmp / "rebuilt"
         shutil.copytree(str(SKILL_ROOT / "lessons"), str(rebuilt))
