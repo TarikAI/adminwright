@@ -114,8 +114,10 @@ database regardless of which stack owns the migrations:
 2. **The hash chain and payload scrub**: the `BEFORE INSERT` trigger that assigns
    `chain_seq`, `prev_hash` and `row_hash`, `verify_audit_chain()`, and
    `scrub_audit_payload()`, the single permitted `UPDATE`.
-3. **The separation-of-duties trigger** on `approval_decision`. Enforcing it only in
-   application code means the control is absent for anything that writes the table directly.
+3. **The separation-of-duties trigger** on `approval_decision`, and the trigger that keeps an
+   `approval_request` as written (only `state`, `executed_at` and `execution_result` change),
+   without which a requester re-attributes the request and approves it. Enforcing either only
+   in application code means the control is absent for anything that writes the table directly.
 4. **Partial and expression unique indexes** — the live-grant uniqueness on
    `admin_actor_role`, the idempotency uniqueness on `admin_job`, the one-live-session
    index, and the `(key, environment, tenant)` uniqueness on `config_setting` and
@@ -228,11 +230,16 @@ BEGIN
         RAISE EXCEPTION 'VERIFY FAILED: verify_audit_chain missed an edited row' USING ERRCODE = 'XX000';
     END IF;
 
-    -- 5. approvals: separation of duties, and approval_decision is append-only.
+    -- 5. approvals: separation of duties, a request stays as written, and
+    --    approval_decision is append-only.
     INSERT INTO admin_permission (key, resource, action) VALUES ('verify.thing', 'verify', 'thing');
-    INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason, expires_at)
-    VALUES ('verify.thing', '{}', 'h', 'thing', alice, 'r', now() + interval '1 day') RETURNING id INTO req;
+    INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason,
+                                  expires_at, required_approvals)
+    VALUES ('verify.thing', '{}', 'h', 'thing', alice, 'r', now() + interval '1 day', 2) RETURNING id INTO req;
     PERFORM pg_temp.expect_refused('self-approval', format('INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (%s, %s, ''approved'', ''r'')', req, alice), 'P0001');
+    PERFORM pg_temp.expect_refused('re-attributing a request', format('UPDATE approval_request SET requested_by = %s WHERE id = %s', bob, req), 'P0001');
+    PERFORM pg_temp.expect_refused('lowering required_approvals', 'UPDATE approval_request SET required_approvals = 1 WHERE id = ' || req, 'P0001');
+    PERFORM pg_temp.expect_refused('rewriting a request payload', 'UPDATE approval_request SET payload = ''{"amount": 1}'' WHERE id = ' || req, 'P0001');
     INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (req, bob, 'rejected', 'r');
     PERFORM pg_temp.expect_refused('second vote by one approver', format('INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (%s, %s, ''approved'', ''r'')', req, bob), '23505');
     PERFORM pg_temp.expect_refused('UPDATE approval_decision', 'UPDATE approval_decision SET decision = ''approved'' WHERE request_id = ' || req, 'P0001');
@@ -243,6 +250,7 @@ BEGIN
     PERFORM pg_temp.expect_refused('DELETE approval_request with decisions', 'DELETE FROM approval_request WHERE id = ' || req, '23503|23001');
     SELECT count(*) INTO n FROM approval_decision WHERE request_id = req;
     IF n <> 1 THEN RAISE EXCEPTION 'VERIFY FAILED: the rejection did not survive (% rows)', n USING ERRCODE = 'XX000'; END IF;
+    UPDATE approval_request SET state = 'rejected' WHERE id = req;  -- the lifecycle columns still change
 
     -- 6. live-grant uniqueness, including the global (NULL tenant) grant.
     INSERT INTO admin_role (key, name) VALUES ('verify-role', 'Verify') RETURNING id INTO role;

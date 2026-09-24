@@ -14,9 +14,11 @@
  *   3. Triggers and functions. Append-only enforcement on audit_event and
  *      approval_decision, the audit hash chain (chain_seq / prev_hash / row_hash
  *      are assigned by a BEFORE INSERT trigger; leave them out of your inserts),
- *      verify_audit_chain(), scrub_audit_payload(), and the separation-of-duties
- *      trigger. Model events and observers are bypassed by query-builder writes,
- *      bulk operations, and other services.
+ *      verify_audit_chain(), scrub_audit_payload(), the separation-of-duties
+ *      trigger, and the trigger that keeps an approval_request as written (only
+ *      state, executed_at and execution_result change). Model events and
+ *      observers are bypassed by query-builder writes, bulk operations, and other
+ *      services.
  *
  * All three are included below. Do not drop them: they are the controls, not
  * decoration. Then run grants.sql (least-privilege grants for the application
@@ -341,6 +343,8 @@ return new class extends Migration
 
         // Separation of duties: the requester may not approve their own request.
         // Enforced in the database because that is the whole point of the control.
+        // The request itself is fixed once written (only state, executed_at and
+        // execution_result change), so it cannot be re-attributed to get past it.
         DB::unprepared(<<<'SQL'
             CREATE OR REPLACE FUNCTION enforce_separation_of_duties()
             RETURNS trigger AS $$
@@ -359,6 +363,21 @@ return new class extends Migration
             CREATE TRIGGER approval_decision_sod
                 BEFORE INSERT ON approval_decision
                 FOR EACH ROW EXECUTE FUNCTION enforce_separation_of_duties();
+
+            CREATE OR REPLACE FUNCTION approval_request_guard_update()
+            RETURNS trigger AS $$
+            BEGIN
+                IF (to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
+                   IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
+                    RAISE EXCEPTION 'approval_request % is immutable except state, executed_at and execution_result', OLD.id;
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+
+            CREATE TRIGGER approval_request_immutable
+                BEFORE UPDATE ON approval_request
+                FOR EACH ROW EXECUTE FUNCTION approval_request_guard_update();
         SQL);
 
         // -------------------------------------------------------------------
@@ -779,6 +798,8 @@ return new class extends Migration
         DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_no_delete ON approval_decision');
         DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_no_truncate ON approval_decision');
         DB::unprepared('DROP TRIGGER IF EXISTS approval_decision_sod ON approval_decision');
+        DB::unprepared('DROP TRIGGER IF EXISTS approval_request_immutable ON approval_request');
+        DB::unprepared('DROP FUNCTION IF EXISTS approval_request_guard_update()');
         DB::unprepared('DROP FUNCTION IF EXISTS scrub_audit_payload(bigint, text, text, bigint)');
         DB::unprepared('DROP FUNCTION IF EXISTS verify_audit_chain(text)');
         DB::unprepared('DROP FUNCTION IF EXISTS audit_event_guard_update()');

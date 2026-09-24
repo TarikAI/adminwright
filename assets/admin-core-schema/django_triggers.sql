@@ -17,6 +17,8 @@
 --   * scrub_audit_payload() is the single permitted UPDATE of an audit_event.
 --   * audit_event and approval_decision reject UPDATE, DELETE and TRUNCATE.
 --   * approval_decision_sod rejects a requester approving their own request.
+--   * approval_request_immutable lets only state, executed_at and execution_result
+--     of an approval_request change, so it cannot be re-attributed or rewritten.
 --
 -- Then run grants.sql (psql) for the regulated profile.
 
@@ -37,6 +39,21 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER approval_decision_sod
     BEFORE INSERT ON approval_decision
     FOR EACH ROW EXECUTE FUNCTION enforce_separation_of_duties();
+
+CREATE OR REPLACE FUNCTION approval_request_guard_update()
+RETURNS trigger AS $$
+BEGIN
+    IF (to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
+       IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
+        RAISE EXCEPTION 'approval_request % is immutable except state, executed_at and execution_result', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER approval_request_immutable
+    BEFORE UPDATE ON approval_request
+    FOR EACH ROW EXECUTE FUNCTION approval_request_guard_update();
 
 CREATE OR REPLACE FUNCTION audit_event_hash_input(e audit_event)
 RETURNS text

@@ -1204,6 +1204,15 @@ class TestCanonicalIsSelfConsistent(unittest.TestCase):
         self.assertIn("tenant_id", CANON.columns["feature_flag"])
         self.assertIn("tenant_id", CANON.columns["config_change"])
 
+    def test_approval_requests_stay_as_written(self):
+        # round-2 finding: rewriting requested_by got a requester past the SoD trigger, and the
+        # doc listed columns as immutable that nothing enforced. Only the lifecycle may change.
+        sql = read("postgres.sql")
+        self.assertRegex(sql, r"CREATE TRIGGER approval_request_immutable\s+BEFORE UPDATE ON admin_core\.approval_request")
+        guard = sql[sql.index("FUNCTION admin_core.approval_request_guard_update"):]
+        guard = guard[: guard.index("$$ LANGUAGE plpgsql")]
+        self.assertIn("to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result'", guard)
+
     def test_deleting_a_job_cannot_erase_its_failures(self):
         # round-2 finding: admin_job_failure is immutable history, yet ON DELETE CASCADE let a
         # job delete take its failure rows with it (test_same_foreign_key_delete_actions then
@@ -1463,6 +1472,20 @@ class TestInlineSqlMatchesCanonical(unittest.TestCase):
 
     def test_drizzle_tells_the_reader_to_append_the_integrity_section(self):
         self.assertIn("Integrity section of", read("drizzle.ts"))
+
+    def test_down_migrations_drop_every_trigger_and_function(self):
+        canonical = strip_sql_comments(read("postgres.sql"))
+        triggers = sorted(set(re.findall(r"CREATE TRIGGER (\w+)\s+BEFORE \w+ ON admin_core\.(\w+)", canonical)))
+        functions = sorted(set(re.findall(r"CREATE OR REPLACE FUNCTION admin_core\.(\w+)\(", canonical)))
+        self.assertGreaterEqual(len(triggers), 9)
+        for filename, marker in (("laravel_migration.php", "public function down"), ("rails_migration.rb", "  def down")):
+            down = read(filename).split(marker, 1)[1]
+            for name, table in triggers:
+                with self.subTest(file=filename, trigger=name):
+                    self.assertIn("DROP TRIGGER IF EXISTS %s ON %s" % (name, table), down)
+            for name in functions:
+                with self.subTest(file=filename, function=name):
+                    self.assertRegex(down, r"DROP FUNCTION IF EXISTS %s\(" % name)
 
 
 class TestPackContents(unittest.TestCase):

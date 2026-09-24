@@ -14,7 +14,9 @@ WHAT DJANGO CANNOT ENFORCE IN MODELS — add these in a migration:
   1. Triggers and functions. Append-only enforcement on AuditEvent and
      ApprovalDecision, the audit hash chain (chain_seq / prev_hash / row_hash are
      assigned by a BEFORE INSERT trigger), verify_audit_chain(), the payload
-     scrub function, and the separation-of-duties trigger. They live in
+     scrub function, the separation-of-duties trigger, and the trigger that keeps
+     an ApprovalRequest as written (only state, executed_at and execution_result
+     change; save those with save(update_fields=[...])). They live in
      ./django_triggers.sql (unqualified names, canonical column names). Model-level
      guards (save() overrides, signals) are bypassed by bulk operations, raw SQL and
      other services.

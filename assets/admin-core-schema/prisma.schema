@@ -30,8 +30,9 @@
 //   3. Triggers and functions. Append-only enforcement on audit_event and
 //      approval_decision (UPDATE / DELETE / TRUNCATE), the audit hash chain (the
 //      trigger assigns chain_seq, prev_hash, row_hash — the placeholder defaults
-//      below are overwritten), verify_audit_chain(), scrub_audit_payload(), and the
-//      separation-of-duties trigger.
+//      below are overwritten), verify_audit_chain(), scrub_audit_payload(), the
+//      separation-of-duties trigger, and the trigger that keeps an approval_request
+//      as written (only state, executed_at and execution_result change).
 //
 // Then run grants.sql (psql) for the regulated profile.
 //

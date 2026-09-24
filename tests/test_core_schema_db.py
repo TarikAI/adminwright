@@ -80,6 +80,13 @@ class TestCoreSchemaOnPostgres(PgCase):
             "DELETE admin_job with failures was allowed",
         )
 
+    def test_verification_is_not_vacuous_request_rewrite(self):
+        # without the trigger, re-attributing a request gets the requester past the SoD check
+        self.assert_verification_fails_without(
+            "DROP TRIGGER approval_request_immutable ON admin_core.approval_request",
+            "re-attributing a request was allowed",
+        )
+
     def test_verification_is_not_vacuous_legal_hold(self):
         self.assert_verification_fails_without(
             "ALTER TABLE admin_core.data_subject_request DROP CONSTRAINT data_subject_request_hold_blocks_fulfilment",

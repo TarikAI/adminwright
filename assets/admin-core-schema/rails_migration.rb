@@ -14,9 +14,10 @@
 #   * Triggers and functions: append-only enforcement on audit_event and
 #     approval_decision, the audit hash chain (chain_seq / prev_hash / row_hash are
 #     assigned by a BEFORE INSERT trigger; leave them out of your inserts),
-#     verify_audit_chain(), scrub_audit_payload(), and the separation-of-duties
-#     trigger. ActiveRecord callbacks are bypassed by `update_all`, `delete_all`,
-#     raw SQL, and other services.
+#     verify_audit_chain(), scrub_audit_payload(), the separation-of-duties
+#     trigger, and the trigger that keeps an approval_request as written (only
+#     state, executed_at and execution_result change). ActiveRecord callbacks are
+#     bypassed by `update_all`, `delete_all`, raw SQL, and other services.
 #
 # Then run grants.sql (least-privilege grants for the application role; the
 # regulated profile requires it) with psql.
@@ -338,7 +339,9 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
     end
 
     # Separation of duties: the requester may not approve their own request.
-    # Enforced in the database because that is the whole point of the control.
+    # Enforced in the database because that is the whole point of the control. The
+    # request itself is fixed once written (only state, executed_at and
+    # execution_result change), so it cannot be re-attributed to get past it.
     execute <<~'SQL'
       CREATE OR REPLACE FUNCTION enforce_separation_of_duties()
       RETURNS trigger AS $$
@@ -357,6 +360,21 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       CREATE TRIGGER approval_decision_sod
           BEFORE INSERT ON approval_decision
           FOR EACH ROW EXECUTE FUNCTION enforce_separation_of_duties();
+
+      CREATE OR REPLACE FUNCTION approval_request_guard_update()
+      RETURNS trigger AS $$
+      BEGIN
+          IF (to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
+             IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
+              RAISE EXCEPTION 'approval_request % is immutable except state, executed_at and execution_result', OLD.id;
+          END IF;
+          RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      CREATE TRIGGER approval_request_immutable
+          BEFORE UPDATE ON approval_request
+          FOR EACH ROW EXECUTE FUNCTION approval_request_guard_update();
     SQL
 
     # -----------------------------------------------------------------------
@@ -773,6 +791,8 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
     execute 'DROP TRIGGER IF EXISTS approval_decision_no_delete ON approval_decision'
     execute 'DROP TRIGGER IF EXISTS approval_decision_no_truncate ON approval_decision'
     execute 'DROP TRIGGER IF EXISTS approval_decision_sod ON approval_decision'
+    execute 'DROP TRIGGER IF EXISTS approval_request_immutable ON approval_request'
+    execute 'DROP FUNCTION IF EXISTS approval_request_guard_update()'
     execute 'DROP FUNCTION IF EXISTS scrub_audit_payload(bigint, text, text, bigint)'
     execute 'DROP FUNCTION IF EXISTS verify_audit_chain(text)'
     execute 'DROP FUNCTION IF EXISTS audit_event_guard_update()'

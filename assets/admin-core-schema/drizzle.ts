@@ -8,9 +8,10 @@
 //   1. Triggers and functions. Append-only enforcement on auditEvent and
 //      approvalDecision, the audit hash chain (chain_seq / prev_hash / row_hash are
 //      assigned by a BEFORE INSERT trigger; leave them out of your inserts),
-//      verify_audit_chain(), scrub_audit_payload(), and the separation-of-duties
-//      trigger. Application-level guards are bypassed by raw queries and other
-//      services.
+//      verify_audit_chain(), scrub_audit_payload(), the separation-of-duties
+//      trigger, and the trigger that keeps an approval_request as written (only
+//      state, executed_at and execution_result change). Application-level guards
+//      are bypassed by raw queries and other services.
 //   2. Nothing else. Drizzle expresses CHECK constraints (`check()`), partial
 //      unique indexes (`.where()`) and expression indexes (a sql template inside
 //      `.on()`) natively, and all three are used below.

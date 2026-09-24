@@ -107,6 +107,21 @@ CREATE TRIGGER approval_decision_sod
     BEFORE INSERT ON approval_decision
     FOR EACH ROW EXECUTE FUNCTION enforce_separation_of_duties();
 
+CREATE OR REPLACE FUNCTION approval_request_guard_update()
+RETURNS trigger AS $$
+BEGIN
+    IF (to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
+       IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
+        RAISE EXCEPTION 'approval_request % is immutable except state, executed_at and execution_result', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER approval_request_immutable
+    BEFORE UPDATE ON approval_request
+    FOR EACH ROW EXECUTE FUNCTION approval_request_guard_update();
+
 CREATE OR REPLACE FUNCTION audit_event_hash_input(e audit_event)
 RETURNS text
 LANGUAGE sql STABLE AS $$

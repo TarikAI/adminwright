@@ -709,6 +709,25 @@ CREATE TRIGGER approval_decision_sod
     BEFORE INSERT ON admin_core.approval_decision
     FOR EACH ROW EXECUTE FUNCTION admin_core.enforce_separation_of_duties();
 
+-- An approval_request is a record of what was asked. Only its lifecycle columns change;
+-- rewriting requested_by would let the requester approve their own request past the
+-- check above, and rewriting the payload, its hash, the target or required_approvals
+-- would change what the approvals were given for.
+CREATE OR REPLACE FUNCTION admin_core.approval_request_guard_update()
+RETURNS trigger AS $$
+BEGIN
+    IF (to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
+       IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
+        RAISE EXCEPTION 'approval_request % is immutable except state, executed_at and execution_result', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER approval_request_immutable
+    BEFORE UPDATE ON admin_core.approval_request
+    FOR EACH ROW EXECUTE FUNCTION admin_core.approval_request_guard_update();
+
 -- Append-only enforcement.
 CREATE OR REPLACE FUNCTION admin_core.deny_audit_mutation()
 RETURNS trigger AS $$
