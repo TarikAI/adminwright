@@ -4370,11 +4370,21 @@ def read_community_observations(skill_root=None):
     if not directory.exists():
         return records
     for path in sorted(directory.glob("*.json")):
+        # Decoded like every other file this tool reads: a bundle re-saved on
+        # Windows with a BOM was silently dropped, and one with a stray invalid
+        # byte crashed promote for the maintainer. A bundle that cannot be read
+        # is skipped by name; it never stops the others from counting.
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            payload = json.loads(decode_text_bytes(path.read_bytes(), path, allow_utf16=True))
+        except (OSError, ManifestError, ValueError, RecursionError) as exc:
+            stderr("NOTE: skipped community bundle " + str(path) + ": "
+                   + (str(exc).splitlines() or [type(exc).__name__])[0][:200])
             continue
-        for index, record in enumerate(as_list(payload.get("observations"))):
+        if not isinstance(payload, dict) or not isinstance(payload.get("observations"), list):
+            stderr("NOTE: skipped community bundle " + str(path)
+                   + ": not a bundle written by `promote --export` (no observations list)")
+            continue
+        for index, record in enumerate(payload["observations"]):
             if not isinstance(record, dict):
                 continue
             record["community"] = True
@@ -4385,11 +4395,13 @@ def read_community_observations(skill_root=None):
             record["fingerprint"] = observation_fingerprint(record)
             # A contributed record counts as ONE project, its first fingerprint.
             # The bundle's `projects` list cannot be verified, so it may not
-            # multiply one contribution into several sightings.
+            # multiply one contribution into several sightings, and a projectKey
+            # written into the bundle is never believed.
+            record.pop("projectKey", None)
             contributors = as_list(record.get("projects"))
             record["project"] = (
-                text_of(contributors[0]) if contributors
-                else "community:" + path.stem + ":" + str(index)
+                (text_of(contributors[0]) if contributors else "")
+                or "community:" + path.stem + ":" + str(index)
             )
             records.append(record)
     return records

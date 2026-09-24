@@ -504,6 +504,30 @@ class TestExportAndCommunity(LearningCase):
         self.assertNotIn("CANDIDATES", lines)
         self.assertEqual([line for line in lines if line.startswith("## forged")], [])
 
+    def test_bundles_saved_by_windows_tools_are_read_and_broken_ones_skipped_by_name(self):
+        manifest = self.project("Solo", [("gap", "Bulk action authorized once for the whole batch",
+                                          "Require per-target authorization in bulk commands")])
+        self.harvest(manifest)
+        bundle, _err = self.export()
+        self.assertEqual(len(bundle["observations"]), 1)
+        observation = dict(bundle["observations"][0], projects=["p_elsewhere"])
+        text = json.dumps({"bundleVersion": "1", "observations": [observation]})
+        directory = self.tmp / "skill" / "community" / "observations"
+        directory.mkdir(parents=True)
+        (directory / "a-bom.json").write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+        (directory / "b-utf16.json").write_bytes(text.encode("utf-16"))
+        (directory / "c-broken.json").write_bytes(b"\xef\xbb\xbf{\"observations\": [\xff]}")
+        (directory / "d-list.json").write_text("[1, 2]", encoding="utf-8")
+        code, out, err = run("promote", "--json", "--include-community", "--skill-root",
+                             self.tmp / "skill", env=self.env)
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("Traceback", err)
+        payload = json.loads(out)
+        self.assertEqual(payload["communityRecords"], 2, "the BOM and UTF-16 bundles both count")
+        self.assertIn("c-broken.json", err)
+        self.assertIn("d-list.json", err)
+        self.assertEqual(len(payload["candidates"]), 1)
+
     def test_an_export_never_re_publishes_contributions(self):
         manifest = self.project("Solo", [("gap", "Bulk action authorized once for the whole batch",
                                           "Require per-target authorization in bulk commands")])
