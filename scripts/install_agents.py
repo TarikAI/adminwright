@@ -3,10 +3,9 @@
 """Install the adminwright agents into any harness.
 
 The agent files in <skill-dir>/agents/ are written once, harness-neutral, with the
-token ${CLAUDE_PLUGIN_ROOT} standing for the skill directory. Claude Code expands
-that token in plugin installs; every other harness receives copies with the token
-already replaced, written in the shape and at the location that harness discovers
-agents today. Standard library only.
+token ${CLAUDE_PLUGIN_ROOT} standing for the skill directory. Claude Code fills it
+in for plugin installs; every other harness receives copies written in the shape
+and at the location that harness discovers agents today. Standard library only.
 
 Usage:
 
@@ -14,7 +13,7 @@ Usage:
         [--skill-dir <dir>] [--append-pointer]
 
 Harnesses. Native agent locations and required fields were verified against each
-harness's official documentation on 2026-09-23; the URLs sit beside the HARNESSES
+harness's official documentation on 2026-09-24; the URLs sit beside the HARNESSES
 entries. A harness with no documented agents concept gets only the harness-neutral
 copy and the pointer block; no location is invented for it.
 
@@ -24,7 +23,7 @@ copy and the pointer block; no location is invented for it.
                   + .adminwright/agents/ + pointer block for AGENTS.md
     antigravity   .agents/agents/<name>/agent.md       name, description
                   + .adminwright/agents/ + pointer block for AGENTS.md
-    gemini        .gemini/agents/<name>.md             name, description
+    gemini        .gemini/agents/<name>.md             name, description, max_turns, timeout_mins
                   + .adminwright/agents/ + pointer block for GEMINI.md
     cursor        .cursor/agents/<name>.md             name, description
                   + .adminwright/agents/ + rule .cursor/rules/adminwright.mdc
@@ -32,23 +31,27 @@ copy and the pointer block; no location is invented for it.
                   (Pi has no built-in subagents)
     generic       .adminwright/agents/ + pointer block printed only
 
-.adminwright/agents/ is the harness-neutral fallback: the source files, verbatim,
-with the skill path resolved. Native files are rebuilt from each source's `name`,
-`description` and body only, so Claude-specific frontmatter (`tools`, `model`)
-never reaches a harness that would misread it.
+.adminwright/agents/ is the harness-neutral fallback: the source files, verbatim
+apart from the skill path. Native files are rebuilt from each source's `name`,
+`description` and body only, so Claude-specific frontmatter (`model`,
+`disallowedTools`) never reaches a harness that would misread or reject it.
 
-Paths written into files a project may commit are never machine-absolute where
-that can be avoided: the skill is named relative to the project root when it lives
-inside the project, and as ${CLAUDE_PLUGIN_ROOT} otherwise, with the absolute path
-only inside an HTML comment. The agent copies are executable prompts, so a skill
-outside the project still gets its resolved absolute path there.
+No file the installer writes for a project to commit carries a machine's absolute
+path. A skill inside the project is named relative to the project root. A skill
+outside it (a plugin cache, ~/.claude/skills, a clone elsewhere) is named by the
+placeholder <skill>, and this machine's absolute path goes to
+.adminwright/skill-dir, which the installer adds to the project's .gitignore.
+Every agent's "Locate the skill" section reads that file before its search list.
 
-For harnesses without native subagent support, the pointer block instructs the
-main agent to run the passes sequentially with distinct agent ids, per the
-single-agent degradation rules in references/multi-agent.md. `--append-pointer`
-writes the block into the harness's instruction file; the block is delimited by
-marker comments, so a reinstall replaces it in place instead of duplicating or
-skipping it. Without the flag the block is printed for manual paste.
+The pointer block tells the main agent where the passes are and in what order;
+where a harness cannot spawn subagents it runs the passes sequentially with
+distinct agent ids, per the single-agent degradation rules in
+references/multi-agent.md. Codex, Antigravity and Pi all read AGENTS.md, so the
+block carries one marked section per harness installed into that file, and a
+reinstall in any order keeps every section. `--append-pointer` writes the block
+into the instruction file and replaces it in place on a reinstall; without the
+flag the block is printed for manual paste. Cursor's rule file is a dedicated
+document and is rewritten on every install.
 
 Exit codes: 0 success, 2 usage or IO failure.
 """
@@ -62,14 +65,30 @@ from collections import namedtuple
 from pathlib import Path
 
 TOKEN = "${CLAUDE_PLUGIN_ROOT}"
+# What installed copies say where the source says TOKEN, when the skill lives
+# outside the project: the placeholder every agent's "Locate the skill" section
+# defines and uses for the skill directory. It is deliberately not a ${...}
+# variable: outside a Claude Code plugin no harness expands TOKEN, and Gemini CLI
+# reads ${name} in a subagent body as a template input and refuses to start a
+# subagent it has no input for.
+PLACEHOLDER = "<skill>"
+# This machine's absolute skill path, for agents whose copies name PLACEHOLDER.
+# It differs per machine, so the installer git-ignores it.
+MACHINE_PATH_FILE = ".adminwright/skill-dir"
+GITIGNORE_ENTRY = "/" + MACHINE_PATH_FILE
+GITIGNORE_COMMENT = "# adminwright: this machine's skill path, written by install_agents.py"
+
 MARKER_START = "<!-- adminwright-agents:start -->"
 MARKER_END = "<!-- adminwright-agents:end -->"
+# Opens one harness's section inside the pointer block, so a later install into
+# the same instruction file knows which harnesses already share it.
+SECTION_MARK = "<!-- adminwright-harness: {} -->"
 
 # Harness-neutral fallback copy, written for every harness that has no complete
 # native story of its own.
 NEUTRAL_DIR = ".adminwright/agents"
 
-CHECKED = "2026-09-23"
+CHECKED = "2026-09-24"
 
 # native_dir          project-relative directory the harness discovers agents in
 #                     (None: the harness documents no agents concept)
@@ -82,40 +101,51 @@ Harness = namedtuple(
 
 HARNESSES = {
     # Subagents are Markdown + YAML frontmatter in .claude/agents/; `name` and
-    # `description` are required, `tools` and `model` optional. The source files
-    # already have exactly this shape, so they are copied verbatim.
+    # `description` are required, `model` and `disallowedTools` optional. The
+    # source files already have exactly this shape, so they are copied verbatim.
+    # Claude Code substitutes ${CLAUDE_PLUGIN_ROOT} in plugin agent content only,
+    # not in .claude/agents/, so these copies name the skill like any other.
     "claude-code": Harness(
         ".claude/agents", "claude", None, False,
-        ("https://code.claude.com/docs/en/sub-agents",), CHECKED),
-    # opencode reads .opencode/agents (plural); the singular directory is not a
-    # fallback. `description` is required, `mode` defaults to `all` so it is set
-    # to `subagent`. `name` is the file name and any unknown frontmatter key is
-    # forwarded to the model provider as an option, so `name`, `tools` (deprecated
-    # there) and `model` (needs provider/model-id) must not be carried over.
+        ("https://code.claude.com/docs/en/sub-agents",
+         "https://code.claude.com/docs/en/plugins-reference#environment-variables"), CHECKED),
+    # opencode reads .opencode/agents (plural; its loader also accepts the
+    # singular directory, which the docs do not mention). `description` is
+    # required, `mode` defaults to `all` so it is set to `subagent`. `name` is the
+    # file name and any unknown frontmatter key is forwarded to the model provider
+    # as an option, so `name`, `tools` (deprecated there), `model` (needs
+    # provider/model-id) and `disallowedTools` must not be carried over.
     "opencode": Harness(
         ".opencode/agents", "opencode", None, False,
         ("https://opencode.ai/docs/agents/",), CHECKED),
     # Custom agents are standalone TOML files in .codex/agents/ (project) or
     # ~/.codex/agents/; `name`, `description` and `developer_instructions` are
-    # required. AGENTS.md is Codex's project instruction file.
+    # required. Current Codex releases spawn them when asked, including by an
+    # AGENTS.md instruction, and AGENTS.md is Codex's project instruction file.
+    # The docs moved to learn.chatgpt.com; the developers.openai.com pages still
+    # serve the same text with these as their canonical links.
     "codex": Harness(
         ".codex/agents", "codex", "AGENTS.md", True,
-        ("https://developers.openai.com/codex/subagents",
-         "https://developers.openai.com/codex/guides/agents-md"), CHECKED),
-    # Custom subagents are `.agents/agents/<name>.md` or `.agents/agents/<name>/agent.md`
-    # (workspace) with required `name` and `description`; the folder form is the
-    # one both documentation pages show. The docs do not say what an omitted
-    # `tools` list means, so only the required fields are written. Antigravity
-    # reads AGENTS.md at the workspace root.
+        ("https://learn.chatgpt.com/docs/agent-configuration/subagents",
+         "https://learn.chatgpt.com/docs/agent-configuration/agents-md"), CHECKED),
+    # Custom subagents are `.agents/agents/<name>.md` or
+    # `.agents/agents/<name>/agent.md` (workspace) with required `name` and
+    # `description`; the folder form is the template the /agents panel prints.
+    # `tools` is an allowlist, and an unknown name can hang the subagent (a
+    # known issue the docs state), so only the required fields are written.
+    # Antigravity reads AGENTS.md (and GEMINI.md) at the workspace root.
     "antigravity": Harness(
         ".agents/agents", "antigravity", "AGENTS.md", True,
-        ("https://antigravity.google/docs/subagents/",
-         "https://antigravity.google/docs/cli/commands/agents/",
-         "https://antigravity.google/docs/cli/best-practices/"), CHECKED),
+        ("https://antigravity.google/docs/subagents",
+         "https://antigravity.google/docs/cli/commands/agents",
+         "https://antigravity.google/docs/rules"), CHECKED),
     # Custom subagents are Markdown in .gemini/agents/ (project) or
     # ~/.gemini/agents/; `name` (lowercase slug) and `description` are required,
-    # an omitted `tools` inherits the parent's. GEMINI.md is the default
-    # context file; AGENTS.md is read only if context.fileName lists it.
+    # an omitted `tools` inherits the parent's, and the frontmatter schema is
+    # strict (an unknown key fails the load). `max_turns` and `timeout_mins`
+    # default to 30 and 10 (see GEMINI_RUN_LIMITS). The body is the system prompt
+    # and is templated (see GEMINI_TEMPLATE). GEMINI.md is the default context
+    # file; AGENTS.md is read only if context.fileName lists it.
     "gemini": Harness(
         ".gemini/agents", "gemini", "GEMINI.md", True,
         ("https://geminicli.com/docs/core/subagents/",
@@ -138,6 +168,14 @@ HARNESSES = {
     # Any other harness: the neutral copy and a printed pointer block. Nothing
     # to verify, so no docs.
     "generic": Harness(None, None, None, True, (), CHECKED),
+}
+
+# How the pointer block names a harness that discovers the prompts natively.
+LABELS = {
+    "codex": "Codex",
+    "antigravity": "Antigravity",
+    "gemini": "Gemini CLI",
+    "cursor": "Cursor",
 }
 
 # Instruction files that are a whole rule document rather than a shared file to
@@ -163,6 +201,18 @@ AGENT_ORDER = (
 )
 
 NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+
+# Gemini CLI fills ${name} placeholders in a subagent's system prompt from its
+# inputs and fails the dispatch on any it lacks; a Markdown subagent has only
+# `query`.
+GEMINI_TEMPLATE = re.compile(r"\$\{(\w+)\}")
+GEMINI_INPUTS = frozenset(("query",))
+# Gemini CLI stops a subagent after 30 turns or 10 minutes unless its
+# frontmatter says otherwise, which cuts an architect's discovery or an
+# implementer's slice short. Both keys take any positive integer; at the limit
+# the subagent gets one grace turn to report. 200 turns of model and tool time
+# (builds, tests) fit well inside 120 minutes, so the turn limit binds first.
+GEMINI_RUN_LIMITS = (("max_turns", "200"), ("timeout_mins", "120"))
 
 
 class InstallError(Exception):
@@ -211,16 +261,16 @@ def relative_inside(path, root):
 
 
 def skill_reference(skill_dir, project_root):
-    """How committed text names the skill: (display, absolute hint or None).
+    """How committed files name the skill: (text, project-relative path or None).
 
-    Inside the project: a project-relative path, nothing machine-specific.
-    Outside it: the ${CLAUDE_PLUGIN_ROOT} variable, and the absolute path is
-    returned separately so it can live in an HTML comment only.
+    Inside the project: the project-relative path, which is right on every
+    machine. Outside it: PLACEHOLDER, never the absolute path; that goes to the
+    git-ignored MACHINE_PATH_FILE instead.
     """
     rel = relative_inside(skill_dir, project_root)
     if rel is not None:
-        return rel, None
-    return TOKEN, portable(skill_dir)
+        return rel, rel
+    return PLACEHOLDER, None
 
 
 # --- source agent files ---------------------------------------------------------
@@ -267,7 +317,7 @@ def frontmatter_fields(block):
 
 
 def load_agent(path, skill_text):
-    """Read one source agent file, resolve the skill token, split it into parts."""
+    """Read one source agent file, name the skill, split it into parts."""
     text = path.read_text(encoding="utf-8")  # universal newlines: always "\n" here
     if text.startswith("\ufeff"):
         text = text[1:]
@@ -318,6 +368,16 @@ def markdown_agent(fields, body):
     return "---\n" + front + "---\n\n" + body
 
 
+def check_gemini_body(agent):
+    """Refuse a body Gemini CLI would fail to template at dispatch time."""
+    unknown = sorted(set(GEMINI_TEMPLATE.findall(agent.body)) - GEMINI_INPUTS)
+    if unknown:
+        raise InstallError(
+            agent.stem + ".md: Gemini CLI reads ${" + unknown[0] + "} in a subagent body as a "
+            "template input and refuses to start the subagent without it; write it another "
+            "way (for example $" + unknown[0] + " or <" + unknown[0] + ">) and rerun")
+
+
 def render_native(native_format, agent):
     """(path relative to the native directory, file text) for one agent."""
     if native_format == "claude":
@@ -325,7 +385,12 @@ def render_native(native_format, agent):
     if native_format == "opencode":
         return agent.name + ".md", markdown_agent(
             [("description", quote(agent.description)), ("mode", "subagent")], agent.body)
-    if native_format in ("gemini", "cursor"):
+    if native_format == "gemini":
+        check_gemini_body(agent)
+        return agent.name + ".md", markdown_agent(
+            [("name", agent.name), ("description", quote(agent.description))]
+            + list(GEMINI_RUN_LIMITS), agent.body)
+    if native_format == "cursor":
         return agent.name + ".md", markdown_agent(
             [("name", agent.name), ("description", quote(agent.description))], agent.body)
     if native_format == "antigravity":
@@ -346,11 +411,131 @@ def write_text(path, text):
         handle.write(text)
 
 
+# --- this machine's skill path --------------------------------------------------
+
+def is_skill_dir(path):
+    """A directory an agent can run the skill from."""
+    return (path / "SKILL.md").is_file() and (path / "scripts" / "admin_console_manifest.py").is_file()
+
+
+def durable_skill_dir(skill_dir):
+    """(directory to record for this machine, message or None).
+
+    Claude Code copies a marketplace plugin to
+    <plugins>/cache/<marketplace>/<plugin>/<version>/ and deletes that directory
+    about 14 days after the next update, while the marketplace's clone at
+    <plugins>/marketplaces/<marketplace>/ stays. A skill found in the cache is
+    recorded as the clone when the clone holds it too; otherwise the message is
+    a warning that the recorded path will go stale.
+    """
+    resolved = Path(skill_dir).resolve()
+    for ancestor in resolved.parents:
+        if ancestor.name.lower() != "cache" or ancestor.parent.name.lower() != "plugins":
+            continue
+        inside = resolved.relative_to(ancestor).parts  # marketplace, plugin, version, ...
+        if len(inside) < 3:
+            break
+        clone = ancestor.parent / "marketplaces" / inside[0]
+        for candidate in (clone.joinpath(*inside[3:]), clone):
+            if is_skill_dir(candidate):
+                return candidate, (
+                    "The skill is in Claude Code's versioned plugin cache (" + portable(resolved)
+                    + "), which is deleted about 14 days after the plugin updates; recording the "
+                    "marketplace clone " + portable(candidate) + " for this machine instead")
+        return resolved, (
+            "WARNING: " + portable(resolved) + " is in Claude Code's versioned plugin cache, which "
+            "is deleted about 14 days after the plugin updates, and no marketplace clone holds "
+            "the skill; rerun this installer after each update, or pass --skill-dir with a "
+            "directory that stays")
+    return resolved, None
+
+
+def record_machine_path(project_root, skill_dir):
+    """Write this machine's absolute skill path to MACHINE_PATH_FILE.
+
+    One line, forward slashes, so an agent (or a shell) can read it as is.
+    Returns True when the file changed.
+    """
+    path = project_root / MACHINE_PATH_FILE
+    text = portable(skill_dir) + "\n"
+    if path.is_file():
+        try:
+            if path.read_text(encoding="utf-8") == text:
+                return False
+        except UnicodeDecodeError:
+            pass
+    write_text(path, text)
+    return True
+
+
+def ignore_machine_path(project_root):
+    """Make the project's .gitignore ignore MACHINE_PATH_FILE.
+
+    Returns "created", "added", "present", or "unreadable" for a .gitignore that
+    is not UTF-8, which is left untouched for the caller to warn about. A file
+    that is CRLF throughout stays CRLF; everything already in it is kept.
+    """
+    path = project_root / ".gitignore"
+    if not path.exists():
+        write_text(path, GITIGNORE_COMMENT + "\n" + GITIGNORE_ENTRY + "\n")
+        return "created"
+    try:
+        existing, newline = read_instruction_file(path)
+    except InstallError:
+        return "unreadable"
+    entries = {line.strip() for line in existing.split("\n")}
+    if GITIGNORE_ENTRY in entries or MACHINE_PATH_FILE in entries:
+        return "present"
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    if existing.strip():
+        existing += "\n"
+    merged = existing + GITIGNORE_COMMENT + "\n" + GITIGNORE_ENTRY + "\n"
+    with open(str(path), "w", encoding="utf-8", newline="") as handle:
+        handle.write(merged.replace("\n", newline) if newline != "\n" else merged)
+    return "added"
+
+
+def report_machine_path(project_root, skill_dir, needed):
+    """Keep MACHINE_PATH_FILE current and git-ignored.
+
+    Written whenever the committed files name PLACEHOLDER (`needed`); refreshed,
+    never left stale, when an earlier install wrote it and the skill now lives
+    inside the project.
+    """
+    path = project_root / MACHINE_PATH_FILE
+    if not needed and not path.exists():
+        return
+    recorded, message = durable_skill_dir(skill_dir)
+    if message:
+        print(message, file=sys.stderr if message.startswith("WARNING") else sys.stdout)
+    if record_machine_path(project_root, recorded):
+        if needed:
+            print("Wrote this machine's skill path to " + str(path) + "; the agent files name "
+                  "the skill " + PLACEHOLDER + " and read the path from there")
+        else:
+            print("Refreshed this machine's skill path in " + str(path))
+    status = ignore_machine_path(project_root)
+    gitignore = project_root / ".gitignore"
+    if status == "created":
+        print("Created " + str(gitignore) + " ignoring " + GITIGNORE_ENTRY
+              + " (a machine's path must not be committed)")
+    elif status == "added":
+        print("Added " + GITIGNORE_ENTRY + " to " + str(gitignore)
+              + " (a machine's path must not be committed)")
+    elif status == "unreadable":
+        print("WARNING: " + str(gitignore) + " is not valid UTF-8, so it was not modified; add "
+              + GITIGNORE_ENTRY + " to it by hand so this machine's path is never committed",
+              file=sys.stderr)
+
+
 # --- pointer block --------------------------------------------------------------
 
-# Extra dispatch guidance per harness, appended inside the pointer block. Each
-# entry exists because that harness's default behavior fought the skill in the
-# field; keep entries short and behavioral.
+# Extra dispatch guidance per harness, inside that harness's section of the
+# pointer block. Each entry exists because that harness's default behavior fought
+# the skill in the field; keep entries short and behavioral. Every entry opens
+# with "<Name> note", which is how blocks written before section marks existed
+# are recognized.
 HARNESS_NOTES = {
     "antigravity": [
         "Antigravity note — respect existing plans: this harness drafts its own",
@@ -362,17 +547,26 @@ HARNESS_NOTES = {
         "record.",
     ],
     "codex": [
-        "Codex note: run the passes sequentially in one session, adopting one role file at",
-        "a time. Announce each pass switch in one line (role, agent id, exit condition)",
-        "before continuing, so the transcript shows where one role's authority ended.",
+        "Codex note: Codex spawns subagents when these instructions ask. Run each pass as the",
+        "custom agent of the same name (for example `adminwright-architect`), and let a pass",
+        "finish, with its exit condition checked, before starting one the order above puts",
+        "after it. Subagents inherit this session's sandbox, so a read-only sandbox stops",
+        "every pass (each one writes the manifest). Where subagents are off (`[agents]",
+        "enabled = false`), run the passes sequentially in this session instead and announce",
+        "each switch in one line (role, agent id, exit condition), so the transcript shows",
+        "where one role's authority ended.",
     ],
     "gemini": [
-        "Gemini note: run the passes sequentially, one role file at a time, and re-read the",
-        "manifest from disk at each pass switch — do not carry a cached copy across passes.",
+        "Gemini note: dispatch each pass to the subagent of the same name; subagents cannot",
+        "call each other, so this session orchestrates them. Whether a pass runs as a",
+        "subagent or here, re-read the manifest from disk at each pass switch — do not carry",
+        "a cached copy across passes.",
     ],
     "cursor": [
-        "Cursor note: keep this file loaded as a rule; adopt one role file at a time and",
-        "make the current role explicit in each response so review independence is visible.",
+        "Cursor note: keep this file loaded as a rule. Dispatch each pass to the subagent of",
+        "the same name; when you run a pass yourself instead, adopt one role file at a time",
+        "and make the current role explicit in each response so review independence is",
+        "visible.",
     ],
     "pi": [
         "Pi note: run the passes sequentially, one role file at a time, with a distinct",
@@ -381,42 +575,46 @@ HARNESS_NOTES = {
 }
 
 
-def pointer_block(agent_dir, skill_dir, harness=None, absolute_hint=None, native_dir=None):
+def harness_section(name):
+    """One harness's lines inside the pointer block, opened by its section mark;
+    empty for a harness with nothing to say."""
+    lines = []
+    native_dir = HARNESSES[name].native_dir
+    if native_dir and name in LABELS:
+        lines.append(LABELS[name] + " discovers these prompts natively in `" + native_dir + "/`.")
+    lines += HARNESS_NOTES.get(name, [])
+    return [SECTION_MARK.format(name)] + lines if lines else []
+
+
+def pointer_block(agent_dir, skill_rel, harnesses=()):
     """The marker-delimited block that points a harness at the skill and agents.
 
-    `skill_dir` is how the block names the skill (a project-relative path, or the
-    ${CLAUDE_PLUGIN_ROOT} variable). `absolute_hint`, when given, is the skill's
-    absolute path on the installing machine; it appears only in an HTML comment.
+    `skill_rel` is the skill's path relative to the project root, or None when
+    the skill lives outside the project; the block then sends the reader to the
+    git-ignored MACHINE_PATH_FILE, so it never holds a machine's path. Each of
+    `harnesses` gets its own marked section, in HARNESSES order, whatever order
+    they were installed in.
     """
     lines = [MARKER_START, "## Adminwright agent passes", ""]
-    if absolute_hint is None:
+    if skill_rel is not None:
         lines += [
             "This project builds or audits its admin console under the adminwright skill at",
-            "`" + skill_dir + "` (start from its `SKILL.md`). Paths in this block are relative",
+            "`" + skill_rel + "` (start from its `SKILL.md`). Paths in this block are relative",
             "to the project root. The role prompts in",
         ]
     else:
         lines += [
-            "<!-- adminwright skill directory on the machine that ran the installer (not portable): "
-            + absolute_hint.replace(">", "%3E") + " -->",
-            "",
-            "This project builds or audits its admin console under the adminwright skill,",
-            "whose directory is `" + skill_dir + "` (start from its `SKILL.md`). Where that",
-            "variable is not set, use the path in the comment above or the lookup order in each",
-            "role file's \"Locate the skill\" section. Other paths in this block are relative to",
-            "the project root. The role prompts in",
+            "This project builds or audits its admin console under the adminwright skill (start",
+            "from its `SKILL.md`). Its directory differs per machine, so it is not written here:",
+            "read it from the first line of `" + MACHINE_PATH_FILE + "`, which the installer",
+            "writes and git-ignores, or resolve it with the \"Locate the skill\" section of any",
+            "role file. Paths in this block are relative to the project root. The role prompts in",
         ]
     lines += [
         "`" + agent_dir + "/` define six passes. If this harness can spawn subagents, dispatch",
         "each file as one. If not, run them yourself sequentially, adopting one file at a",
         "time as your instructions, with a distinct agent id per pass — the single-agent",
         "degradation rules in the skill's `references/multi-agent.md` apply.",
-    ]
-    if native_dir:
-        lines += [
-            "This harness also discovers the same prompts natively in `" + native_dir + "/`.",
-        ]
-    lines += [
         "",
         "Order: architect (always first; plan-validate must exit 0), implementer for the",
         "auth/authz/tenancy/audit spine (serialized), implementers per entity slice,",
@@ -437,9 +635,12 @@ def pointer_block(agent_dir, skill_dir, harness=None, absolute_hint=None, native
         "remains deferred or blocked with the reason. Never claim 'production-ready'",
         "without those exit codes at 0.",
     ]
-    notes = HARNESS_NOTES.get(harness or "")
-    if notes:
-        lines += [""] + notes
+    wanted = set(harnesses)
+    for name in HARNESSES:
+        if name in wanted:
+            section = harness_section(name)
+            if section:
+                lines += [""] + section
     lines.append(MARKER_END)
     return "\n".join(lines) + "\n"
 
@@ -449,6 +650,39 @@ BLOCK_RE = re.compile(re.escape(MARKER_START) + r".*?" + re.escape(MARKER_END) +
 # pasted without its markers) is migrated rather than duplicated.
 LEGACY_HEADING = re.compile(r"^## Adminwright agent passes[ \t]*$", re.MULTILINE)
 NEXT_HEADING = re.compile(r"^#{1,2}[ \t]+\S", re.MULTILINE)
+SECTION_RE = re.compile(r"<!-- adminwright-harness: ([a-z0-9_-]+) -->")
+# The first words of every HARNESS_NOTES entry since the first release.
+LEGACY_NOTE = re.compile(r"^(Antigravity|Codex|Gemini|Cursor|Pi) note\b", re.MULTILINE)
+
+
+def adminwright_text(existing):
+    """The adminwright part of an instruction file: every marked block, or else
+    an unmarked section under the block's heading; "" when there is none."""
+    blocks = [match.group(0) for match in BLOCK_RE.finditer(existing)]
+    if blocks:
+        return "".join(blocks)
+    legacy = LEGACY_HEADING.search(existing)
+    if legacy:
+        following = NEXT_HEADING.search(existing, legacy.end())
+        return existing[legacy.start():following.start() if following else len(existing)]
+    return ""
+
+
+def harnesses_in(block_text):
+    """Harnesses with a section in an existing block: its section marks, plus the
+    notes that identified each harness in blocks written before the marks."""
+    names = set(SECTION_RE.findall(block_text))
+    names.update(label.lower() for label in LEGACY_NOTE.findall(block_text))
+    return names
+
+
+def pointer_harnesses(harness, instruction_file, existing):
+    """The harnesses the block in `instruction_file` should carry after this
+    install: `harness` plus every harness already there that uses the same file."""
+    kept = {name for name in harnesses_in(adminwright_text(existing))
+            if name in HARNESSES and HARNESSES[name].instruction_file == instruction_file}
+    kept.add(harness)
+    return kept
 
 
 def merge_pointer(existing, block):
@@ -509,36 +743,46 @@ def read_instruction_file(path):
     return raw, "\n"
 
 
-def append_pointer(instruction_path, block, dedicated=False):
-    """Write the pointer block into a harness instruction file; returns the status.
+def plan_pointer(spec, harness, project_root, skill_rel):
+    """Everything about the pointer decided before any file is written, so a
+    refusal (unbalanced markers, an undecodable file) leaves the project as it
+    was. None for a harness with no instruction file.
 
-    A dedicated rule file (Cursor's .mdc) is the whole document, so it is written
-    wholesale and refreshed on every install. A shared file (AGENTS.md, GEMINI.md)
-    keeps everything outside the marked block untouched.
+    A dedicated rule file (Cursor's .mdc) is the whole document, written
+    wholesale on every install. A shared file (AGENTS.md, GEMINI.md) keeps
+    everything outside the marked block untouched, and the block keeps the
+    section of every other harness installed into the same file.
     """
-    if dedicated:
-        write_text(instruction_path, MDC_FRONTMATTER + block)
-        return "appended"
+    if not spec.instruction_file:
+        return None
+    path = project_root / spec.instruction_file
+    dedicated = spec.instruction_file in DEDICATED_RULE_FILES
     existing, newline = ("", "\n")
-    if instruction_path.exists():
-        existing, newline = read_instruction_file(instruction_path)
-    merged, status = merge_pointer(existing, block)
-    if status != "unchanged":
-        instruction_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(str(instruction_path), "w", encoding="utf-8", newline="") as handle:
+    if not dedicated and path.exists():
+        existing, newline = read_instruction_file(path)
+    names = {harness} if dedicated else pointer_harnesses(
+        harness, spec.instruction_file, existing)
+    block = pointer_block(NEUTRAL_DIR, skill_rel, names)
+    plan = {"path": path, "name": spec.instruction_file, "block": block,
+            "dedicated": dedicated, "has_block": False}
+    if not dedicated:
+        merged, status = merge_pointer(existing, block)
+        plan.update(merged=merged, status=status, newline=newline,
+                    has_block=bool(adminwright_text(existing)))
+    return plan
+
+
+def write_pointer(plan):
+    """Carry out a planned --append-pointer (or a dedicated rule); returns the status."""
+    if plan["dedicated"]:
+        write_text(plan["path"], MDC_FRONTMATTER + plan["block"])
+        return "appended"
+    if plan["status"] != "unchanged":
+        merged, newline = plan["merged"], plan["newline"]
+        plan["path"].parent.mkdir(parents=True, exist_ok=True)
+        with open(str(plan["path"]), "w", encoding="utf-8", newline="") as handle:
             handle.write(merged.replace("\n", newline) if newline != "\n" else merged)
-    return status
-
-
-def pointer_status(instruction_path, block):
-    """Read-only: what --append-pointer would do to an existing shared file, or
-    None when the file does not exist or carries no adminwright block."""
-    if not instruction_path.exists():
-        return None
-    existing, _newline = read_instruction_file(instruction_path)
-    if MARKER_START not in existing and not LEGACY_HEADING.search(existing):
-        return None
-    return merge_pointer(existing, block)[1]
+    return plan["status"]
 
 
 # --- main -----------------------------------------------------------------------
@@ -559,22 +803,17 @@ def run_install(args):
         return fail("agent files missing: " + ", ".join(missing))
 
     spec = HARNESSES[args.harness]
-    skill_text, absolute_hint = skill_reference(skill_dir, project_root)
-    # The agent copies are executable prompts: outside the project they keep the
-    # resolved absolute path, because an unresolved variable would leave an agent
-    # unable to find the script. Inside the project they are project-relative.
-    copy_skill_text = skill_text if absolute_hint is None else portable(skill_dir)
-    agents = [load_agent(source, copy_skill_text) for source in sources]
+    skill_text, skill_rel = skill_reference(skill_dir, project_root)
+    agents = [load_agent(source, skill_text) for source in sources]
+    native = [render_native(spec.native_format, agent) for agent in agents] if spec.native_format else []
+    pointer = plan_pointer(spec, args.harness, project_root, skill_rel)
 
     if spec.native_format:
         native_dir = project_root / spec.native_dir
-        installed = []
-        for agent in agents:
-            relative, text = render_native(spec.native_format, agent)
+        for relative, text in native:
             write_text(native_dir / relative, text)
-            installed.append(relative)
-        print("Installed " + str(len(installed)) + " agents to " + str(native_dir))
-        for relative in installed:
+        print("Installed " + str(len(native)) + " agents to " + str(native_dir))
+        for relative, _text in native:
             print("  " + relative)
 
     neutral_dir = project_root / NEUTRAL_DIR
@@ -587,42 +826,36 @@ def run_install(args):
             for agent in agents:
                 print("  " + agent.stem + ".md")
 
-    if spec.instruction_file or args.harness == "generic":
-        block = pointer_block(NEUTRAL_DIR, skill_text, args.harness, absolute_hint,
-                              spec.native_dir)
-    if spec.instruction_file:
-        instruction_name = spec.instruction_file
-        instruction_path = project_root / instruction_name
-        dedicated = instruction_name in DEDICATED_RULE_FILES
-        if args.append_pointer or dedicated:
+    report_machine_path(project_root, skill_dir, skill_rel is None)
+
+    if pointer is not None:
+        where = str(pointer["path"])
+        if args.append_pointer or pointer["dedicated"]:
             # A dedicated rule file is ours alone, so writing it is not the
             # intrusion that changing someone's AGENTS.md would be.
-            status = append_pointer(instruction_path, block, dedicated)
+            status = write_pointer(pointer)
             if status == "unchanged":
-                print("Pointer block already present in " + str(instruction_path)
-                      + " and current; unchanged")
+                print("Pointer block already present in " + where + " and current; unchanged")
             elif status == "updated":
-                print("Updated pointer block in " + str(instruction_path))
+                print("Updated pointer block in " + where)
             elif status == "migrated":
-                print("Replaced an older unmarked adminwright section in "
-                      + str(instruction_path) + " with the marked pointer block")
+                print("Replaced an older unmarked adminwright section in " + where
+                      + " with the marked pointer block")
             else:
-                print("Wrote pointer block to " + str(instruction_path))
-        else:
-            status = pointer_status(instruction_path, block)
-            if status == "unchanged":
-                print("Pointer block already present in " + str(instruction_path)
-                      + " and current; unchanged")
-            elif status is not None:
-                print(str(instruction_path) + " has an out-of-date adminwright pointer block; "
+                print("Wrote pointer block to " + where)
+        elif pointer["has_block"]:
+            if pointer["status"] == "unchanged":
+                print("Pointer block already present in " + where + " and current; unchanged")
+            else:
+                print(where + " has an out-of-date adminwright pointer block; "
                       "rerun with --append-pointer to replace it in place, or paste this one:\n")
-                print(block)
-            else:
-                print("\nAdd this to " + instruction_name + " (or rerun with --append-pointer):\n")
-                print(block)
+                print(pointer["block"])
+        else:
+            print("\nAdd this to " + pointer["name"] + " (or rerun with --append-pointer):\n")
+            print(pointer["block"])
     elif args.harness == "generic":
         print("\nPoint your harness at the installed files; dispatch order is in each name:")
-        print(block)
+        print(pointer_block(NEUTRAL_DIR, skill_rel))
     return 0
 
 

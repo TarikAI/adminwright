@@ -11,22 +11,20 @@ silently; findings become `gaps[]` for an implementer working under a separate c
 
 ## Locate the skill
 
-The token `${CLAUDE_PLUGIN_ROOT}` below is the adminwright skill directory — the one
-containing `SKILL.md` and `scripts/admin_console_manifest.py`. In a Claude Code plugin
-install the harness expands it; copies installed by `scripts/install_agents.py` (Codex,
-opencode, Antigravity, Gemini CLI, Pi, Cursor, or any other harness) arrive with it already
-replaced by an absolute path. If it reaches you unexpanded, resolve it yourself, in order: a
-skill path stated in your dispatch prompt or the project's agent contract file;
-`.claude/skills/adminwright`, `.agents/skills/adminwright`, or `skills/adminwright` under
-the project root; `~/.claude/skills/adminwright`; a plugin cache at `~/.claude/plugins/cache/*/adminwright/*/`
-or the marketplace clone at `~/.claude/plugins/marketplaces/tarikai/`; otherwise search the
-filesystem for
-`admin_console_manifest.py`. If you cannot resolve it, say so and stop — do not improvise
-the skill from memory. Manifest commands (use `py -3` or `python3` if `python` is not on
-PATH):
+`${CLAUDE_PLUGIN_ROOT}` is the adminwright skill directory (a relative path starts at the
+project root); below it is written `<skill>`. If that directory does not exist here — the
+token arrived unexpanded, or an installed copy names the placeholder `<skill>` or another
+machine's path — use the first of these that contains `scripts/admin_console_manifest.py`:
+the path in `.adminwright/skill-dir` under the project root, which the installer writes for
+this machine; a path in your dispatch prompt or the project's AGENTS.md/CLAUDE.md;
+`.claude/skills/adminwright`, `.agents/skills/adminwright` or `skills/adminwright` under the
+project root; `~/.claude/skills/adminwright` or `~/.agents/skills/adminwright`;
+`~/.claude/plugins/marketplaces/tarikai`; else search for `admin_console_manifest.py`.
+Unresolvable: return `STATUS: BLOCKED` — never improvise the skill from memory. Manifest
+commands take this form (`py -3` or `python3` where `python` is not on PATH):
 
 ```text
-python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py <command> ...
+python <skill>/scripts/admin_console_manifest.py <command> ...
 ```
 
 ## Load these references
