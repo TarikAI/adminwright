@@ -383,20 +383,20 @@ _SKILL_VERSION = []
 
 
 def skill_version():
-    """The installed commit: `git rev-parse` in a checkout, else the plugin cache's sha dir."""
+    """The installed commit: HEAD in a checkout of the skill, else the plugin cache's sha dir.
+
+    Only a checkout whose work-tree top IS the skill root reports HEAD. A copy
+    vendored into a project repository (<project>/.claude/skills/adminwright) or a
+    plugin cache under a git-tracked home sits inside SOMEONE ELSE'S repository,
+    whose HEAD says nothing about the skill and changes with every project commit.
+    """
     if _SKILL_VERSION:
         return _SKILL_VERSION[0]
     version = "unknown"
-    if any((c / ".git").exists() for c in [SKILL_ROOT] + list(SKILL_ROOT.parents)):
-        try:
-            done = subprocess.run(
-                ["git", "-C", str(SKILL_ROOT), "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
-            )
-            if done.returncode == 0 and done.stdout.strip():
-                version = done.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
+    if skill_is_checkout():
+        done = skill_git("rev-parse", "--short", "HEAD")
+        if done is not None and done.returncode == 0 and done.stdout.strip():
+            version = done.stdout.strip()
     if version == "unknown" and re.fullmatch(r"[0-9a-f]{7,40}", SKILL_ROOT.name):
         version = SKILL_ROOT.name[:12]
     _SKILL_VERSION.append(version)
@@ -5720,16 +5720,65 @@ def in_plugin_cache(path):
     return any(parts[i] == "plugins" and parts[i + 1] == "cache" for i in range(len(parts) - 1))
 
 
+# Variables that point git at a repository other than the one around its -C
+# directory. A validate run from a project's git hook inherits GIT_DIR, and the
+# skill must not read the PROJECT's repository as its own.
+GIT_LOCATION_VARIABLES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX",
+)
+
+
+def skill_git(*args):
+    """Run git in the skill root; None when git is missing or does not answer."""
+    environment = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARIABLES}
+    try:
+        return subprocess.run(
+            ["git", "-C", str(SKILL_ROOT)] + list(args),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, env=environment,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def same_directory(left, right):
+    """True when two spellings name one directory (case, separators, links)."""
+    def canonical(value):
+        return os.path.normcase(os.path.realpath(str(value)))
+    if canonical(left) == canonical(right):
+        return True
+    try:
+        return os.path.samefile(str(left), str(right))
+    except OSError:
+        return False
+
+
+_SKILL_CHECKOUT = []
+
+
 def skill_is_checkout():
-    """True when this copy of the skill is a git checkout of its own repository.
+    """True only when the skill root is the top of its own git work tree.
 
     A marketplace install lives under ~/.claude/plugins/cache/<marketplace>/
-    <plugin>/<sha>/ -- no .git, and the whole directory is replaced on update --
-    so anything written into its lessons/ or references/ is silently discarded.
+    <plugin>/<sha>/ and is replaced on update, so anything written into its
+    lessons/ or references/ is silently discarded. A copy vendored into a
+    project (<project>/.claude/skills/adminwright, a documented install) is
+    overwritten by the next copy. Both can sit inside SOME git repository -- a
+    git-tracked home, the project itself -- so "a .git in any ancestor" is not
+    the test: the work tree's top must be the skill root itself.
     """
-    if in_plugin_cache(SKILL_ROOT):
-        return False
-    return any((candidate / ".git").exists() for candidate in [SKILL_ROOT] + list(SKILL_ROOT.parents))
+    if _SKILL_CHECKOUT:
+        return _SKILL_CHECKOUT[0]
+    result = False
+    if not in_plugin_cache(SKILL_ROOT) and any(
+        (candidate / ".git").exists() for candidate in [SKILL_ROOT] + list(SKILL_ROOT.parents)
+    ):
+        done = skill_git("rev-parse", "--show-toplevel")
+        if done is not None and done.returncode == 0 and done.stdout.strip():
+            result = same_directory(done.stdout.strip(), SKILL_ROOT)
+    _SKILL_CHECKOUT.append(result)
+    return result
 
 
 def clean_block(text):
@@ -5810,10 +5859,12 @@ def cmd_lesson_add(args):
         write_text_file(path, build_lesson_text("pending", args, date))
         print("Wrote " + str(path))
         print(
-            "This copy of adminwright is not a git checkout (a marketplace plugin cache is "
-            "replaced on update), so the lesson was written to your outbox instead of lessons/.\n"
+            "This copy of adminwright (" + str(SKILL_ROOT) + ") is not a git checkout of the "
+            "skill repository: a plugin cache is replaced on update, and a copy vendored into a "
+            "project is overwritten by the next copy. So the lesson was written to your outbox "
+            "instead of lessons/.\n"
             "To adopt it: clone github.com/TarikAI/adminwright, copy the file into lessons/ under "
-            "the next id, edit the reference it names, and open a pull request."
+            "the next id, run `lesson index`, edit the reference it names, and open a pull request."
         )
         return 0
     with FileLock(lessons_dir / ".lock"):

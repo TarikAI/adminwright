@@ -23,19 +23,43 @@ from cli_helpers import SCRIPT, SKILL_ROOT, TempProject, acm, run
 
 HAVE_GIT = shutil.which("git") is not None
 
+# Repository-locating variables a test run may inherit (a git hook, a worktree
+# wrapper); the scratch repositories below must be found from their own paths.
+GIT_ENV = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
 
-def make_skill_copy(parent, with_git=False, cache_path=False):
-    """A copy of the skill that is NOT a checkout of the skill repository."""
+
+def git_repository(path, commit=True):
+    """`git init` a directory, optionally with one commit; return its short HEAD."""
+    def git(*args):
+        done = subprocess.run(["git", "-C", str(path)] + list(args), capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", env=GIT_ENV)
+        if done.returncode != 0:
+            raise AssertionError("git " + " ".join(args) + ": " + done.stderr)
+        return done.stdout.strip()
+    Path(path).mkdir(parents=True, exist_ok=True)
+    git("init", "-q")
+    if not commit:
+        return None
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q",
+        "--allow-empty", "-m", "project commit")
+    return git("rev-parse", "--short", "HEAD")
+
+
+def make_skill_copy(parent, with_git=False, cache_path=False, vendored=False):
+    """A copy of the skill; a checkout of its own repository only with with_git."""
     base = Path(parent)
     if cache_path:
         base = base / "plugins" / "cache" / "tarikai" / "adminwright" / "0123abcdef01"
+    if vendored:
+        base = base / ".claude" / "skills" / "adminwright"
     base.mkdir(parents=True)
     for name in ("scripts", "assets", "lessons", "references"):
         shutil.copytree(str(SKILL_ROOT / name), str(base / name),
                         ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copyfile(str(SKILL_ROOT / "SKILL.md"), str(base / "SKILL.md"))
     if with_git:
-        (base / ".git").mkdir()
+        git_repository(base, commit=False)
     return base
 
 
@@ -76,12 +100,29 @@ class TestLessonsSurviveTheInstall(unittest.TestCase):
         self.assertIn("not a git checkout", out)
         self.assertIn("github.com/TarikAI/adminwright", out)
 
+    @unittest.skipUnless(HAVE_GIT, "git is required to make a checkout")
     def test_a_plugin_cache_path_is_refused_even_with_a_git_dir(self):
         base = make_skill_copy(self.tmp / "skill", with_git=True, cache_path=True)
         code, out, err = run_copy(base, *LESSON, env=self.env)
         self.assertEqual(code, 0, err)
         self.assertTrue(list((self.home / "outbox" / "lessons").glob("*.md")))
         self.assertIn("not a git checkout", out)
+
+    @unittest.skipUnless(HAVE_GIT, "git is required to make a project repository")
+    def test_a_copy_vendored_inside_a_project_repository_is_not_a_checkout(self):
+        # README's manual install: the skill copied into <project>/.claude/skills/.
+        # The PROJECT's repository encloses it; the next copy overwrites it.
+        project = self.tmp / "project"
+        git_repository(project)
+        base = make_skill_copy(project, vendored=True)
+        before = sorted(p.name for p in (base / "lessons").iterdir())
+        code, out, err = run_copy(base, *LESSON, env=self.env)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(p.name for p in (base / "lessons").iterdir()), before,
+                         "a vendored copy is overwritten by the next copy; never write into it")
+        self.assertEqual(len(list((self.home / "outbox" / "lessons").glob("*.md"))), 1)
+        self.assertIn("not a git checkout", out)
+        self.assertIn("github.com/TarikAI/adminwright", out)
 
     def test_an_explicit_lessons_dir_is_honoured(self):
         base = make_skill_copy(self.tmp / "skill")
@@ -91,11 +132,20 @@ class TestLessonsSurviveTheInstall(unittest.TestCase):
         self.assertTrue(list(target.glob("0001-*.md")))
         self.assertFalse((self.home / "outbox").exists())
 
+    @unittest.skipUnless(HAVE_GIT, "git is required to make a checkout")
     def test_a_checkout_writes_into_lessons(self):
         base = make_skill_copy(self.tmp / "skill", with_git=True)
         code, _out, err = run_copy(base, *LESSON, env=self.env)
         self.assertEqual(code, 0, err)
         self.assertTrue(list((base / "lessons").glob("0006-*.md")))
+
+    def test_an_empty_git_directory_does_not_make_a_checkout(self):
+        base = make_skill_copy(self.tmp / "skill")
+        (base / ".git").mkdir()
+        code, out, err = run_copy(base, *LESSON, env=self.env)
+        self.assertEqual(code, 0, err)
+        self.assertIn("not a git checkout", out)
+        self.assertFalse(list((base / "lessons").glob("0006-*.md")))
 
 
 class TestVersion(unittest.TestCase):
@@ -120,6 +170,41 @@ class TestVersion(unittest.TestCase):
         base = make_skill_copy(tmp / "skill")
         _code, out, _err = run_copy(base, "--version")
         self.assertIn("adminwright unknown", out)
+
+    @unittest.skipUnless(HAVE_GIT, "git is required to make a project repository")
+    def test_a_vendored_copy_never_reports_the_projects_commit(self):
+        tmp = Path(tempfile.mkdtemp(prefix="adminwright-ver-"))
+        self.addCleanup(shutil.rmtree, str(tmp), ignore_errors=True)
+        project_head = git_repository(tmp / "project")
+        base = make_skill_copy(tmp / "project", vendored=True)
+        _code, out, _err = run_copy(base, "--version")
+        self.assertIn("adminwright unknown", out)
+        self.assertNotIn(project_head, out, "the project's HEAD is not the skill's version")
+        # Every write stamps validatedWith.skill; it must not churn with project commits.
+        root = tmp / "console"
+        code, _out, err = run_copy(base, "init", "--project-root", root, "--name", "Vendored")
+        self.assertEqual(code, 0, err)
+        manifest = json.loads((root / ".admin-console" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["validatedWith"]["skill"], "unknown")
+
+    @unittest.skipUnless(HAVE_GIT, "git is required to make a home repository")
+    def test_a_plugin_cache_under_a_git_tracked_home_reports_its_sha_directory(self):
+        tmp = Path(tempfile.mkdtemp(prefix="adminwright-ver-"))
+        self.addCleanup(shutil.rmtree, str(tmp), ignore_errors=True)
+        home_head = git_repository(tmp / "home")
+        base = make_skill_copy(tmp / "home" / ".claude", cache_path=True)
+        _code, out, _err = run_copy(base, "--version")
+        self.assertIn("adminwright 0123abcdef01", out)
+        self.assertNotIn(home_head, out)
+
+    @unittest.skipUnless(HAVE_GIT, "git is required to make a checkout")
+    def test_a_checkout_reports_its_own_head(self):
+        tmp = Path(tempfile.mkdtemp(prefix="adminwright-ver-"))
+        self.addCleanup(shutil.rmtree, str(tmp), ignore_errors=True)
+        base = make_skill_copy(tmp / "skill")
+        head = git_repository(base)
+        _code, out, _err = run_copy(base, "--version")
+        self.assertIn("adminwright " + head, out)
 
     def test_ruleset_changes_when_a_severity_changes(self):
         before = acm.ruleset_version()
