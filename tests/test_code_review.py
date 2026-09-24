@@ -20,6 +20,7 @@ Run:  python -m unittest discover -s tests -v
 """
 
 import atexit
+import codecs
 import importlib.util
 import json
 import os
@@ -1502,6 +1503,118 @@ class ConsoleEncoding(TempConsole):
         )
         self.assertEqual(code, 1, err)
         self.assertIn("Schlüssel", self.gaps()[0]["description"])
+
+
+class FindingsInput(TempConsole):
+    """Windows-written findings: decoded like the manifest script, never exit 1 for nothing.
+
+    Windows PowerShell 5.1's `>` and Out-File write UTF-16LE with a byte-order
+    mark, and Set-Content without -Encoding writes the ANSI code page. Both used
+    to end in a UnicodeDecodeError traceback and exit 1, which the exit table
+    defines as "findings recorded", with no gap written.
+    """
+
+    TEXT = "Schlüssel 東京 \U0001f511"
+
+    def payload_bytes(self, encoding, bom=b""):
+        payload = {"findings": [comment(content=self.TEXT)]}
+        return bom + json.dumps(payload, ensure_ascii=False).encode(encoding)
+
+    def record_file(self, data, flag="--findings-file"):
+        path = self.tmp / "findings.json"
+        path.write_bytes(data)
+        value = str(path) if flag == "--findings-file" else "@" + str(path)
+        option = "--findings-file" if flag == "--findings-file" else "--findings"
+        return self.review("record", "--manifest", self.manifest, option, value)
+
+    def record_stdin(self, data):
+        env = dict(os.environ)
+        env.update({
+            "ADMINWRIGHT_OCR_BIN": str(self.launcher), "PYTHONIOENCODING": "cp1252",
+            "ADMINWRIGHT_HOME": scratch_home(),
+        })
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "record", "--manifest", str(self.manifest), "--findings", "-"],
+            input=data, capture_output=True, env=env,
+        )
+        return proc.returncode, proc.stdout.decode("utf-8"), proc.stderr.decode("utf-8")
+
+    def assert_recorded(self, result):
+        code, out, err = result
+        self.assertEqual(code, 1, out + err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn(self.TEXT, self.gaps()[-1]["description"])
+
+    def assert_refused(self, result, *needles):
+        code, out, err = result
+        self.assertEqual(code, 2, out + err)
+        self.assertNotIn("Traceback", err)
+        for needle in needles:
+            self.assertIn(needle, err)
+        self.assertEqual(self.gaps(), [])
+
+    def test_a_utf16_file_as_powershell_redirection_writes_it_is_read(self):
+        for flag in ("--findings-file", "--findings"):
+            self.assert_recorded(self.record_file(self.payload_bytes("utf-16-le", codecs.BOM_UTF16_LE), flag))
+
+    def test_big_endian_utf16_and_utf8_with_or_without_bom_are_read(self):
+        # Content differs per run so none is deduplicated away.
+        for index, (encoding, bom) in enumerate((
+            ("utf-16-be", codecs.BOM_UTF16_BE), ("utf-8", codecs.BOM_UTF8), ("utf-8", b""),
+        ), 1):
+            self.TEXT = "Schlüssel %d 東京" % index
+            self.assert_recorded(self.record_file(self.payload_bytes(encoding, bom)))
+        self.assertEqual(len(self.gaps()), 3)
+
+    def test_an_ansi_file_from_set_content_is_refused_with_a_hint(self):
+        data = json.dumps({"findings": [comment(content="Schlüssel")]}, ensure_ascii=False).encode("cp1252")
+        self.assert_refused(self.record_file(data), "not valid UTF-8", "Re-save it as UTF-8")
+        self.assert_refused(self.record_file(data, "--findings"), "not valid UTF-8")
+
+    def test_a_bom_followed_by_bad_bytes_is_refused_not_a_traceback(self):
+        self.assert_refused(self.record_file(codecs.BOM_UTF8 + b'{"findings": ["\xfc"]}'), "not valid UTF-8")
+        self.assert_refused(self.record_file(codecs.BOM_UTF16_LE + b"{\x00x"), "not valid UTF-16")
+
+    def test_stdin_is_decoded_the_same_way(self):
+        self.assert_recorded(self.record_stdin(self.payload_bytes("utf-16-le", codecs.BOM_UTF16_LE)))
+
+    def test_undecodable_stdin_points_at_output_encoding(self):
+        data = json.dumps({"findings": [comment(content="Schlüssel")]}, ensure_ascii=False).encode("cp1252")
+        self.assert_refused(self.record_stdin(data), "standard input", "$OutputEncoding", "--findings-file")
+
+    def test_findings_and_findings_file_are_exclusive_and_one_is_required(self):
+        path = self.tmp / "findings.json"
+        path.write_text(json.dumps({"findings": [comment()]}), encoding="utf-8")
+        code, _out, err = self.review(
+            "record", "--manifest", self.manifest, "--findings", "[]", "--findings-file", str(path)
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("not allowed with", err)
+        code, _out, err = self.review("record", "--manifest", self.manifest)
+        self.assertEqual(code, 2)
+        self.assertIn("--findings", err)
+        self.assertEqual(self.gaps(), [])
+
+    def test_a_missing_findings_file_is_a_usage_error(self):
+        code, _out, err = self.review(
+            "record", "--manifest", self.manifest, "--findings-file", str(self.tmp / "nope.json")
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("could not read findings file", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_inline_json_that_powershell_mangled_names_the_file_option(self):
+        # What PS 5.1 hands Python for '{"findings": []}': the quotes are gone.
+        code, _out, err = self.review("record", "--manifest", self.manifest, "--findings", "{findings: []}")
+        self.assertEqual(code, 2)
+        self.assertIn("not valid JSON", err)
+        self.assertIn("--findings-file", err)
+
+    def test_the_printed_record_command_is_safe_to_paste_into_powershell(self):
+        out = self.diff()
+        line = [text for text in out.splitlines() if " record " in text][0]
+        self.assertIn("--findings-file <findings.json>", line)
+        self.assertNotRegex(line, r"(^|\s)@", "a bare leading @ is splatting in PowerShell")
 
 
 class ShimResolution(unittest.TestCase):

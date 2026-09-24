@@ -149,7 +149,7 @@ or `--commit <hash>`.
 **2. `record` — persist delegate findings as gaps.**
 
 ```bash
-python <skill-dir>/scripts/code_review.py record --manifest <project-root>/.admin-console/manifest.json --bundle <the bundle diff printed> --findings @findings.json
+python <skill-dir>/scripts/code_review.py record --manifest <project-root>/.admin-console/manifest.json --bundle <the bundle diff printed> --findings-file findings.json
 ```
 
 where `findings.json` is:
@@ -166,9 +166,23 @@ where `findings.json` is:
 }
 ```
 
-`--findings` accepts inline JSON, `@file` (a UTF-8 BOM is tolerated), or `-` (stdin). Prefer
-`@file`: a long inline payload can exceed the operating system's command-line limit
-(about 32k characters on Windows), and quoting JSON in PowerShell is fragile.
+Pass the payload as a file with `--findings-file <path>` (what `diff` prints), or with
+`--findings`, which takes inline JSON, `'@<path>'` or `-` for stdin. Prefer the file: a long
+inline payload can exceed the operating system's command-line limit (about 32k characters on
+Windows), and PowerShell strips the double quotes out of inline JSON. A file or stdin may be
+UTF-8, with or without a byte-order mark, or UTF-16 with one; anything else is refused with
+exit 2 and a note to re-save the file as UTF-8, never guessed at.
+
+Windows PowerShell 5.1 specifics (PowerShell 7 writes and pipes UTF-8 and needs none of this):
+
+- `ConvertTo-Json ... > findings.json` and `Out-File` write UTF-16LE with a byte-order mark:
+  accepted. Plain `Set-Content` writes the ANSI code page: refused; add `-Encoding utf8`.
+- Quote the `@` form, `--findings '@findings.json'`. A bare leading `@` is PowerShell's
+  splatting operator and the line does not parse. `--findings-file` needs no quoting.
+- A pipe into `--findings -` is encoded with `$OutputEncoding`, which is ASCII by default:
+  every non-ASCII character arrives as `?`, the record succeeds, and the gap text is wrong,
+  with nothing the script can detect. Use `--findings-file`, or set
+  `$OutputEncoding = [System.Text.UTF8Encoding]::new()` before piping.
 
 *Which bundle.* `--bundle` names it. Without the flag, `record` uses the one live bundle
 beside the manifest: not yet recorded and less than 24 hours old. Several live bundles are

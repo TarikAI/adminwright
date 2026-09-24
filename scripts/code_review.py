@@ -32,7 +32,10 @@ scan    Audit mode: full-file review of code no diff covers, via `ocr scan
         verdicts as a review (completed_with_errors is partial).
 record  Persist delegate-mode findings as manifest gaps[] through
         admin_console_manifest.py `add --kind gap` — one all-or-nothing
-        batch, so a refusal leaves the manifest unmodified. With a bundle
+        batch, so a refusal leaves the manifest unmodified. The payload
+        comes from --findings-file PATH or --findings (inline JSON, '@file',
+        or - for stdin); a file or stdin may be UTF-8, with or without a
+        byte-order mark, or UTF-16 with one. With a bundle
         (--bundle, or the one live unrecorded bundle beside the manifest),
         every bundled (path, status) must end reviewed or explicitly skipped
         with a reason, and findings/skips for paths outside the bundle are
@@ -86,6 +89,7 @@ sets OCR_NO_UPDATE=1: the launcher otherwise contacts npm and can run
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
@@ -392,6 +396,73 @@ def parse_json(text, what):
         return json.loads(text)
     except ValueError:
         raise ReviewError("could not parse " + what + " output as JSON")
+
+
+# What Windows tools write, for the --findings file and pipe. Windows
+# PowerShell 5.1: `>` and Out-File write UTF-16LE with a byte-order mark;
+# Set-Content writes the ANSI code page unless given -Encoding (utf8 adds a
+# BOM); a pipe into a native program is encoded with $OutputEncoding, which is
+# ASCII by default, so every non-ASCII character arrives as '?' before this
+# script sees a byte. PowerShell 7 writes and pipes UTF-8 without a BOM.
+DECODE_HINT_FILE = (
+    " Re-save it as UTF-8 (a byte-order mark is fine); in Windows PowerShell 5.1 use"
+    " `Set-Content -Encoding utf8` or `Out-File -Encoding utf8`."
+)
+DECODE_HINT_PIPE = (
+    " Pipe UTF-8 (in Windows PowerShell 5.1 set"
+    " `$OutputEncoding = [System.Text.UTF8Encoding]::new()` first, or non-ASCII text"
+    " arrives as '?'), or write the JSON to a file and pass --findings-file <path>."
+)
+POWERSHELL_JSON_HINT = (
+    " In PowerShell, double quotes inside single-quoted JSON are stripped before Python"
+    " sees them: write the JSON to a file and pass --findings-file <path>."
+)
+
+
+def decode_text_bytes(data, source, hint):
+    """Decode a findings payload the way Windows tools actually write it.
+
+    The rules of admin_console_manifest.decode_text_bytes: a UTF-8 or UTF-16
+    byte-order mark is honoured, anything else must be strict UTF-8. A legacy
+    code-page file is refused (exit 2) rather than guessed at; a traceback here
+    used to exit 1, which reads as "findings recorded" with nothing persisted.
+    """
+    encoding = "utf-8"
+    if data.startswith(codecs.BOM_UTF8):
+        data = data[len(codecs.BOM_UTF8):]
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        encoding = "utf-16"  # reads the BOM, then drops it
+    try:
+        return data.decode(encoding)
+    except UnicodeDecodeError:
+        raise ReviewError(
+            source + " is not valid " + ("UTF-16" if encoding == "utf-16" else "UTF-8")
+            + " (a legacy code-page file, or UTF-16 without a byte-order mark?)." + hint
+        )
+
+
+def read_findings_file(name):
+    try:
+        data = Path(name).read_bytes()
+    except OSError as exc:
+        raise ReviewError("could not read findings file '" + name + "': " + str(exc))
+    return decode_text_bytes(data, "the findings file '" + name + "'", DECODE_HINT_FILE)
+
+
+def findings_text(args):
+    """The findings payload: --findings-file, or --findings as JSON, @file or - (stdin)."""
+    if getattr(args, "findings_file", None) is not None:
+        return read_findings_file(args.findings_file)
+    raw = args.findings
+    if raw == "-":
+        if sys.stdin is None:
+            raise ReviewError("--findings - reads standard input, but there is none")
+        stream = getattr(sys.stdin, "buffer", None)
+        data = stream.read() if stream is not None else sys.stdin.read().encode("utf-8")
+        return decode_text_bytes(data, "standard input", DECODE_HINT_PIPE)
+    if raw.startswith("@"):
+        return read_findings_file(raw[1:])
+    return raw
 
 
 def extract_reviewable(preview):
@@ -999,10 +1070,12 @@ def cmd_diff(args):
         path = write_bundle(manifest, bundle, args.agent)
         print("OCR bundle written: " + str(path))
         print(str(len(files)) + " file(s) to review. Next:")
+        # --findings-file, not `--findings @file`: a bare leading @ is splatting
+        # in PowerShell, which refuses to parse the pasted line.
         print(
             "  python " + quote_arg(Path(__file__).resolve()) + " record --manifest "
             + quote_arg(manifest) + " --bundle " + quote_arg(path)
-            + " --findings @<findings.json>"
+            + " --findings-file <findings.json>"
         )
         return EXIT_OK
 
@@ -1424,19 +1497,15 @@ def cmd_record(args):
     manifest = Path(args.manifest)
     if not manifest.exists():
         raise ReviewError("manifest not found: " + str(manifest))
-    raw = args.findings
-    if raw == "-":
-        text = sys.stdin.read()
-    elif raw.startswith("@"):
-        try:
-            # utf-8-sig: PowerShell 5.1 writes a BOM with `> file` and
-            # `Set-Content -Encoding utf8`; a BOM is not part of the JSON.
-            text = Path(raw[1:]).read_text(encoding="utf-8-sig")
-        except OSError as exc:
-            raise ReviewError("could not read findings file '" + raw[1:] + "': " + str(exc))
-    else:
-        text = raw
-    payload = parse_json(text, "findings")
+    text = findings_text(args)
+    try:
+        payload = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        inline = args.findings is not None and args.findings != "-" and not args.findings.startswith("@")
+        raise ReviewError(
+            "the findings are not valid JSON: " + str(exc)[:200] + "."
+            + (POWERSHELL_JSON_HINT if inline else "")
+        )
     if isinstance(payload, dict):
         findings_raw = payload.get("findings", [])
         skipped_raw = payload.get("skipped", [])
@@ -1582,8 +1651,16 @@ def build_parser():
         "record", help="Persist reviewed findings as manifest gaps[]"
     )
     record_parser.add_argument("--manifest", required=True)
-    record_parser.add_argument(
-        "--findings", required=True, help="JSON, @file, or - for stdin"
+    payload = record_parser.add_mutually_exclusive_group(required=True)
+    payload.add_argument(
+        "--findings",
+        help="JSON, '@file' (quote it in PowerShell, where a bare @ is splatting), or - for"
+        " stdin (from Windows PowerShell 5.1 only with $OutputEncoding set to UTF-8)",
+    )
+    payload.add_argument(
+        "--findings-file", metavar="PATH",
+        help="read the findings JSON from a file (PowerShell-safe): UTF-8, with or without"
+        " a byte-order mark, or UTF-16 with one, as Windows PowerShell's `>` writes it",
     )
     record_parser.add_argument(
         "--bundle",
@@ -1596,12 +1673,11 @@ def build_parser():
 
 def main():
     try:
+        # Review text is arbitrary Unicode; a cp1252 console must not crash on it.
+        # stdin is not reconfigured: `record --findings -` reads its bytes and
+        # decodes them itself (findings_text), UTF-16 and byte-order marks included.
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        # utf-8-sig: `record --findings -` gets JSON from a pipe, and PowerShell
-        # 5.1 pipes it with a BOM; the console default (cp1252) would garble
-        # every non-ASCII character of the review text.
-        sys.stdin.reconfigure(encoding="utf-8-sig", errors="replace")
     except (AttributeError, ValueError):
         pass
     parser = build_parser()
