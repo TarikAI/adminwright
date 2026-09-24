@@ -71,6 +71,27 @@ class TestCoerceValue(TempProject):
         self.assertEqual(code, 0, "strings are stored as written")
         self.assertEqual(self.capability_of(self.read())["rationale"], '{"a": 1}')
 
+    def test_append_takes_the_union_and_keeps_what_others_added(self):
+        # Two reviewers each adding one evidence file by read-modify-write dropped
+        # the other's entry; --append takes the union inside the manifest lock.
+        path = "crossCutting.experience.evidence"
+        (self.root / "evidence" / "ux-review.md").write_text(
+            "Reviewed 4 screens as ops and support\n", encoding="utf-8")
+        code, _o, err = self.cli("set", "--path", path, "--append", "--value", "evidence\\ux-review.md")
+        self.assertEqual(code, 0, err)
+        code, _o, err = self.cli("set", "--path", path, "--append",
+                                 "--value", "evidence/ux-review.md,evidence/experience.md")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read()["crossCutting"]["experience"]["evidence"],
+                         ["evidence/experience.md", "evidence/ux-review.md"])
+
+    def test_append_refuses_a_field_that_is_not_a_list(self):
+        code, _o, err = self.cli("set", "--path", "platform.name", "--append", "--value", "x")
+        self.assertEqual(code, 2)
+        self.assertIn("needs a list field", err)
+        code, _o, err = self.cli("set", "--path", CAP + ".tests", "--append", "--replace", "--value", "x")
+        self.assertEqual(code, 2)
+
 
 class TestPathsFromFindings(TempProject):
     """6.12 -- a finding's path must be pasteable into `set --path`."""

@@ -5766,6 +5766,8 @@ def cmd_set(args):
     manifest_path = resolve_manifest_path(args.manifest)
     segments = parse_path_expression(args.path)
     raw_value = read_value_argument(args)
+    if getattr(args, "append", False) and (args.delete or args.replace):
+        raise ManifestError("--append adds to a list; it cannot be combined with --delete or --replace")
     notes = []
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
@@ -5784,13 +5786,39 @@ def cmd_set(args):
                 raise ManifestError("--path names no existing field to delete: " + args.path)
             value = None
         else:
-            value = coerce_value(raw_value, previous)
-            if isinstance(value, (dict, list)):
-                normalise_paths(value if isinstance(value, dict) else {key if isinstance(key, str) else "x": value}, args.path)
+            if getattr(args, "append", False):
+                # Read-modify-write by the agent loses entries when two agents add
+                # evidence at once (each read the list before the other's write);
+                # taking the union here, under the lock, cannot.
+                if previous is not None and not isinstance(previous, list):
+                    raise ManifestError(
+                        "--append needs a list field; " + args.path + " holds " + type(previous).__name__
+                    )
+                items = coerce_value(raw_value, [])
+                if not isinstance(items, list):
+                    items = [items]
+                value = list(previous or [])
+                for item in items:
+                    if item not in value:
+                        value.append(item)
+            else:
+                value = coerce_value(raw_value, previous)
+            if isinstance(value, dict):
+                normalise_paths(value, args.path)
+            elif isinstance(value, list) and not (isinstance(key, str) and key in PATH_LIST_FIELDS):
+                # Objects inside the list (a gaps[] or qualityGates[] value) are fixed in
+                # place; a path list itself is fixed just below, and noted once.
+                normalise_paths({"items": value}, args.path)
             if isinstance(key, str) and key in PATH_LIST_FIELDS and isinstance(value, list):
                 value, changed = normalise_path_list(value)
                 if changed:
                     notes.append("rewrote backslashes as '/' in " + str(changed) + " path(s) of " + args.path)
+            if getattr(args, "append", False) and isinstance(value, list):
+                unique = []
+                for item in value:
+                    if item not in unique:
+                        unique.append(item)
+                value = unique
             if (
                 isinstance(container, list)
                 and isinstance(value, str)
@@ -7274,6 +7302,11 @@ def build_parser():
     set_parser.add_argument(
         "--replace", action="store_true",
         help="replace an object wholesale instead of merging into it (dropped keys are listed)",
+    )
+    set_parser.add_argument(
+        "--append", action="store_true",
+        help="add the value's items to a list, skipping ones already there; the union is taken "
+             "under the manifest lock, so agents adding evidence at once never drop each other's",
     )
     set_parser.add_argument(
         "--allow-invalid", action="store_true",
