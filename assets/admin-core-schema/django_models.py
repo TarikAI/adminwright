@@ -16,16 +16,22 @@ WHAT DJANGO CANNOT ENFORCE IN MODELS — add these in a migration:
      assigned by a BEFORE INSERT trigger), verify_audit_chain(), the payload
      scrub function, the separation-of-duties trigger, and the trigger that keeps
      an ApprovalRequest as written (only state, executed_at and execution_result
-     change; save those with save(update_fields=[...])). They live in
-     ./django_triggers.sql (unqualified names, canonical column names). Model-level
-     guards (save() overrides, signals) are bypassed by bulk operations, raw SQL and
-     other services.
+     change; prefer save(update_fields=[...]) for those, since a full save()
+     rewrites every column and is refused if a value does not round-trip exactly).
+     They live in ./django_triggers.sql (unqualified names, canonical column
+     names). Model-level guards (save() overrides, signals) are bypassed by bulk
+     operations, raw SQL and other services.
   2. Nothing else. Every CHECK in postgres.sql (including the enum-like ones, which
      are CheckConstraints below and not just choices=) and every partial /
      expression unique index is expressed natively via Meta.constraints.
 
-Suggested migration (a second migration, after the one makemigrations generates):
+Suggested migration: a second one, after the migration makemigrations generates.
+COPY django_triggers.sql INTO THE APP'S migrations/ DIRECTORY, next to this file:
+the migration reads it from there when Django loads migrations, so without the
+copy every manage.py command that loads them stops with FileNotFoundError. (Or
+paste the file's contents into the migration as the sql= string instead.)
 
+    # admin_core/migrations/0002_triggers.py, with django_triggers.sql beside it
     from pathlib import Path
     from django.db import migrations
 

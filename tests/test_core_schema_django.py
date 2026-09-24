@@ -8,8 +8,10 @@ the reason, when the installed Django refuses the server: Django 6.1 needs Postg
 CI's PostgreSQL 14 leg installs Django 5.2 LTS and its PostgreSQL 16 leg Django 6. It is the
 automated form of what the audit checked by hand: `manage.py check` is clean, `sqlmigrate` emits
 every CHECK constraint and the COALESCE live-grant index and the canonical FK column names,
-`migrate` succeeds, django_triggers.sql applies on top, and the schema README's verification SQL
-passes against the result.
+`migrate` applies the generated migration plus the trigger migration exactly as the models'
+docstring gives it, the schema README's verification SQL passes against the result, a temporary
+table cannot stand in for approval_request inside the SoD trigger, business timestamps keep the
+caller's values through the ORM, and the index set equals postgres.sql's.
 
 Standard library only for the test itself (Python 3.9+; Django needs 3.10+).
 """
@@ -30,6 +32,19 @@ def django_ready():
     import django
 
     return django.VERSION >= (5, 1)
+
+
+def docstring_migration():
+    """The trigger migration exactly as django_models.py's docstring gives it, and whether the
+    docstring tells the reader to copy django_triggers.sql next to it (audit round 2: it did not,
+    and the migration then fails to load with FileNotFoundError)."""
+    source = (SCHEMA / "django_models.py").read_text(encoding="utf-8")
+    doc = source[source.index('"""') + 3: source.index('"""', source.index('"""') + 3)]
+    section = doc[doc.index("Suggested migration"): doc.index("Then run grants.sql")]
+    code = [line[4:] for line in section.splitlines() if line.startswith("    ") or not line.strip()]
+    body = "\n".join(code).strip() + "\n"
+    says_copy = "COPY django_triggers.sql INTO THE APP'S migrations/ DIRECTORY" in section
+    return body, says_copy
 
 
 def django_minimum_postgres():
@@ -172,9 +187,20 @@ class TestDjangoTranslationOnPostgres(PgCase):
             self.assertIn('"%s" bigint' % column, sql.stdout)
             self.assertNotIn('"%s_id"' % column, sql.stdout)
 
+        # the triggers go in the second migration the docstring gives, set up as it says
+        migration, says_copy = docstring_migration()
+        self.assertTrue(says_copy, "the docstring must say to copy django_triggers.sql next to the migration")
+        self.assertIn("0001_initial", migration)
+        migrations_dir = project / "admin_core" / "migrations"
+        (migrations_dir / "0002_triggers.py").write_text(migration, encoding="utf-8")
+        missing = self.dj(project, env, "showmigrations")  # what the docstring warns about
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("FileNotFoundError", missing.stderr)
+        shutil.copy(str(SCHEMA / "django_triggers.sql"), str(migrations_dir / "django_triggers.sql"))
         migrated = self.dj(project, env, "migrate")
         self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
-        self.psql(db, "-f", str(SCHEMA / "django_triggers.sql"))
+        self.assertIn("admin_core.0002_triggers", self.dj(project, env, "showmigrations", "--plan").stdout)
+        self.assertEqual(self.scalar(db, "SELECT count(*) FROM pg_trigger WHERE tgname = 'approval_decision_sod'"), "1")
         actual = set(self.scalar(
             db,
             "SELECT conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid "
