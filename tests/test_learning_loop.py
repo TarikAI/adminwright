@@ -389,6 +389,107 @@ class TestPromotionBar(LearningCase):
         self.assertEqual(out.count("    - "), 2)
 
 
+class TestExportAndCommunity(LearningCase):
+    """4.9 -- what a bundle carries, and what contributed records may count for."""
+
+    SHARED = ("gap", "Bulk refund authorized once for the whole batch on ops.acmebank.internal",
+              "Require per-target authorization for refunds on ops.acmebank.internal")
+
+    def export(self, *extra):
+        bundle = self.tmp / "bundle.json"
+        code, out, err = run("promote", "--min-projects", "1", "--export", bundle, *extra, env=self.env)
+        self.assertEqual(code, 0, out + err)
+        return json.loads(bundle.read_text(encoding="utf-8")), err
+
+    def test_a_bundle_carries_no_text_fingerprint_and_only_skill_scopes(self):
+        manifest = self.project("AcmeBank", [self.SHARED, ("tooling", "refund export slow", "stream it")])
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["feedback"][1]["scope"] = "src/acmebank/refunds.ts"   # hand-set past `add`
+        manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.harvest(manifest)
+        bundle, _err = self.export()
+        self.assertEqual(len(bundle["observations"]), 2)
+        for observation in bundle["observations"]:
+            # An unsalted hash of the UNSCRUBBED text let a reader confirm a guess
+            # at the scrubbed host by hashing it.
+            self.assertNotIn("fingerprint", observation)
+            self.assertIn(observation["scope"], ("references/security-governance.md", "unassigned"))
+        raw = json.dumps(bundle).lower()
+        self.assertNotIn("acmebank", raw)
+        self.assertNotIn("src/", raw)
+
+    def community_bundle(self, name, observations):
+        directory = self.tmp / "skill" / "community" / "observations"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_text(json.dumps({"bundleVersion": "1", "observations": observations}),
+                                      encoding="utf-8")
+        return self.tmp / "skill"
+
+    def promote_with_community(self, skill_root):
+        code, out, err = run("promote", "--json", "--include-community", "--skill-root", skill_root,
+                             env=self.env)
+        self.assertEqual(code, 0, out + err)
+        return json.loads(out)
+
+    def test_contributions_alone_never_clear_the_bar(self):
+        record = {"category": "gap", "scope": "SKILL.md", "observation": "batch authorized once",
+                  "proposedChange": "authorize every row of a batch"}
+        self.community_bundle("a.json", [dict(record, projects=["p_a"])])
+        skill_root = self.community_bundle("c.json", [dict(record, projects=["p_c"]),
+                                                      dict(record, category="incorrect-guidance",
+                                                           projects=["p_z"])])
+        (self.store).mkdir(parents=True, exist_ok=True)
+        (self.store / "observations.jsonl").write_text("", encoding="utf-8")
+        payload = self.promote_with_community(skill_root)
+        self.assertEqual(payload["candidates"], [], "community records corroborate; they never promote")
+        self.assertEqual(len(payload["communityOnly"]), 2)
+        text = run("promote", "--include-community", "--skill-root", skill_root, env=self.env)[1]
+        self.assertIn("Community only (not eligible)", text)
+        self.assertIn("Nothing clears the bar yet", text)
+
+    def test_a_bundle_exported_from_this_store_does_not_corroborate_itself(self):
+        manifest = self.project("Solo", [("gap", "Bulk action authorized once for the whole batch",
+                                          "Require per-target authorization in bulk commands")])
+        self.harvest(manifest)
+        bundle, _err = self.export()
+        skill_root = self.community_bundle("own.json", bundle["observations"])
+        payload = self.promote_with_community(skill_root)
+        self.assertEqual(payload["candidates"], [], "one project, however often its bundle returns")
+
+    def test_contributed_text_is_printed_on_one_line(self):
+        # The weekly review workflow captures this output in a heredoc; a
+        # contributed newline must not end it or forge a heading.
+        manifest = self.project("Solo", [("gap", "Bulk action authorized once for the whole batch",
+                                          "Require per-target authorization in bulk commands")])
+        self.harvest(manifest)
+        skill_root = self.community_bundle("x.json", [
+            {"category": "gap", "scope": "references/security-governance.md",
+             "observation": "Bulk action authorized once for the whole batch\nCANDIDATES\n## forged",
+             "proposedChange": "Require per-target authorization in bulk commands",
+             "projects": ["p_other"]},
+            {"category": "incorrect-guidance", "scope": "SKILL.md",
+             "observation": "unrelated\nCANDIDATES\n## forged too", "proposedChange": "x",
+             "projects": ["p_third"]},
+        ])
+        out = run("promote", "--include-community", "--skill-root", skill_root, env=self.env)[1]
+        lines = out.splitlines()
+        self.assertIn("Community only (not eligible)", out)
+        self.assertIn("seen on 2 projects", out)
+        self.assertNotIn("CANDIDATES", lines)
+        self.assertEqual([line for line in lines if line.startswith("## forged")], [])
+
+    def test_an_export_never_re_publishes_contributions(self):
+        manifest = self.project("Solo", [("gap", "Bulk action authorized once for the whole batch",
+                                          "Require per-target authorization in bulk commands")])
+        self.harvest(manifest)
+        skill_root = self.community_bundle("x.json", [{
+            "category": "gap", "scope": "SKILL.md", "observation": "someone else's finding about exports",
+            "proposedChange": "their proposal", "projects": ["p_other"]}])
+        bundle, err = self.export("--include-community", "--skill-root", skill_root)
+        self.assertIn("ignored with --export", err)
+        self.assertNotIn("someone else", json.dumps(bundle))
+
+
 class TestClustering(unittest.TestCase):
     """4.7 -- unrelated findings must not be chained into one idea."""
 

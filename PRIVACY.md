@@ -8,9 +8,9 @@ below.** There is no telemetry, no analytics, and no phone-home.
 ## What runs locally
 
 Every command of `scripts/admin_console_manifest.py` (`init`, `migrate`, `validate`,
-`report`, `coverage`, `emit`, `add`, `set`, `claim`, `release-claim`, `harvest`, `promote`,
-`store`, `lesson`) and of `scripts/install_agents.py` reads and writes files on your machine
-only. The validator is Python standard library with no network access.
+`report`, `coverage`, `emit`, `add`, `set`, `remove`, `rename`, `claim`, `release-claim`,
+`harvest`, `promote`, `store`, `lesson`) and of `scripts/install_agents.py` reads and writes
+files on your machine only. The validator is Python standard library with no network access.
 
 `store sync` is the one exception among them, and only when you configure it: it runs `git`
 against a remote **you** choose and pushes `observations.jsonl`, the store's `README.md` and
@@ -40,7 +40,7 @@ projects. Each record can contain the observation text you wrote, the project na
 archetypes and stack, and evidence paths.
 
 Treat it as you would your source code: it quotes your engineering notes. It is private by
-default and never transmitted.
+default and leaves this machine only through `store sync`, to the remote you configure.
 
 ## What leaves your machine, and only if you ask
 
@@ -58,8 +58,15 @@ default and never transmitted.
   `references/discovery.md`), stack names (`Next.js`, `package.json`) and manifest ids
   built from words the guidance uses (`tenant.suspend`)
 - replaces project names with one-way fingerprints (SHA-256, truncated, salted with a random
-  per-store salt created by `store init` and never synced or exported) so the same project
-  is countable across bundles but a fingerprint cannot be checked against a list of names
+  per-store salt created by `store init` or the first export and never synced or exported),
+  so a fingerprint cannot be checked against a list of names. Because the salt is per store,
+  the same project is countable only within bundles exported from one store: exported from
+  two stores (your laptop and your desktop, or a store created again) it gets two different
+  fingerprints
+- carries no fingerprint of the observation text itself: a hash of the unscrubbed wording
+  would let anyone confirm a guess at what was scrubbed
+- keeps `scope` only when it names a file or area of the skill; anything else is exported
+  as `unassigned`
 - coarsens stack strings to family names
 - drops evidence paths entirely
 
@@ -74,7 +81,8 @@ Writing the file shares nothing. Sharing happens only when you open a pull reque
 ## Contributions
 
 See [community/README.md](community/README.md). Contribution is opt-in, contents are limited
-to sanitised bundles, and withdrawal is a pull request that deletes your file.
+to sanitised bundles, and withdrawal is a pull request that deletes your file. `promote
+--export` never re-publishes contributions: with `--include-community` it ignores them.
 
 ## Third parties
 

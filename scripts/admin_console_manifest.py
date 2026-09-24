@@ -4377,8 +4377,9 @@ def read_community_observations(skill_root=None):
             # observations, or group with unrelated ones -- and grouping is what
             # decides whether something clears the bar.
             record["fingerprint"] = observation_fingerprint(record)
-            # One contributor may report the same idea from several projects;
-            # keep them distinct so projectCount stays meaningful.
+            # A contributed record counts as ONE project, its first fingerprint.
+            # The bundle's `projects` list cannot be verified, so it may not
+            # multiply one contribution into several sightings.
             contributors = as_list(record.get("projects"))
             record["project"] = (
                 text_of(contributors[0]) if contributors
@@ -5818,11 +5819,20 @@ def cmd_store(args):
 
 
 def sanitise_candidate(candidate, salt=""):
-    """Strip a promotion candidate down to what is safe to publish."""
+    """Strip a promotion candidate down to what is safe to publish.
+
+    No fingerprint of the observation text is exported: the local one is an
+    unsalted hash of the UNSCRUBBED wording, so anyone who suspected the
+    scrubbed host or customer could confirm the guess by hashing it -- the
+    attack the project salt exists to stop -- and read_community_observations
+    recomputes fingerprints on load anyway. The scope travels only when it
+    names a file or area of the skill; a hand-set private path does not.
+    """
+    scope = candidate["scope"]
+    category = candidate["category"]
     return {
-        "fingerprint": candidate["fingerprint"],
-        "category": candidate["category"],
-        "scope": candidate["scope"],
+        "category": category if category in FEEDBACK_CATEGORIES else "unassigned",
+        "scope": scope if skill_scope_problem(scope) is None else "unassigned",
         "observation": scrub_text(candidate["observation"]),
         "proposedChange": scrub_text(candidate["proposedChange"]),
         "archetypes": sorted({scrub_text(a) for a in candidate["archetypes"] if a}),
@@ -5841,12 +5851,18 @@ def record_project_key(record):
 
 def cmd_promote(args):
     store = global_store_dir(args.store)
-    records = read_observations(store)
+    local_records = read_observations(store)
+    records = list(local_records)
     community_count = 0
+    exporting = bool(getattr(args, "export", None))
     if getattr(args, "include_community", False):
-        community = read_community_observations(getattr(args, "skill_root", None))
-        community_count = len(community)
-        records = records + community
+        if exporting:
+            stderr("NOTE: --include-community is ignored with --export: a bundle carries this "
+                   "store's own observations, never someone else's contribution")
+        else:
+            community = read_community_observations(getattr(args, "skill_root", None))
+            community_count = len(community)
+            records = records + community
     if not records:
         print("No observations in " + str(store) + ". Run `harvest` after a build.")
         return 0
@@ -5860,12 +5876,28 @@ def cmd_promote(args):
         key = min(text_of(item.get("fingerprint")) for item in cluster)
         groups.setdefault(key, []).extend(cluster)
 
+    # A bundle this store exported names its projects by fingerprints salted
+    # with this store's salt. Map them back, so a contribution that came from
+    # here cannot corroborate its own source. (Bundles from another store use
+    # another salt and cannot be matched: see PRIVACY.md.)
+    salt = store_salt(store, create=False)
+    own_fingerprints = {}
+    if salt:
+        for item in local_records:
+            if record_project_key(item):
+                own_fingerprints[project_fingerprint(record_project_key(item), salt)] = record_project_key(item)
+
+    def counted_key(item):
+        key = record_project_key(item)
+        return own_fingerprints.get(key, key) if item.get("community") else key
+
     candidates = []
+    community_only = []
     for fingerprint, items in groups.items():
         # The bar counts distinct projects, not distinct name strings: a project
         # is its stable key (platform.id, else name), so a renamed project is
         # still one and two unrelated projects that share a name are still two.
-        keys = sorted({record_project_key(item) for item in items if record_project_key(item)})
+        keys = sorted({counted_key(item) for item in items if counted_key(item)})
         names = sorted({text_of(item.get("project")) for item in items if text_of(item.get("project"))})
         archetypes = sorted({a for item in items for a in as_list(item.get("archetypes"))})
         stacks = sorted({text_of(item.get("stack")) for item in items if text_of(item.get("stack"))})
@@ -5873,43 +5905,53 @@ def cmd_promote(args):
         # A correction of wrong guidance promotes on first sighting; everything
         # else waits for corroboration from a second, distinct project.
         immediate = category == "incorrect-guidance"
-        if len(keys) >= args.min_projects or immediate:
-            candidates.append(
+        if not (len(keys) >= args.min_projects or immediate):
+            continue
+        candidate = {
+            "fingerprint": fingerprint,
+            "projects": names,
+            "projectKeys": keys,
+            "projectCount": len(keys),
+            "archetypes": archetypes,
+            "stacks": stacks,
+            "category": category,
+            "scope": text_of(items[0].get("scope")),
+            "proposedChange": text_of(items[0].get("proposedChange")),
+            "observation": text_of(items[0].get("observation")),
+            "evidence": sorted({e for item in items for e in as_list(item.get("evidence"))}),
+            "reason": "correction" if immediate else "seen on " + str(len(keys)) + " projects",
+            "communityEvidence": sum(1 for item in items if item.get("community")),
+            # Who was merged into this cluster, so a bad merge is visible.
+            "members": [
                 {
-                    "fingerprint": fingerprint,
-                    "projects": names,
-                    "projectKeys": keys,
-                    "projectCount": len(keys),
-                    "archetypes": archetypes,
-                    "stacks": stacks,
-                    "category": category,
-                    "scope": text_of(items[0].get("scope")),
-                    "proposedChange": text_of(items[0].get("proposedChange")),
-                    "observation": text_of(items[0].get("observation")),
-                    "evidence": sorted({e for item in items for e in as_list(item.get("evidence"))}),
-                    "reason": "correction" if immediate else "seen on " + str(len(keys)) + " projects",
-                    "communityEvidence": sum(1 for item in items if item.get("community")),
-                    # Who was merged into this cluster, so a bad merge is visible.
-                    "members": [
-                        {
-                            "id": observation_key(item),
-                            "project": text_of(item.get("project")),
-                            "date": text_of(item.get("date")),
-                            "observation": text_of(item.get("observation"))[:160],
-                        }
-                        for item in items
-                    ],
+                    "id": observation_key(item),
+                    "project": text_of(item.get("project")),
+                    "date": text_of(item.get("date")),
+                    "observation": text_of(item.get("observation"))[:160],
                 }
-            )
+                for item in items
+            ],
+        }
+        # Community records corroborate a sighting in this store; a group made
+        # of contributions alone never clears the bar, however many there are
+        # or whatever their category says.
+        if any(not item.get("community") for item in items):
+            candidates.append(candidate)
+        else:
+            candidate["reason"] = "community only: not eligible without a sighting in this store"
+            community_only.append(candidate)
     candidates.sort(key=lambda c: (-c["projectCount"], c["scope"], c["fingerprint"]))
+    community_only.sort(key=lambda c: (-c["projectCount"], c["scope"], c["fingerprint"]))
 
-    if getattr(args, "export", None):
+    if exporting:
         salt = store_salt(store)
         bundle = {
             "bundleVersion": "1",
             "generatedFor": "adminwright community observations",
-            "note": "Sanitised. Project names are salted one-way fingerprints; paths, hosts, "
-                    "emails, URLs, credentials and evidence references are removed.",
+            "note": "Sanitised. Project names are one-way fingerprints salted per store, so they "
+                    "count as one project only within bundles from the same store; paths, hosts, "
+                    "emails, URLs, credentials and evidence references are removed; scope is kept "
+                    "only when it names a file or area of the skill.",
             "observations": [sanitise_candidate(c, salt) for c in candidates],
         }
         out_path = Path(args.export).resolve()
@@ -5931,9 +5973,18 @@ def cmd_promote(args):
 
     if args.json:
         print(json.dumps(
-            {"store": str(store), "communityRecords": community_count, "candidates": candidates},
+            {"store": str(store), "communityRecords": community_count, "candidates": candidates,
+             "communityOnly": community_only},
             indent=2, ensure_ascii=False))
         return 0
+
+    def one_line(value):
+        # Contributed text is untrusted: a newline in it could forge a heading, or
+        # end a heredoc that captures this output (the weekly review workflow).
+        return " ".join(text_of(value).split()) if isinstance(value, str) else str(value)
+
+    def joined(values, separator=", "):
+        return separator.join(one_line(value) for value in values)
 
     print("# Promotion candidates")
     print()
@@ -5944,30 +5995,41 @@ def cmd_promote(args):
         print("Community records included: " + str(community_count)
               + " (corroborating only; they never adopt guidance on their own)")
     print()
+    if community_only:
+        print("## Community only (not eligible)")
+        print()
+        print("These reach the bar on contributed records alone. A contribution corroborates a")
+        print("sighting in this store; it never promotes anything by itself.")
+        print()
+        for candidate in community_only:
+            print("- " + one_line(candidate["scope"]) + " (" + one_line(candidate["category"]) + ", "
+                  + str(candidate["projectCount"]) + " contributed project(s)): "
+                  + one_line(candidate["observation"])[:160])
+        print()
     if not candidates:
         print("Nothing clears the bar yet. Keep harvesting.")
         return 0
     for candidate in candidates:
-        print("## " + candidate["scope"] + " (" + candidate["reason"] + ")")
+        print("## " + one_line(candidate["scope"]) + " (" + candidate["reason"] + ")")
         print()
-        print("- Category: " + candidate["category"])
-        print("- Projects: " + ", ".join(candidate["projects"]))
+        print("- Category: " + one_line(candidate["category"]))
+        print("- Projects: " + joined(candidate["projects"]))
         if candidate.get("communityEvidence"):
             print("- Community-sourced records: " + str(candidate["communityEvidence"])
                   + " (weigh separately; unverified)")
         if candidate["archetypes"]:
-            print("- Archetypes: " + ", ".join(candidate["archetypes"]))
+            print("- Archetypes: " + joined(candidate["archetypes"]))
         if candidate["stacks"]:
-            print("- Stacks: " + "; ".join(candidate["stacks"]))
-        print("- Observation: " + candidate["observation"])
-        print("- Proposed: " + candidate["proposedChange"])
+            print("- Stacks: " + joined(candidate["stacks"], "; "))
+        print("- Observation: " + one_line(candidate["observation"]))
+        print("- Proposed: " + one_line(candidate["proposedChange"]))
         if candidate["evidence"]:
-            print("- Evidence: " + ", ".join(candidate["evidence"]))
+            print("- Evidence: " + joined(candidate["evidence"]))
         print("- Merged from " + str(len(candidate["members"])) + " observation(s); if two of "
               "these are not the same finding, do not adopt them as one:")
         for member in candidate["members"]:
-            print("    - " + member["id"] + " (" + (member["date"] or "undated") + "): "
-                  + member["observation"])
+            print("    - " + one_line(member["id"]) + " (" + (one_line(member["date"]) or "undated") + "): "
+                  + one_line(member["observation"]))
         print()
     print("Record each accepted candidate with `lesson add`, then edit the reference it")
     print("names and open a pull request. Promotion is a judgement call: read")

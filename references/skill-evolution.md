@@ -69,15 +69,18 @@ repository: observations quote your engineering notes. If you would rather not u
 
 **Other people, opt-in.** `promote --export <file>` writes a sanitised bundle of promotion
 candidates: emails, URLs, paths, addresses, hostnames, domains, tokens and hashes replaced by
-markers, project names replaced by one-way fingerprints, stacks coarsened to families, and
-evidence references dropped. Contribution is a pull request adding the bundle under
-`community/observations/`, so review is the trust gate.
+markers, project names replaced by one-way fingerprints salted per store (countable only
+within bundles from one store), scope kept only when it names a part of the skill, stacks
+coarsened to families, and evidence references dropped. Contribution is a pull request
+adding the bundle under `community/observations/`, so review is the trust gate.
 `promote --include-community` then lets contributed records corroborate a local observation
 across the bar.
 
 Three rules keep that safe:
 
-- Community records **corroborate only**. They never adopt guidance on their own, and they
+- Community records **corroborate only**. `promote` enforces it: a candidate made only of
+  contributed records is listed as "community only (not eligible)", each contributed record
+  counts as one project, and a bundle this store exported never corroborates itself. They
   are labelled in `promote` output so a reviewer can weigh them differently.
 - Their fingerprints are **recomputed on load**, never trusted from the bundle, so a stale or
   hand-edited file cannot group itself with unrelated observations.
