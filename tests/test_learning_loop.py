@@ -857,6 +857,42 @@ class TestPrivacy(unittest.TestCase):
         for text, forbidden in cases.items():
             self.assertNotIn(forbidden, acm.scrub_text(text), text)
 
+    def test_scrub_catches_the_token_shapes_privacy_md_names(self):
+        cases = {
+            "google AIzaSyA1234567890abcdefghijklmnopqrstuv": "AIza",
+            "pat github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV":
+                "github_pat_",
+            "cache redis://:hunter2@cache:6379 down": "hunter2",
+            "db postgres://admin:S3cr3tPass@db.acme.internal:5432/prod": "admin",
+            "mq amqp://guest:guest@rabbit/vhost": "guest",
+            "unsigned eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjM0NTY3ODkwIn0. was accepted": "eyJ",
+            "user AIDACKCEVSQ6C2EXAMPLE role AROADBQP57FF2AEXAMPLE": "EXAMPLE",
+            "Authorization: Bearer abcDEF123456ghiJKL789012mnoPQR": "abcDEF",
+            "password=Hunt3r2!Secret in env": "Hunt3r2",
+            "creds admin:hunter2@db01 in the note": "hunter2",
+            "tenant 123e4567-e89b-12d3-a456-426614174000": "426614174000",
+            "-----BEGIN RSA PRIVATE KEY----- MIIEowIBAAKCAQEA -----END RSA PRIVATE KEY-----": "MIIE",
+            "ipv6 fe80::1ff:fe23:4567:890a": "fe80",
+            "key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY": "wJalr",
+        }
+        for text, forbidden in cases.items():
+            self.assertNotIn(forbidden, acm.scrub_text(text), text)
+
+    def test_scrub_keeps_the_skills_own_vocabulary(self):
+        for text in ("Next.js and Node.js with package.json and SKILL.md",
+                     "use and/or read/write input/output",
+                     "phase 8 of SKILL.md e.g. references/discovery.md",
+                     "the tenant.suspend capability and gap.subscription-active",
+                     "scripts/admin_console_manifest.py and code_review.py",
+                     "v1.2.3 at 10:30:45"):
+            self.assertEqual(acm.scrub_text(text), text)
+
+    def test_scrub_still_removes_what_only_looks_like_vocabulary(self):
+        for text, forbidden in {"see wiki.acme": "acme", "acmepay.refund failed": "acmepay",
+                                "references/acme-contract.md": "acme", "acme.consulting": "acme",
+                                "docs at app.dev": "app.dev", "SKILL.md.acme.io": "acme"}.items():
+            self.assertNotIn(forbidden, acm.scrub_text(text), text)
+
     def test_fingerprints_are_salted_per_store(self):
         self.assertNotEqual(acm.project_fingerprint("Acme", "salt-one"),
                             acm.project_fingerprint("Acme", "salt-two"))

@@ -46,8 +46,17 @@ default and never transmitted.
 
 `promote --export <file>` writes a sanitised bundle intended for sharing. Before writing, it:
 
-- replaces emails, URLs, absolute and relative file paths, IP addresses, hostnames, any
-  dotted domain, and cloud, source-host, JWT and API tokens and long hashes with markers
+- replaces with markers: emails; URLs of any scheme, including `scheme://user:password@host`
+  and `user:password@host`; absolute and relative file paths; IPv4 and IPv6 addresses;
+  hostnames and any other dotted name; UUIDs and long hashes; and credentials: AWS key and
+  principal ids (`AKIA…`, `ASIA…`, `AIDA…`, `AROA…` and the other IAM prefixes), GitHub
+  tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Google API keys
+  (`AIza…`), `sk-`/`pk-`/`xox?-` keys, JWTs (signed or not), bearer tokens, private-key
+  blocks, `password=`-style values, and any other run of 32 or more characters that mixes
+  upper case, lower case and digits
+- keeps the skill's own vocabulary readable: its file names (`SKILL.md`,
+  `references/discovery.md`), stack names (`Next.js`, `package.json`) and manifest ids
+  built from words the guidance uses (`tenant.suspend`)
 - replaces project names with one-way fingerprints (SHA-256, truncated, salted with a random
   per-store salt created by `store init` and never synced or exported) so the same project
   is countable across bundles but a fingerprint cannot be checked against a list of names
@@ -55,9 +64,10 @@ default and never transmitted.
 - drops evidence paths entirely
 
 **Its limits, stated plainly:** no pattern can detect a company, product, customer or
-person's name written as an ordinary word. The exporter prints this warning and the file is
-yours to read before you share it. If you contribute without reading it, you are the only
-person who could have caught what the patterns missed.
+person's name written as an ordinary word, and a credential in a shape not listed above that
+is shorter than 32 characters, or split by spaces, can survive. The exporter prints this
+warning and the file is yours to read before you share it. If you contribute without reading
+it, you are the only person who could have caught what the patterns missed.
 
 Writing the file shares nothing. Sharing happens only when you open a pull request.
 

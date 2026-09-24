@@ -3858,20 +3858,49 @@ def slugify(value):
     return (slug[:60].rstrip("-")) or "lesson"
 
 
-# Patterns scrubbed before an observation can leave the machine. Deliberately
-# aggressive: a false scrub costs a little readability, a missed one leaks a
-# customer name or an internal hostname into a public pull request.
-SCRUB_PATTERNS = (
+# Scrubbing runs in three passes before an observation can leave the machine.
+# Deliberately aggressive: a false scrub costs a little readability, a missed one
+# leaks a customer name, an internal hostname or a credential into a public pull
+# request.
+#
+# 1. SECRET_PATTERNS: credentials and identities, whatever they sit next to.
+#    Token shapes follow the issuers' published formats: GitHub's prefixes
+#    (ghp_, gho_, ghu_, ghs_, ghr_, github_pat_), AWS unique-id prefixes (AKIA
+#    access keys, ASIA temporary keys, AIDA users, AROA roles, ...), Google API
+#    keys (AIza + 35), JWTs including unsigned ones whose signature is empty.
+# 2. The skill's own vocabulary is set aside: its files (SKILL.md,
+#    references/discovery.md), stack names (Next.js, package.json) and manifest
+#    ids (tenant.suspend) are what a maintainer needs in order to act.
+# 3. LOCATION_PATTERNS: paths, hosts and any other dotted name.
+SECRET_PATTERNS = (
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.S),
+     "<secret>"),
+    # Any scheme, so redis://:pw@cache and postgres://user:pw@db go whole.
+    (re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S+"), "<url>"),
+    # user:password@host without a scheme, before the email pattern keeps "user:".
+    (re.compile(r"[^\s:/@<>]+:[^\s:/@<>]+@[\w.-]+"), "<secret>"),
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "<email>"),
-    (re.compile(r"\bhttps?://\S+"), "<url>"),
-    # Credential shapes, before the generic path and domain patterns can eat half
-    # of them: cloud, source-host and JWT tokens.
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b"), "<secret>"),
-    (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "<secret>"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]*){1,4}"), "<secret>"),
+    (re.compile(r"\b(?:ABIA|ACCA|AGPA|AIDA|AIPA|AKIA|ANPA|ANVA|APKA|AROA|ASCA|ASIA)[A-Z0-9]{16,}\b"),
+     "<secret>"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "<secret>"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "<secret>"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35,}"), "<secret>"),
     (re.compile(r"\b(?:sk|pk|ghp|gho|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b"), "<secret>"),
+    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)"
+                r"(\s*[=:]\s*)(?=\S*[0-9!@#$%^&*])\S{6,}"), r"\1\2<secret>"),
+    (re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}"), r"\1 <secret>"),
+    (re.compile(r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b"), "<id>"),
     (re.compile(r"\b[A-Fa-f0-9]{32,}\b"), "<hash>"),
+    # Any other long run that mixes upper case, lower case and digits: an API key
+    # of a shape not listed above, or a secret access key.
+    (re.compile(r"(?<![A-Za-z0-9_+/=-])(?=[A-Za-z0-9_+/-]*[0-9])(?=[A-Za-z0-9_+/-]*[a-z])"
+                r"(?=[A-Za-z0-9_+/-]*[A-Z])[A-Za-z0-9_+/-]{32,}={0,2}"), "<secret>"),
     (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
+    (re.compile(r"(?<![\w:.])(?=[0-9A-Fa-f:]*(?:[A-Fa-f]|::))[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}"
+                r"(?![\w:])"), "<ip>"),
+)
+LOCATION_PATTERNS = (
     # Hostnames including every leading label: db-prod-eu1.acme.internal must not
     # survive as db-prod-eu1.<host>, which still names the machine.
     (re.compile(r"\b[\w-]+(?:\.[\w-]+)*\.(?:internal|local|corp|lan|test|intranet)\b", re.I), "<host>"),
@@ -3886,6 +3915,108 @@ SCRUB_PATTERNS = (
     (re.compile(r"\b[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}\b", re.I), "<domain>"),
 )
 
+# A dotted or slashed token that pass 2 may keep.
+VOCABULARY_CANDIDATE = re.compile(r"(?<![\w/\\.@<-])[\w-]+(?:[./][\w-]+)+")
+# Stack names and well-known file names, compared lowercased.
+STACK_TOKENS = frozenset("""
+next.js node.js nuxt.js vue.js react.js express.js nest.js ember.js alpine.js solid.js d3.js
+three.js chart.js socket.io asp.net ado.net package.json package-lock.json tsconfig.json
+jsconfig.json composer.json composer.lock pyproject.toml requirements.txt setup.py setup.cfg
+go.mod go.sum cargo.toml cargo.lock gemfile.lock pnpm-lock.yaml yarn.lock docker-compose.yml
+docker-compose.yaml next.config.js next.config.mjs next.config.ts vite.config.js vite.config.ts
+tailwind.config.js tailwind.config.ts schema.prisma manifest.json settings.py urls.py models.py
+views.py admin.py routes.php web.php api.php appsettings.json application.yml
+application.properties
+""".split())
+# Slashed words that are prose, not paths.
+PROSE_PAIRS = frozenset("""
+and/or either/or read/write input/output i/o yes/no on/off true/false client/server
+frontend/backend front-end/back-end allow/deny accept/reject start/stop open/close get/set
+create/update add/remove show/hide enable/disable import/export upload/download before/after
+pass/fail success/failure request/response
+""".split())
+# Last labels that make a dotted name a host rather than a manifest id: every
+# label of three letters or fewer (com, io, dev, de, co.uk), the private
+# suffixes, and the longer public suffixes a company domain commonly uses.
+HOST_LABELS = frozenset("""
+internal local corp lan test intranet localhost home example invalid arpa onion
+info tech cloud online site store shop bank finance financial money capital fund ventures
+partners digital agency company group network systems solutions software studio design media
+news blog live life world global zone space today team tools works center health care
+clinic insurance legal energy email services support consulting engineering expert codes
+computer technology directory exchange estate realty homes properties travel jobs careers
+academy education school university mobi asia name museum aero coop click link website host
+hosting wiki games social chat market markets marketing trade trading loans credit cash
+invest investments holdings industries international enterprises business city club plus
+family fitness auto cars delivery express logistics shipping security guru ninja rocks
+""".split())
+
+# Admin verbs and nouns common in capability ids that the guidance happens not to use.
+ID_WORDS = frozenset("invoice invoices void unlock unarchive unsuspend reinstate deactivate reactivate".split())
+
+_SKILL_FILE_NAMES = []
+_SKILL_WORDS = []
+
+
+def skill_file_names():
+    """Base names of the skill's own files, so 'code_review.py' survives a scrub."""
+    if not _SKILL_FILE_NAMES:
+        names = set()
+        try:
+            names.update(p.name for p in SKILL_ROOT.iterdir() if p.is_file())
+            for area in ("scripts", "references", "agents", "assets", "lessons"):
+                names.update(p.name for p in (SKILL_ROOT / area).rglob("*") if p.is_file())
+        except OSError:
+            pass
+        _SKILL_FILE_NAMES.append(frozenset(n for n in names if not n.startswith(".")))
+    return _SKILL_FILE_NAMES[0]
+
+
+def skill_words():
+    """Every word the skill's guidance uses: the vocabulary a manifest id is built from.
+
+    A customer or product name is, almost by definition, not in it -- which is
+    what separates tenant.suspend (keep) from wiki.acme or acmepay.refund
+    (scrub), two shapes no pattern can tell apart.
+    """
+    if not _SKILL_WORDS:
+        words = set(ID_WORDS)
+        sources = [SKILL_ROOT / "SKILL.md"]
+        for area in ("references", "agents"):
+            try:
+                sources.extend(sorted((SKILL_ROOT / area).glob("*.md")))
+            except OSError:
+                pass
+        for source in sources:
+            try:
+                words.update(re.findall(r"[a-z][a-z0-9]*", source.read_text(encoding="utf-8").lower()))
+            except (OSError, UnicodeDecodeError):
+                continue
+        _SKILL_WORDS.append(frozenset(words))
+    return _SKILL_WORDS[0]
+
+
+def skill_vocabulary(token):
+    """Whether a dotted or slashed token is the skill's vocabulary rather than a project's."""
+    lowered = token.lower()
+    if lowered in STACK_TOKENS or lowered in PROSE_PAIRS:
+        return True
+    if FEEDBACK_SCOPE_PATTERN.match(token) and skill_path_exists(SKILL_ROOT, token):
+        return True
+    if "/" in token:
+        return False
+    if token in skill_file_names():
+        return True
+    # A manifest id (tenant.suspend, gap.subscription-active): lowercase, built
+    # only from words the guidance uses, and not ending in a label a host could.
+    if not ID_PATTERN.fullmatch(token) or "." not in token:
+        return False
+    last = token.rsplit(".", 1)[-1]
+    if len(last) <= 3 or last in HOST_LABELS:
+        return False
+    parts = [part for part in re.split(r"[.-]", token) if not part.isdigit()]
+    return all(part in skill_words() for part in parts)
+
 # Stacks coarsened to a family, so "PostgreSQL 16.2 on prod-eu-1" becomes "postgres".
 STACK_FAMILIES = (
     "next.js", "remix", "react", "vue", "svelte", "angular",
@@ -3896,10 +4027,30 @@ STACK_FAMILIES = (
 
 
 def scrub_text(value):
-    """Remove anything that could identify a project, person, or host."""
-    text = text_of(value)
-    for pattern, replacement in SCRUB_PATTERNS:
+    """Remove anything that could identify a project, person, host or credential.
+
+    The skill's own vocabulary is set aside between the secret pass and the
+    location pass, so "Next.js and Node.js with package.json and SKILL.md" or
+    "the tenant.suspend capability" survive instead of becoming a row of
+    <domain> markers; a secret is removed before anything is set aside, so a
+    kept token can never shelter one.
+    """
+    text = text_of(value).replace("\x00", " ")
+    for pattern, replacement in SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
+    kept = []
+
+    def keep(match):
+        token = match.group(0)
+        if not skill_vocabulary(token):
+            return token
+        kept.append(token)
+        return "\x00" + str(len(kept) - 1) + "\x00"
+
+    text = VOCABULARY_CANDIDATE.sub(keep, text)
+    for pattern, replacement in LOCATION_PATTERNS:
+        text = pattern.sub(replacement, text)
+    text = re.sub("\x00([0-9]+)\x00", lambda match: kept[int(match.group(1))], text)
     return " ".join(text.split())
 
 
