@@ -11,19 +11,29 @@ silently; findings become `gaps[]` for an implementer working under a separate c
 
 ## Locate the skill
 
-The token `${CLAUDE_PLUGIN_ROOT}` below is the adminwright skill directory — the one
+`${CLAUDE_PLUGIN_ROOT}` in this file names the adminwright skill directory — the one
 containing `SKILL.md` and `scripts/admin_console_manifest.py`. In a Claude Code plugin
-install the harness expands it; copies installed by `scripts/install_agents.py` (Codex,
-opencode, Antigravity, Gemini CLI, Pi, Cursor, or any other harness) arrive with it already
-replaced by an absolute path. If it reaches you unexpanded, resolve it yourself, in order: a
-skill path stated in your dispatch prompt or the project's agent contract file;
-`.claude/skills/adminwright`, `.agents/skills/adminwright`, or `skills/adminwright` under
-the project root; `~/.claude/skills/adminwright`; a plugin cache at `~/.claude/plugins/cache/*/adminwright/*/`
-or the marketplace clone at `~/.claude/plugins/marketplaces/tarikai/`; otherwise search the
-filesystem for
-`admin_console_manifest.py`. If you cannot resolve it, say so and stop — do not improvise
-the skill from memory. Manifest commands (use `py -3` or `python3` if `python` is not on
-PATH):
+install the harness fills in the absolute path. Copies written by
+`scripts/install_agents.py` (Codex, opencode, Antigravity, Gemini CLI, Pi, Cursor, or any
+other harness) name the skill relative to the project root when it lives inside the
+project, and otherwise carry the placeholder `<skill-dir>`, because a machine's path does
+not belong in files a team commits. Use the name as written if
+`scripts/admin_console_manifest.py` exists under it. If it does not — a placeholder, an
+unexpanded variable, or a path from another machine — use the first of these that contains
+that script, wherever this file names the skill:
+
+1. The path on the first line of `.adminwright/skill-dir` under the project root, which the
+   installer writes for this machine and git-ignores.
+2. A skill path stated in your dispatch prompt or the project's agent contract file.
+3. `.agents/skills/adminwright`, `.claude/skills/adminwright`, or `skills/adminwright` under
+   the project root; then `~/.agents/skills/adminwright` or `~/.claude/skills/adminwright`.
+4. A Claude Code plugin: the cache at `~/.claude/plugins/cache/*/adminwright/*/` (one
+   directory per marketplace and version; take the most recently modified) or the
+   marketplace clone at `~/.claude/plugins/marketplaces/tarikai/`.
+5. A filesystem search for `admin_console_manifest.py`.
+
+If you cannot resolve it, say so and stop — do not improvise the skill from memory.
+Manifest commands (use `py -3` or `python3` if `python` is not on PATH):
 
 ```text
 python ${CLAUDE_PLUGIN_ROOT}/scripts/admin_console_manifest.py <command> ...
