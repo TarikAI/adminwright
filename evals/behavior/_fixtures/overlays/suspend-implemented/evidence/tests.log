@@ -1,0 +1,13 @@
+$ npx vitest run tests/tenants.test.ts
+# started: 2026-09-24T09:00:00Z
+
+ RUN  v3.2.4 /work/support-desk
+
+ ✓ tests/tenants.test.ts (1 test) 11ms
+   ✓ tenant.suspend > marks the tenant SUSPENDED 9ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Duration  412ms
+
+# exit code: 0

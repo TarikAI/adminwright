@@ -16,6 +16,9 @@
     "./agents/adminwright-security.md",
     "./agents/adminwright-harvester.md"
   ],
+  "experimental": {
+    "evals": "evals/behavior"
+  },
   "keywords": [
     "admin",
     "admin-console",

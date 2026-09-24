@@ -15,6 +15,22 @@ therefore says which rule set judged it, even on an install that updated in betw
 
 ### Added
 
+- **Behavioural evals** (`evals/behavior/`, run with `claude plugin eval`), in two sets:
+  - Six smoke cases need no tool grant and run anywhere. They check that the skill loads
+    for a back-office or superadmin request and not for a marketing chart or a customer
+    feature, that an audit of a decorative admin page names its hard-coded data,
+    browser-only permission check and dead button, and that without a shell the reply
+    calls nothing verified.
+  - Five shell cases dispatch the role agents against a seeded Next.js/Prisma project. The
+    architect models without writing code; the implementer claims, replaces hard-coded data
+    and checks the session on the server; security files a blocking gap and fixes nothing;
+    qa contests instead of signing over an open gap; the harvester asks for the digest it
+    was not given.
+  - `plugin.json` gains `experimental.evals` (`evals/` holds the validator fixtures).
+  - `tests/test_behavior_evals.py` checks every case and grader against the runner's schema
+    and runs every scaffold. It also fails on any grader that already passes on the
+    untouched workspace.
+  - `.github/workflows/behavior-evals.yml` runs the suite by hand on Linux.
 - **Review state machine** (round 2). Tightening, so breaking by this project's definition:
   - `reviewed-with-blocking-gap`, an error at every profile: a capability cannot be `reviewed`
     while an open or blocked critical/high gap targets it.

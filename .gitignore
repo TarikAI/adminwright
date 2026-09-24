@@ -5,6 +5,9 @@ __pycache__/
 venv/
 .pytest_cache/
 
+# Behavioural eval runs (claude plugin eval) write reports here
+evals/behavior/results/
+
 # Adminwright working state
 .admin-console/locks/
 .admin-console/.lock

@@ -6,6 +6,9 @@ The learning loop changes guidance and rules over time. Without a fitness functi
 drift, not improvement — a rule tightened for one project starts failing builds that were
 always correct, and nobody notices until a user does.
 
+These fixtures judge the validator. What an agent does with the skill is tested separately,
+by the `claude plugin eval` suite in [behavior/](behavior/README.md).
+
 ## The fixtures
 
 | Fixture | Shape | Job |

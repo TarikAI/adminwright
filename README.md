@@ -220,7 +220,8 @@ assets/agent-contract.template.md   drop into your repo as AGENTS.md / CLAUDE.md
 scripts/                    the validator, the agent installer, and the optional
                             OCR bridge (stdlib only); maintainer/ regenerates data
 tests/                      regression tests, every one from a real defect
-evals/                      golden fixtures pinning validator behaviour in CI
+evals/                      golden fixtures pinning validator behaviour in CI, and
+                            behavioural evals for `claude plugin eval` (evals/behavior)
 lessons/                    durable lessons, version-controlled and shared
 ```
 

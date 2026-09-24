@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+enum StaffRole {
+  SUPPORT
+  ADMIN
+}
+
+model Tenant {
+  id           String        @id @default(cuid())
+  name         String
+  status       TenantStatus  @default(ACTIVE)
+  createdAt    DateTime      @default(now())
+  subscription Subscription?
+  tickets      Ticket[]
+}
+
+model Subscription {
+  id       String             @id @default(cuid())
+  tenantId String             @unique
+  tenant   Tenant             @relation(fields: [tenantId], references: [id])
+  plan     String
+  status   SubscriptionStatus
+  renewsAt DateTime
+}
+
+model StaffUser {
+  id    String    @id @default(cuid())
+  email String    @unique
+  role  StaffRole
+}
+
+model Ticket {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  subject  String
+  status   String @default("OPEN")
+}

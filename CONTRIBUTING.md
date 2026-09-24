@@ -45,8 +45,10 @@ stated falsehoods are the worst defect a skill can carry, because agents act on 
 `scripts/admin_console_manifest.py` decides pass/fail for every build that uses this skill.
 
 - **Standard library only.** No dependencies, ever. It must run wherever Python runs.
-- **Windows and POSIX.** No `fcntl`, no `os.fork`, no hardcoded `/` joins.
-- **No clock, no randomness.** Dates are passed in via `--date`. Output must be reproducible.
+- **Windows and POSIX.** A platform API (`fcntl`, `msvcrt`) only behind an import guard, with
+  the other platform's path beside it. No `os.fork`, no hardcoded `/` joins.
+- **Reproducible verdicts.** Dates are passed in via `--date`. The clock and randomness appear
+  only where they cannot change a verdict: lock timing, and the id `init` gives a new platform.
 - **Never emit a traceback.** Bad input exits 2 with a clear message.
 - Exit codes: `0` clean, `1` findings at error severity, `2` usage or IO failure, `3` claim
   conflict.
@@ -68,6 +70,20 @@ Two properties must hold after any change, and both are covered by tests:
 2. **A manifest built on mocks fails at every profile.** Including `internal`.
 
 If your change makes either false, it is wrong regardless of what else it improves.
+
+### Behavioural evals
+
+`tests/` and `evals/fixtures/` check what the validator decides. `evals/behavior/` checks what
+an agent does with the skill and its agents, using `claude plugin eval`:
+- whether the skill loads for a back-office request and not for a near miss;
+- whether an audit finds a decorative console;
+- whether the role agents keep their boundaries.
+
+Those runs are real model calls. Run them by hand or from the manual **Behavioural evals**
+workflow, never on push; `evals/behavior/README.md` has the commands and the costs. When you
+change the skill's description, an agent file, or a phase's guidance, run the affected cases
+before and after. `tests/test_behavior_evals.py` runs in CI and checks every case file and
+scaffold without a model.
 
 ### Loosening a check
 

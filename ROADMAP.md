@@ -36,6 +36,10 @@ Everything below has shipped; see [CHANGELOG.md](CHANGELOG.md) for detail.
   - a test that every documented command parses;
   - core-schema fixes, including a separation-of-duties bypass through a temporary table
     that shadowed `approval_request`.
+- ~~Behavioural evals~~ — a `claude plugin eval` suite in `evals/behavior/`:
+  - six smoke cases for triggering, near misses, audit judgement and honesty about gates;
+  - five shell cases for the architect, implementer, security, qa and harvester boundaries;
+  - a manual CI workflow, and a free structure test that runs on every push.
 
 ## Next: field test and case study
 
@@ -48,13 +52,11 @@ on a real codebase, read closely: where an agent following `SKILL.md` was tempte
 is exactly the data the learning loop was built to capture, and a published case study is
 the evidence that the gates certify something a reader can check.
 
-Two recommendations from the round-two research are not built yet:
+Still to do from the round-two research:
 
-- **Behavioral evals.** A `claude plugin eval` suite in its own folder (`evals/` holds the
-  validator fixtures), run on Sonnet and Opus. It would check that a back-office request
-  triggers the skill and a near miss does not, that the implementer claims before it edits,
-  that reviewers make no edits, and that the harvester without a digest returns
-  `NEEDS_CONTEXT`. This waits on the command being generally available.
+- **A first full run of the behavioural evals**, on Sonnet and Opus. The suite loads and
+  its scaffolds are tested, but no case has run against a live model yet. Record the
+  baseline scores, and tune any grader that turns out noisy.
 - **Plugin hooks for the reviewer write surface.** A `PreToolUse` hook in Claude Code that
   refuses reviewer writes outside their surface, and one on `SubagentStop` that runs each
   role's exit check. It would fail open when Python is missing. `review-scope` already

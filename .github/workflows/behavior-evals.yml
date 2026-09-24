@@ -1,0 +1,77 @@
+name: Behavioural evals
+
+# Real model calls, billed to the repository's ANTHROPIC_API_KEY secret: run by hand, never
+# on push. The suite and how to read its report are in evals/behavior/README.md. Linux has
+# the OS sandbox (bubblewrap + socat) that the shell cases' Bash grant requires.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Cases to run"
+        type: choice
+        options: [smoke, shell, all]
+        default: smoke
+      runs:
+        description: "Runs per case per arm"
+        default: "3"
+      model:
+        description: "Model under test (pin it, so a model rollout is not read as a plugin regression)"
+        default: "claude-sonnet-5"
+      max_cost_usd:
+        description: "Hard ceiling on the run's list-price cost"
+        default: "25"
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    name: claude plugin eval (${{ inputs.tag }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: Require the API key secret
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::Add an ANTHROPIC_API_KEY repository secret to run the behavioural evals."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Sandbox prerequisites for the shell cases
+        timeout-minutes: 5
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap socat
+      - name: Install Claude Code
+        timeout-minutes: 5
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Run the suite
+        env:
+          DISABLE_AUTOUPDATER: "1"
+          TAG: ${{ inputs.tag }}
+          RUNS: ${{ inputs.runs }}
+          MODEL: ${{ inputs.model }}
+          MAX_COST: ${{ inputs.max_cost_usd }}
+        run: |
+          # The target comes first: --tag, --allow-tools and --json each take a value.
+          args=(. --scaffold --trust-plugin --no-publish --json results.json
+                --runs "$RUNS" --model "$MODEL" --judge-model claude-haiku-4-5
+                --max-cost-usd "$MAX_COST" --threshold 0.8)
+          if [ "$TAG" != "all" ]; then args+=(--tag "$TAG"); fi
+          if [ "$TAG" != "smoke" ]; then args+=(--allow-tools Bash Write Edit); fi
+          claude plugin eval "${args[@]}"
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: behavior-eval-results
+          path: |
+            results.json
+            evals/behavior/results/
+          if-no-files-found: ignore
