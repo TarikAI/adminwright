@@ -43,6 +43,8 @@ ALTER TABLE admin_job ADD CONSTRAINT admin_job_counts
     CHECK (processed_count >= 0 AND failed_count >= 0);
 ALTER TABLE config_setting ADD CONSTRAINT config_setting_secret_ref
     CHECK (is_secret = (value_type = 'secret_ref'));
+ALTER TABLE data_subject_request ADD CONSTRAINT data_subject_request_hold_blocks_fulfilment
+    CHECK (NOT (legal_hold AND state = 'fulfilled'));
 
 -- 2. Partial and expression indexes ------------------------------------------
 

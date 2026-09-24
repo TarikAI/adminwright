@@ -363,9 +363,10 @@ key, never the payload. `expires_at` is mandatory. Downloads are audit events wi
 `target_type = 'export_request'`; the counters on the row are a convenience, not the record.
 
 `data_subject_request` tracks privacy obligations with a due date, a state machine, and an
-explicit legal-hold interaction. The hold conflict is real and must be encoded, not left to
-process: an erasure request cannot be marked fulfilled while a hold blocks it. Access and
-portability requests link to an `export_request`; erasure links to an `admin_job`, because
+explicit legal-hold interaction, encoded rather than left to process: a request under
+`legal_hold` cannot be marked `fulfilled` (`data_subject_request_hold_blocks_fulfilment`); it
+stays open, or is refused, while the hold lasts. Access and portability requests link their
+`export_request` (`export_request_id`); erasure links its `admin_job` (`admin_job_id`), because
 erasure across a real system is a long-running job with partial failures.
 
 ## Indexing for real access patterns

@@ -533,8 +533,9 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
                          name: 'export_request_state_check'
     end
 
-    # Erasure interacts with retention, legal hold and backups. legal_hold blocks
-    # fulfilment; it does not silently drop the request.
+    # Erasure interacts with retention, legal hold and backups. A request under legal
+    # hold cannot be marked fulfilled; the hold never silently drops it. Access and
+    # portability requests link their export_request, erasure its admin_job.
     create_table :data_subject_request do |t|
       t.uuid   :request_uuid, null: false, default: -> { 'gen_random_uuid()' }
       t.string :kind, limit: 16, null: false
@@ -545,16 +546,22 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.string :state, limit: 16, null: false, default: 'open'
       t.boolean :legal_hold, null: false, default: false
       t.bigint :assigned_to
+      t.bigint :export_request_id
+      t.bigint :admin_job_id
       t.text   :resolution
       t.timestamptz :resolved_at
 
       t.foreign_key :admin_actor, column: :assigned_to
+      t.foreign_key :export_request, column: :export_request_id
+      t.foreign_key :admin_job, column: :admin_job_id
       t.index :request_uuid, unique: true
       t.index %i[state due_at], name: 'data_subject_request_queue'
       t.check_constraint "kind IN ('access','erasure','rectification','portability','restriction','objection')",
                          name: 'data_subject_request_kind_check'
       t.check_constraint "state IN ('open','in-progress','fulfilled','refused','withdrawn')",
                          name: 'data_subject_request_state_check'
+      t.check_constraint "NOT (legal_hold AND state = 'fulfilled')",
+                         name: 'data_subject_request_hold_blocks_fulfilment'
     end
 
     # -----------------------------------------------------------------------

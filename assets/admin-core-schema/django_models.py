@@ -18,9 +18,9 @@ WHAT DJANGO CANNOT ENFORCE IN MODELS — add these in a migration:
      ./django_triggers.sql (unqualified names, canonical column names). Model-level
      guards (save() overrides, signals) are bypassed by bulk operations, raw SQL and
      other services.
-  2. Nothing else. Every CHECK in postgres.sql (23 of them, including the enum-like
-     ones, which are CheckConstraints below and not just choices=) and every
-     partial / expression unique index is expressed natively via Meta.constraints.
+  2. Nothing else. Every CHECK in postgres.sql (including the enum-like ones, which
+     are CheckConstraints below and not just choices=) and every partial /
+     expression unique index is expressed natively via Meta.constraints.
 
 Suggested migration (a second migration, after the one makemigrations generates):
 
@@ -971,7 +971,9 @@ class ExportRequest(models.Model):
 class DataSubjectRequest(models.Model):
     """Erasure interacts with retention, legal hold and backups.
 
-    legal_hold blocks fulfilment; it does not silently drop the request.
+    A request under legal hold cannot be marked fulfilled (a CHECK below); the hold
+    never silently drops it. Access and portability requests link their
+    ExportRequest, erasure its AdminJob.
     """
 
     class Kind(models.TextChoices):
@@ -1010,6 +1012,22 @@ class DataSubjectRequest(models.Model):
         db_column="assigned_to",
         db_index=False,
     )
+    export_request = models.ForeignKey(
+        ExportRequest,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="data_subject_requests",
+        db_index=False,
+    )
+    admin_job = models.ForeignKey(
+        AdminJob,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="data_subject_requests",
+        db_index=False,
+    )
     resolution = models.TextField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
 
@@ -1032,6 +1050,10 @@ class DataSubjectRequest(models.Model):
             models.CheckConstraint(
                 condition=Q(state__in=["open", "in-progress", "fulfilled", "refused", "withdrawn"]),
                 name="data_subject_request_state_check",
+            ),
+            models.CheckConstraint(
+                condition=~Q(legal_hold=True, state="fulfilled"),
+                name="data_subject_request_hold_blocks_fulfilment",
             ),
         ]
         indexes = [

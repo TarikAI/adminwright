@@ -22,7 +22,7 @@
 //      are native PostgreSQL enums (a database-level constraint, with @map keeping
 //      the canonical strings), so the CHECKs that remain are the cross-column and
 //      numeric ones: no self-grant, revocation completeness, grant window,
-//      impersonation bounds, min approvals, job counts, secret_ref.
+//      impersonation bounds, min approvals, job counts, secret_ref, legal hold.
 //   2. Partial and expression indexes. Prisma turns none of these into a WHERE or
 //      COALESCE index, so they are left out of this file rather than emitted as full
 //      indexes: live-grant uniqueness, job idempotency, the one-live-impersonation
@@ -461,8 +461,9 @@ model AdminJob {
   resultArtifact  String?   @map("result_artifact")
   cancelRequested Boolean   @default(false) @map("cancel_requested")
 
-  initiator AdminActor        @relation(fields: [initiatedBy], references: [id], onDelete: NoAction)
-  failures  AdminJobFailure[]
+  initiator           AdminActor           @relation(fields: [initiatedBy], references: [id], onDelete: NoAction)
+  failures            AdminJobFailure[]
+  dataSubjectRequests DataSubjectRequest[]
 
   @@map("admin_job")
 }
@@ -592,29 +593,36 @@ model ExportRequest {
   downloadCount Int        @default(0) @map("download_count")
   lastDownloadedAt DateTime? @map("last_downloaded_at") @db.Timestamptz
 
-  requester AdminActor @relation(fields: [requestedBy], references: [id], onDelete: NoAction)
+  requester           AdminActor           @relation(fields: [requestedBy], references: [id], onDelete: NoAction)
+  dataSubjectRequests DataSubjectRequest[]
 
   @@index([state, expiresAt], map: "export_request_state")
   @@map("export_request")
 }
 
-/// Erasure interacts with retention, legal hold and backups. legalHold blocks
-/// fulfilment; it does not silently drop the request.
+/// Erasure interacts with retention, legal hold and backups. RAW SQL REQUIRED
+/// (prisma_raw.sql): the CHECK that a request under legal hold cannot be marked
+/// fulfilled; the hold never silently drops it. Access and portability requests link
+/// their ExportRequest, erasure its AdminJob.
 model DataSubjectRequest {
-  id          BigInt    @id @default(autoincrement())
-  requestUuid String    @unique @default(dbgenerated("gen_random_uuid()")) @map("request_uuid") @db.Uuid
-  kind        DsrKind
-  subjectRef  String    @map("subject_ref")
-  tenantId    String?   @map("tenant_id")
-  receivedAt  DateTime  @default(now()) @map("received_at") @db.Timestamptz
-  dueAt       DateTime  @map("due_at") @db.Timestamptz
-  state       DsrState  @default(open)
-  legalHold   Boolean   @default(false) @map("legal_hold")
-  assignedTo  BigInt?   @map("assigned_to")
-  resolution  String?
-  resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz
+  id              BigInt    @id @default(autoincrement())
+  requestUuid     String    @unique @default(dbgenerated("gen_random_uuid()")) @map("request_uuid") @db.Uuid
+  kind            DsrKind
+  subjectRef      String    @map("subject_ref")
+  tenantId        String?   @map("tenant_id")
+  receivedAt      DateTime  @default(now()) @map("received_at") @db.Timestamptz
+  dueAt           DateTime  @map("due_at") @db.Timestamptz
+  state           DsrState  @default(open)
+  legalHold       Boolean   @default(false) @map("legal_hold")
+  assignedTo      BigInt?   @map("assigned_to")
+  exportRequestId BigInt?   @map("export_request_id")
+  adminJobId      BigInt?   @map("admin_job_id")
+  resolution      String?
+  resolvedAt      DateTime? @map("resolved_at") @db.Timestamptz
 
-  assignee AdminActor? @relation(fields: [assignedTo], references: [id], onDelete: NoAction)
+  assignee      AdminActor?    @relation(fields: [assignedTo], references: [id], onDelete: NoAction)
+  exportRequest ExportRequest? @relation(fields: [exportRequestId], references: [id], onDelete: NoAction)
+  adminJob      AdminJob?      @relation(fields: [adminJobId], references: [id], onDelete: NoAction)
 
   @@index([state, dueAt], map: "data_subject_request_queue")
   @@map("data_subject_request")

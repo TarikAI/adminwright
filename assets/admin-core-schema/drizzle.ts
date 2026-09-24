@@ -565,8 +565,9 @@ export const exportRequest = adminCore.table("export_request", {
 ]);
 
 /**
- * Erasure interacts with retention, legal hold and backups. legalHold blocks
- * fulfilment; it does not silently drop the request.
+ * Erasure interacts with retention, legal hold and backups. A request under legal
+ * hold cannot be marked fulfilled; the hold never silently drops it. Access and
+ * portability requests link their exportRequest, erasure its adminJob.
  */
 export const dataSubjectRequest = adminCore.table("data_subject_request", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
@@ -579,6 +580,8 @@ export const dataSubjectRequest = adminCore.table("data_subject_request", {
   state: text("state").notNull().default("open"),
   legalHold: boolean("legal_hold").notNull().default(false),
   assignedTo: bigint("assigned_to", { mode: "bigint" }).references(() => adminActor.id),
+  exportRequestId: bigint("export_request_id", { mode: "bigint" }).references(() => exportRequest.id),
+  adminJobId: bigint("admin_job_id", { mode: "bigint" }).references(() => adminJob.id),
   resolution: text("resolution"),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
 }, (t) => [
@@ -589,6 +592,10 @@ export const dataSubjectRequest = adminCore.table("data_subject_request", {
   check(
     "data_subject_request_state_check",
     sql`${t.state} IN ('open','in-progress','fulfilled','refused','withdrawn')`,
+  ),
+  check(
+    "data_subject_request_hold_blocks_fulfilment",
+    sql`NOT (${t.legalHold} AND ${t.state} = 'fulfilled')`,
   ),
   index("data_subject_request_queue").on(t.state, t.dueAt),
 ]);

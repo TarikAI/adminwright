@@ -177,7 +177,7 @@ END $f$;
 DO $verify$
 DECLARE
     alice bigint; bob bigint; carol bigint; ev1 bigint; ev2 bigint;
-    req bigint; role bigint; sess bigint; job bigint; n bigint;
+    req bigint; role bigint; sess bigint; job bigint; dsr bigint; n bigint;
 BEGIN
     INSERT INTO admin_actor (auth_subject, display_name) VALUES ('verify-alice', 'Alice') RETURNING id INTO alice;
     INSERT INTO admin_actor (auth_subject, display_name) VALUES ('verify-bob', 'Bob') RETURNING id INTO bob;
@@ -277,6 +277,11 @@ BEGIN
     VALUES ('verify.bulk', alice, 'production', '{}', 'h') RETURNING id INTO job;
     INSERT INTO admin_job_failure (job_id, target_type, target_id, error_code) VALUES (job, 'user', 'u1', 'E1');
     PERFORM pg_temp.expect_refused('DELETE admin_job with failures', 'DELETE FROM admin_job WHERE id = ' || job, '23503|23001');
+
+    -- 10. privacy requests: an erasure under legal hold cannot be marked fulfilled.
+    INSERT INTO data_subject_request (kind, subject_ref, due_at, legal_hold, admin_job_id)
+    VALUES ('erasure', 'subject-1', now() + interval '30 days', true, job) RETURNING id INTO dsr;
+    PERFORM pg_temp.expect_refused('fulfilled under legal hold', 'UPDATE data_subject_request SET state = ''fulfilled'' WHERE id = ' || dsr, '23514');
 
     RAISE NOTICE 'all admin_core checks passed';
 END

@@ -1211,6 +1211,14 @@ class TestCanonicalIsSelfConsistent(unittest.TestCase):
         self.assertEqual(CANON.fks[("admin_job_failure", "job_id")], "block")
         self.assertRegex(read("postgres.sql"), r"job_id\s+bigint\s+NOT NULL REFERENCES admin_job\(id\) ON DELETE RESTRICT")
 
+    def test_legal_hold_blocks_fulfilment_and_requests_link_their_work(self):
+        # round-2 finding: the model doc said this was encoded, and no variant encoded it
+        # (the drift tests then hold every variant to the same CHECK and FKs).
+        check, _ = CANON.check_exprs["data_subject_request_hold_blocks_fulfilment"]
+        self.assertTrue(equivalent(check, parse_sql_expr("legal_hold = FALSE OR state <> 'fulfilled'")))
+        self.assertEqual(CANON.fks[("data_subject_request", "export_request_id")], "block")
+        self.assertEqual(CANON.fks[("data_subject_request", "admin_job_id")], "block")
+
     def test_live_grant_uniqueness_covers_global_grants(self):
         self.assertIn("COALESCE(scope_tenant_id, '*')", read("postgres.sql"))
         live = CANON.index_defs["admin_actor_role_live_unique"]

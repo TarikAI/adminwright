@@ -488,6 +488,11 @@ CREATE TABLE export_request (
 
 CREATE INDEX export_request_state ON export_request (state, expires_at);
 
+-- Erasure interacts with retention, legal hold and backups. A request under legal hold
+-- cannot be marked fulfilled: it stays open (or is refused) while the hold lasts, and the
+-- hold never silently drops it. Access and portability requests link the export_request
+-- that answered them; erasure links the admin_job that carried it out, because erasure
+-- across a real system is a long-running job with partial failures.
 CREATE TABLE data_subject_request (
     id            bigserial PRIMARY KEY,
     request_uuid  uuid        NOT NULL DEFAULT gen_random_uuid() UNIQUE,
@@ -503,14 +508,15 @@ CREATE TABLE data_subject_request (
                   CHECK (state IN ('open','in-progress','fulfilled','refused','withdrawn')),
     legal_hold    boolean     NOT NULL DEFAULT false,
     assigned_to   bigint      NULL REFERENCES admin_actor(id),
+    export_request_id bigint  NULL REFERENCES export_request(id),
+    admin_job_id  bigint      NULL REFERENCES admin_job(id),
     resolution    text        NULL,
-    resolved_at   timestamptz NULL
+    resolved_at   timestamptz NULL,
+    CONSTRAINT data_subject_request_hold_blocks_fulfilment
+        CHECK (NOT (legal_hold AND state = 'fulfilled'))
 );
 
 CREATE INDEX data_subject_request_queue ON data_subject_request (state, due_at);
-
--- Erasure interacts with retention, legal hold and backups. legal_hold blocks
--- fulfilment; it does not silently drop the request.
 
 -- ---------------------------------------------------------------------------
 -- Integrity: hash chain, payload scrub, append-only enforcement

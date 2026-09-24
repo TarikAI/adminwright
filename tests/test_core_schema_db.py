@@ -80,6 +80,12 @@ class TestCoreSchemaOnPostgres(PgCase):
             "DELETE admin_job with failures was allowed",
         )
 
+    def test_verification_is_not_vacuous_legal_hold(self):
+        self.assert_verification_fails_without(
+            "ALTER TABLE admin_core.data_subject_request DROP CONSTRAINT data_subject_request_hold_blocks_fulfilment",
+            "fulfilled under legal hold was allowed",
+        )
+
     def test_grants_sql_takes_mutation_away_from_the_application_role(self):
         db = self.new_database()
         app, audit = "aw_app_%s" % self.tag, "aw_audit_%s" % self.tag

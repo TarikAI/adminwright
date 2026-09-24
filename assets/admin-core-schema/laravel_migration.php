@@ -536,8 +536,10 @@ return new class extends Migration
         DB::statement("ALTER TABLE export_request ADD CONSTRAINT export_request_state_check
             CHECK (state IN ('queued','running','ready','failed','expired','revoked'))");
 
-        // Erasure interacts with retention, legal hold and backups. legal_hold
-        // blocks fulfilment; it does not silently drop the request.
+        // Erasure interacts with retention, legal hold and backups. A request under
+        // legal hold cannot be marked fulfilled; the hold never silently drops it.
+        // Access and portability requests link their export_request, erasure its
+        // admin_job.
         Schema::create('data_subject_request', function (Blueprint $table) {
             $table->bigIncrements('id');
             $table->uuid('request_uuid')->unique()->default(DB::raw('gen_random_uuid()'));
@@ -549,10 +551,14 @@ return new class extends Migration
             $table->string('state', 16)->default('open');
             $table->boolean('legal_hold')->default(false);
             $table->unsignedBigInteger('assigned_to')->nullable();
+            $table->unsignedBigInteger('export_request_id')->nullable();
+            $table->unsignedBigInteger('admin_job_id')->nullable();
             $table->text('resolution')->nullable();
             $table->timestampTz('resolved_at')->nullable();
 
             $table->foreign('assigned_to')->references('id')->on('admin_actor');
+            $table->foreign('export_request_id')->references('id')->on('export_request');
+            $table->foreign('admin_job_id')->references('id')->on('admin_job');
             $table->index(['state', 'due_at'], 'data_subject_request_queue');
         });
 
@@ -560,6 +566,8 @@ return new class extends Migration
             CHECK (kind IN ('access','erasure','rectification','portability','restriction','objection'))");
         DB::statement("ALTER TABLE data_subject_request ADD CONSTRAINT data_subject_request_state_check
             CHECK (state IN ('open','in-progress','fulfilled','refused','withdrawn'))");
+        DB::statement("ALTER TABLE data_subject_request ADD CONSTRAINT data_subject_request_hold_blocks_fulfilment
+            CHECK (NOT (legal_hold AND state = 'fulfilled'))");
 
         // -------------------------------------------------------------------
         // Integrity: hash chain, payload scrub, append-only enforcement
