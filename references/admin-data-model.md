@@ -395,7 +395,7 @@ operator search belongs on the domain tables, not on `audit_event`.
 
 | Table | Immutable after write | Permitted later change |
 |---|---|---|
-| `audit_event` | Every column | One payload drop, named by the `audit.scrub_payload` event `scrub_audit_payload()` writes first; hashes kept |
+| `audit_event` | Every column | One payload drop that names the row's `audit.scrub_payload` event (`scrub_audit_payload()` writes it first); hashes kept |
 | `admin_job` | `input_summary`, `input_hash`, `initiated_by` | State, progress, result |
 | `approval_request` | Every other column, including `payload`, `payload_hash`, `requested_by`, `command_key` | `state`, `executed_at`, `execution_result` |
 | `approval_decision` | Whole row | None; a reversal is a new request |

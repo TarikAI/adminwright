@@ -62,7 +62,9 @@ Django 6 on PostgreSQL 16 and 18.
 
 The script creates an `admin_core` schema. Rename it, or drop the schema statement and let the
 tables land in `public`, to match project convention (then pass `-v schema=public` to
-`grants.sql`).
+`grants.sql`). Either way change the `admin_core.` qualifiers and every
+`SET search_path = admin_core, pg_temp` line with it, keeping `pg_temp` last: that pin is what
+stops a session's temporary tables standing in for the real ones inside the triggers.
 
 The database owns the audit hash chain: leave `chain_seq`, `prev_hash`, `row_hash` and the
 payload hashes out of your `INSERT`s and read the doc's hash-chain section for the encoding.
@@ -134,7 +136,7 @@ Per stack:
 |---|---|
 | Prisma | Model the tables in `prisma.schema`; append `prisma_raw.sql` to a migration created with `prisma migrate dev --create-only`. Prisma does not model CHECK constraints, and Prisma 7 takes the connection URL from `prisma.config.ts`, not the schema |
 | Drizzle | Tables, CHECK, and partial and expression indexes translate directly (`.where()`, a `sql` template inside `.on()`). Functions and triggers go in a hand-written migration alongside: append the Integrity section of `postgres.sql` |
-| Django | Models plus `constraints` in `Meta` for CHECK and `UniqueConstraint(condition=...)` for partial uniqueness; `db_default` for database defaults. Functions and triggers go in a `RunSQL` migration that reads `django_triggers.sql`. Django 6 spells the CHECK keyword `condition=` (`check=` was removed) |
+| Django | Models plus `constraints` in `Meta` for CHECK and `UniqueConstraint(condition=...)` for partial uniqueness; `db_default` for database defaults. Functions and triggers go in a `RunSQL` migration that reads `django_triggers.sql`, copied next to that migration (the models' docstring has it). Django 5.1+ spells the CHECK keyword `condition=` (6.0 removed `check=`) |
 | Laravel | Schema builder for tables and indexes; `DB::statement()` / `DB::unprepared()` inside the migration for CHECK constraints, expression indexes, functions and triggers |
 | Rails | `create_table` with `check_constraint`, `add_index` with `where:` for partial uniqueness, and `execute` for expression indexes, functions and triggers. Set `schema_format = :sql` so triggers survive schema dumps |
 | Go, .NET | Apply `postgres.sql` directly through the project's migration tool. Neither ecosystem gains from re-expressing it in a model DSL |
@@ -146,10 +148,11 @@ enforcing it gives an auditor a false answer.
 
 ## Verifying the install
 
-The block below is the test. It builds its own fixtures, asserts the row counts before and
-after every refused statement (so an empty table cannot make it pass vacuously), fails with
-`VERIFY FAILED: ...` and a non-zero exit when any control is missing or refuses for the wrong
-reason, and rolls everything back. Run it with
+The block below is the test. It builds its own fixtures, aims each refused statement at them,
+and after the refused deletes and truncates checks that the rows are still there (so an empty
+table cannot make it pass vacuously). It fails with `VERIFY FAILED: ...` and a non-zero exit
+when any control is missing or refuses for the wrong reason, and rolls everything back. Run it
+with
 `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f verify.sql` after saving it, replacing the
 `search_path` line with the schema your tables live in (`public` for most variants). CI runs
 it against a real PostgreSQL on every change.
