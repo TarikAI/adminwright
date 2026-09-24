@@ -103,3 +103,8 @@ class PgCase(unittest.TestCase):
 
     def scalar(self, db, sql):
         return self.psql(db, "-t", "-A", "-c", sql).stdout.strip()
+
+    def server_version(self):
+        """(major, minor) of the server, e.g. (14, 23): what a client library's minimum is checked against."""
+        num = int(self.scalar("postgres", "SHOW server_version_num"))
+        return num // 10000, num % 10000

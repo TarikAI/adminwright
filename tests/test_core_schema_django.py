@@ -3,11 +3,13 @@
 """Builds django_models.py as a real Django app against a real PostgreSQL.
 
 Skipped unless the PostgreSQL environment of _core_schema_pg.py is available AND Django >= 5.1
-and psycopg are importable (CI installs `django>=6` and `psycopg[binary]` for this job; nothing
-in the skill itself depends on either). It is the automated form of what the audit checked by
-hand: `manage.py check` is clean, `sqlmigrate` emits every CHECK constraint and the COALESCE
-live-grant index and the canonical FK column names, `migrate` succeeds, django_triggers.sql
-applies on top, and the schema README's verification SQL passes against the result.
+and psycopg are importable (nothing in the skill itself depends on either). Also skipped, with
+the reason, when the installed Django refuses the server: Django 6.1 needs PostgreSQL 15+, so
+CI's PostgreSQL 14 leg installs Django 5.2 LTS and its PostgreSQL 16 leg Django 6. It is the
+automated form of what the audit checked by hand: `manage.py check` is clean, `sqlmigrate` emits
+every CHECK constraint and the COALESCE live-grant index and the canonical FK column names,
+`migrate` succeeds, django_triggers.sql applies on top, and the schema README's verification SQL
+passes against the result.
 
 Standard library only for the test itself (Python 3.9+; Django needs 3.10+).
 """
@@ -28,6 +30,40 @@ def django_ready():
     import django
 
     return django.VERSION >= (5, 1)
+
+
+def django_minimum_postgres():
+    """The oldest PostgreSQL the installed Django accepts, as Django itself declares it."""
+    from django.db.backends.postgresql.features import DatabaseFeatures
+
+    return tuple(DatabaseFeatures.minimum_database_version)
+
+
+def unsupported_server_reason(django_version, minimum, server):
+    """Why this Django cannot run against this server, or None when it can.
+
+    Django refuses to connect below its minimum (NotSupportedError), which would fail the test
+    for a reason that says nothing about the schema.
+    """
+    if tuple(server) >= tuple(minimum):
+        return None
+    return "Django %s needs PostgreSQL %s+ but the server is %s; use Django 5.2 LTS (or 6.0) on PostgreSQL 14" % (
+        django_version, ".".join(map(str, minimum)), ".".join(map(str, server)))
+
+
+class TestDjangoServerPairing(unittest.TestCase):
+    """No database needed: the gate that turns an impossible pairing into a skip, not a failure."""
+
+    def test_django_61_on_postgres_14_is_a_skip_with_the_reason(self):
+        reason = unsupported_server_reason("6.1.1", (15,), (14, 23))
+        self.assertIn("needs PostgreSQL 15+", reason)
+        self.assertIn("14.23", reason)
+        self.assertIn("5.2", reason)
+
+    def test_supported_pairings_run(self):
+        self.assertIsNone(unsupported_server_reason("6.1.1", (15,), (16, 14)))
+        self.assertIsNone(unsupported_server_reason("6.1.1", (15,), (15, 0)))
+        self.assertIsNone(unsupported_server_reason("5.2.17", (14,), (14, 23)))
 
 
 SETTINGS = """\
@@ -54,6 +90,14 @@ class TestDjangoTranslationOnPostgres(PgCase):
             [sys.executable, "-m", "django", *args],
             cwd=str(project), env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=300,
         )
+
+    def setUp(self):
+        super().setUp()
+        import django
+
+        reason = unsupported_server_reason(django.get_version(), django_minimum_postgres(), self.server_version())
+        if reason:
+            self.skipTest(reason)
 
     def test_models_check_migrate_and_pass_the_verification(self):
         db = self.new_database(apply_schema=False)

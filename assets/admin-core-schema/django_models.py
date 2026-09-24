@@ -2,12 +2,12 @@
 
 Translation of postgres.sql. Read ./README.md before adapting.
 
-VERSIONS. Written for Django 6.x (checked on 6.1). CheckConstraint(condition=...) is
-the 6.x keyword: Django 4.x and 5.0 spell it check=..., and 6.0 removed check=
-entirely (a TypeError at import), so on an older Django replace "condition=Q(" inside
-CheckConstraint with "check=Q(". UniqueConstraint and Index keep condition= on every
-version. db_default (used for every column that has a database default in
-postgres.sql) needs Django 5.0+.
+VERSIONS. Needs Django 5.1+; checked on Django 6.1 with PostgreSQL 16 and on Django 5.2
+LTS with PostgreSQL 14. Django 6.1 requires PostgreSQL 15+ (it refuses to connect to 14),
+so on PostgreSQL 14 stay on Django 5.2 LTS or 6.0. CheckConstraint(condition=...) is the
+5.1+ keyword: Django 5.0 and older spell it check=..., and 6.0 removed check= entirely
+(a TypeError at import). db_default (used for every column that has a database default
+in postgres.sql) needs Django 5.0+.
 
 WHAT DJANGO CANNOT ENFORCE IN MODELS — add these in a migration:
 

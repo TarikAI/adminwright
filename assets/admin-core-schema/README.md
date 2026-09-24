@@ -50,6 +50,10 @@ Requires PostgreSQL 14+. The script runs `CREATE EXTENSION IF NOT EXISTS citext`
 lowercase unique index if you would rather not add the extension. UUID defaults use the
 built-in `gen_random_uuid()` and the hash chain uses the built-in `sha256()`.
 
+The Django translation needs Django 5.1+. Django 6.1 requires PostgreSQL 15+, so on
+PostgreSQL 14 use Django 5.2 LTS (or 6.0). CI runs it with Django 5.2 on PostgreSQL 14 and with
+Django 6 on PostgreSQL 16.
+
 The script creates an `admin_core` schema. Rename it, or drop the schema statement and let the
 tables land in `public`, to match project convention (then pass `-v schema=public` to
 `grants.sql`).

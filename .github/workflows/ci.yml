@@ -149,7 +149,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: ["14", "16"]
+        # Django 6.1 needs PostgreSQL 15+, so the PostgreSQL 14 leg runs the Django
+        # translation on Django 5.2 LTS (which supports 14) rather than skipping it.
+        include:
+          - postgres: "14"
+            django: "django>=5.2,<6"
+          - postgres: "16"
+            django: "django>=6,<7"
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -197,7 +203,7 @@ jobs:
 
       # Django is installed only for the Django translation test; nothing in the skill needs it.
       - name: Install Django and psycopg for the translation test
-        run: python -m pip install "django>=6" "psycopg[binary]"
+        run: python -m pip install "${{ matrix.django }}" "psycopg[binary]"
 
       # test_core_schema_db.py     postgres.sql: verification is not vacuous, grants.sql, concurrent chain writers
       # test_core_schema_django.py django_models.py: check, sqlmigrate, migrate, django_triggers.sql, verification
