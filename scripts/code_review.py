@@ -900,9 +900,15 @@ def require_ocr(args):
 
 
 def write_json_atomic(path, document):
-    """Write a JSON file so a reader never sees half of it (temp file + replace)."""
+    """Write a JSON file so a reader never sees half of it (temp file + replace).
+
+    LF line endings on every platform, like the gap batch in add_gaps: text
+    mode would write CRLF on Windows, and the ocr-record/-diff/-scan files are
+    evidence the gaps cite, under the repository's eol=lf rule.
+    """
     temp = path.with_name(path.name + ".tmp")
-    temp.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    with open(str(temp), "w", encoding="utf-8", newline="\n") as out:
+        out.write(json.dumps(document, indent=2) + "\n")
     os.replace(str(temp), str(path))
 
 

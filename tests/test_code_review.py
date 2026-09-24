@@ -1061,6 +1061,22 @@ class BundleLifecycle(TempConsole):
         self.assertNotIn("total_files", out)
         self.assertIn("no review bundle", err)
 
+    def test_every_json_file_the_bridge_writes_has_lf_line_endings(self):
+        # Text mode wrote CRLF on Windows (1205 CR bytes in one ocr-record file).
+        self.diff("--agent", "qa-1")
+        self.assertEqual(self.record(self.payload())[0], 1)  # closes (rewrites) the bundle
+        self.assertEqual(self.record(self.payload(content="no bundle now"))[0], 1)
+        code, _out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr")
+        self.assertIn(code, (0, 1), err)
+        folder = self.root / ".admin-console"
+        written = sorted(folder.glob("ocr-*.json"))
+        kinds = {path.name.split("-")[1] for path in written}
+        self.assertTrue({"bundle", "record", "diff"} <= kinds, kinds)
+        for path in written:
+            data = path.read_bytes()
+            self.assertNotIn(b"\r", data, path.name)
+            self.assertTrue(data.endswith(b"\n"), path.name)
+
     def test_the_no_bundle_evidence_file_is_unique_per_run(self):
         self.record(self.payload(content="one"))
         self.record(self.payload(content="two"))
