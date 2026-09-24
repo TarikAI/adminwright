@@ -321,6 +321,21 @@ class WrongOverride(TempConsole):
         self.assertEqual(code, 2)
         self.assertIn("ADMINWRIGHT_OCR_BIN", err)
 
+    def test_a_file_that_cannot_be_executed_names_the_real_native_binary(self):
+        # Windows: "%1 is not a valid Win32 application"; POSIX: permission denied.
+        # The advice used to send people looking for an ocr.exe npm never installs.
+        text_file = self.tmp / "not-a-program.txt"
+        text_file.write_text("hello\n", encoding="utf-8")
+        code, _out, err = run(
+            SCRIPT, "diff", "--manifest", self.manifest,
+            env={"ADMINWRIGHT_OCR_BIN": str(text_file)},
+        )
+        self.assertEqual(code, 2, err)
+        self.assertIn("could not execute", err)
+        self.assertIn("opencodereview.exe", err)
+        self.assertNotRegex(err, r"(?<![\w-])ocr\.exe")
+        self.assertNotIn("Traceback", err)
+
 
 class DelegateDiff(TempConsole):
     def test_writes_bundle_with_instructions_and_next_command(self):
@@ -1707,6 +1722,10 @@ class ShimResolution(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("ADMINWRIGHT_OCR_BIN", message)
         self.assertIn("native executable", message)
+        # The npm install has no ocr.exe; its binary is opencodereview.exe.
+        self.assertIn("opencodereview.exe", message)
+        self.assertNotIn("(ocr.exe)", message)
+        self.assertNotRegex(message, r"(?<![\w-])ocr\.exe")
 
     def test_an_entry_point_that_is_not_open_code_review_is_refused(self):
         other = NPM_SHIM.replace("open-code-review", "some-other-tool")

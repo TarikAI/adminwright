@@ -183,12 +183,22 @@ def ocr_executable():
     return shutil.which("ocr")
 
 
+# The npm package's native binary. There is no ocr.exe: npm installs ocr.cmd,
+# ocr.ps1 and an sh shim, and bin/ocr.js starts this file from the per-platform
+# package (@alibaba-group/ocr-win32-x64/bin/ on x64 Windows).
+NATIVE_BINARY_HINT = (
+    "the package's native opencodereview.exe (<npm prefix>/node_modules/@alibaba-group/"
+    "open-code-review/node_modules/@alibaba-group/ocr-win32-x64/bin/opencodereview.exe)"
+)
+
+
 def refuse_cmd_shim(shim, reason):
     return ReviewError(
         "refusing to run '" + str(shim) + "': Windows would hand a .cmd/.bat file to"
         " cmd.exe, which executes '&', '%', '^' and '!' in a repository file name as"
-        " commands. " + reason + " Set " + ENV_OCR_BIN + " to a native executable"
-        " (ocr.exe), or to the ocr.cmd of a standard npm install with `node` on PATH."
+        " commands. " + reason + " Set " + ENV_OCR_BIN + " to a native executable, such as "
+        + NATIVE_BINARY_HINT + ", or to the ocr.cmd of a standard npm install with `node`"
+        " on PATH."
     )
 
 
@@ -378,9 +388,9 @@ def run_ocr(arguments, repo=None, trailing=None, timeout=None):
         )
     except OSError as exc:
         raise ReviewError(
-            "could not execute '" + executable + "' ("
-            "on Windows point " + ENV_OCR_BIN + " at the npm install's ocr.cmd or a"
-            " native ocr.exe, not the extensionless npm shell shim): " + str(exc)
+            "could not execute '" + executable + "' (on Windows point " + ENV_OCR_BIN
+            + " at the npm install's ocr.cmd or at " + NATIVE_BINARY_HINT
+            + ", not at the extensionless npm shell shim): " + str(exc)
         )
 
 
