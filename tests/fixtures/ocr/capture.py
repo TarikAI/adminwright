@@ -10,8 +10,9 @@ Each scenario builds a throwaway git repository, starts fake_llm.FakeLLM (an
 OpenAI-compatible endpoint that answers instantly, or fails with HTTP 500 for
 chosen files), runs the exact ocr command code_review.py runs, and writes
 <scenario>.json: the ocr version, the argv, the exit code and the raw stdout
-and stderr. The only edit is replacing the throwaway repository and home paths
-with <repo> and <home>. tests/test_code_review.py replays these bodies through
+and stderr. The only edit is replacing local paths (the throwaway repository and
+home, and this checkout's rule file) with <repo>, <home> and <skill>, so no
+machine's paths are committed. tests/test_code_review.py replays these bodies through
 a fake ocr, so the bridge is tested against what ocr really prints rather than
 against shapes written from memory (which is how `terminal_state: complete`
 came to be rejected).

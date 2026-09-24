@@ -198,7 +198,7 @@ writes nothing.
 *The record.* Every successful `record` writes
 `.admin-console/ocr-record-<timestamp>-<pid>.json`: the findings and skips as submitted, and,
 when a bundle was used, the bundle's mode, refs, agent and reviewable files. That file, not
-the bundle, is what the gaps cite.
+the bundle, is what the gaps cite, and the summary line names it (`record=<path>`).
 
 *Coverage.* With a bundle, every bundled file must end in one list or the other (a skip
 entry needs a `path` and a `reason`), and only bundled paths may appear in either — silent

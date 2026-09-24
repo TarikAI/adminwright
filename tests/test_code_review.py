@@ -409,6 +409,8 @@ class Record(TempConsole):
         self.assertRegex(cited, r"^\.admin-console/ocr-record-\d{8}-\d{6}-\d+\.json$")
         self.assertEqual(record["bundle"]["file"], self.bundle_path.name)
         self.assertEqual(record["findings"], self.findings_payload()["findings"])
+        # The summary names the file to commit.
+        self.assertIn("record=" + str(self.root / cited), out)
 
     def test_refuses_silent_omission(self):
         payload = {"findings": [], "skipped": []}
@@ -1535,8 +1537,10 @@ class Timeouts(TempConsole):
             self.assertIn(code, (0, 1), (command, err))
             self.assertNotIn("Traceback", err)
             self.assertIn("using " + str(bridge.MAX_TIMEOUT_SECONDS), err)
-        self.assertEqual(bridge.ocr_timeout(mock.Mock(timeout=1e30)), bridge.MAX_TIMEOUT_SECONDS)
-        self.assertEqual(bridge.ocr_timeout(mock.Mock(timeout=120.0)), 120.0)
+        with mock.patch.object(bridge, "stderr") as note:
+            self.assertEqual(bridge.ocr_timeout(mock.Mock(timeout=1e30)), bridge.MAX_TIMEOUT_SECONDS)
+            self.assertEqual(bridge.ocr_timeout(mock.Mock(timeout=120.0)), 120.0)
+        note.assert_called_once()
 
     def test_ocr_is_stopped_whatever_communicate_raises(self):
         proc = mock.Mock(pid=4242)

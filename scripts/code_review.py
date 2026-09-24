@@ -1675,6 +1675,8 @@ def cmd_record(args):
             "; reviewed_files=" + str(reviewed) + " skipped_files=" + str(skipped_files)
             + " coverage: unknown (no review bundle, so paths were not checked against a diff)"
         )
+    # The file to commit with the manifest: the gaps cite it.
+    line += "; record=" + str(evidence_path)
     print(line)
     if written or duplicates:
         return EXIT_FINDINGS
