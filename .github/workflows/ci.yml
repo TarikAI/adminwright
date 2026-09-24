@@ -13,6 +13,7 @@ jobs:
   test:
     name: tests (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +47,7 @@ jobs:
   console-encoding:
     name: tests under a cp1252 console (windows)
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -100,6 +102,7 @@ jobs:
   integrity:
     name: skill integrity
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -239,3 +242,25 @@ jobs:
       - name: Core schema tests against the service container
         timeout-minutes: 15
         run: python -m unittest discover -s tests -p "test_core_schema_*.py" -v
+
+  # Claude Code's own plugin check: the manifest, the marketplace entry and every agent's
+  # frontmatter as Claude Code parses it. An agent whose frontmatter fails to parse still
+  # loads, under its file name with every field ignored (disallowedTools included), so a
+  # broken reviewer guard would otherwise be silent. Non-blocking until it has a green run
+  # history: it installs the CLI from npm, and the `version` warning is expected (the
+  # plugin deliberately has none; see tests/test_plugin_packaging.py).
+  plugin-validate:
+    name: claude plugin validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install -g @anthropic-ai/claude-code
+        timeout-minutes: 5
+      - run: claude plugin validate .claude-plugin/plugin.json
+        env:
+          DISABLE_AUTOUPDATER: "1"
