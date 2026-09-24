@@ -361,6 +361,7 @@
   "decisions": [
     {
       "id": "dec.profile",
+      "kind": "profile",
       "decision": "Run at the standard profile",
       "reason": "Internal dispatch staff; no regulated data",
       "evidence": [],
@@ -375,7 +376,7 @@
   "feedback": [],
   "agents": [],
   "validatedWith": {
-    "ruleset": "30d8ebc4",
-    "skill": "d137e35"
+    "ruleset": "fixture",
+    "skill": "fixture"
   }
 }

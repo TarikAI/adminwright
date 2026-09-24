@@ -24,6 +24,16 @@ from cli_helpers import SKILL_ROOT, TempProject, acm
 # Each names the test that does assert it.
 PLAN_ONLY = {"plan-note": "tests/test_rule_coverage.py"}
 
+# Rules the gate-matrix fixture cannot fire: its profile is invalid on purpose (so it
+# pins profile-invalid), and these rules judge a valid profile or the manifest's own
+# location on disk. Each names the behavioural test that asserts it.
+TEST_PINNED = {
+    "profile-decision-mismatch": "tests/test_round2_rules.py",
+    "profile-decision-missing": "tests/test_round2_rules.py",
+    "profile-below-regulated-data": "tests/test_round2_rules.py",
+    "project-root-outside": "tests/test_round2_rules.py",
+}
+
 
 def fixture_rules():
     found = {}
@@ -38,7 +48,7 @@ def fixture_rules():
 class TestEveryRuleIsPinned(unittest.TestCase):
     def test_every_rule_appears_in_a_fixture_expectation(self):
         covered = set(fixture_rules())
-        missing = sorted(set(acm.RULES) - covered - set(PLAN_ONLY))
+        missing = sorted(set(acm.RULES) - covered - set(PLAN_ONLY) - set(TEST_PINNED))
         self.assertEqual(
             missing, [],
             "rules that no eval fixture expects (add a defect to evals/build_fixtures.py's "
@@ -51,7 +61,7 @@ class TestEveryRuleIsPinned(unittest.TestCase):
         self.assertEqual(unknown, [], "a fixture expects a rule the validator no longer has")
 
     def test_plan_only_rules_name_a_test_that_asserts_them(self):
-        for rule, relative in PLAN_ONLY.items():
+        for rule, relative in list(PLAN_ONLY.items()) + list(TEST_PINNED.items()):
             self.assertIn(rule, acm.RULES)
             text = (SKILL_ROOT / relative).read_text(encoding="utf-8")
             self.assertIn('"[' + rule + ']"', text, relative + " must assert " + rule)

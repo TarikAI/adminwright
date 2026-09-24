@@ -363,11 +363,12 @@ class TestStoreSync(unittest.TestCase):
     def test_sync_takes_the_store_lock(self):
         self.append(self.a, ["p1:x1"])
         lock = self.a / ".lock"
+        # A crashed holder's leftover file: with OS locks it is a file, not a lock.
         lock.write_text("pid=1\n", encoding="utf-8")
-        past = 1
-        os.utime(str(lock), (past, past))  # stale: sync may take it over
         self.sync(self.a)
-        self.assertFalse(lock.exists(), "the lock must be released when the sync ends")
+        # Released when the sync ends: the lock is free again at once (the file may stay).
+        with acm.FileLock(lock, timeout=1):
+            pass
 
 
 class TestFeedbackScope(TempProject):

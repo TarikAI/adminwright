@@ -28,6 +28,9 @@ EVAL_ROOT = Path(__file__).resolve().parent
 SKILL_ROOT = EVAL_ROOT.parent
 SCRIPT = SKILL_ROOT / "scripts" / "admin_console_manifest.py"
 FIXTURES = EVAL_ROOT / "fixtures"
+# `init` and every write stamp the manifest with the current git commit and rule-set
+# hash. A fixture must regenerate byte-for-byte on any commit, so its stamp is pinned.
+FIXTURE_STAMP = {"ruleset": "fixture", "skill": "fixture"}
 
 
 def scaffold(name, archetype, profile):
@@ -51,6 +54,7 @@ def scaffold(name, archetype, profile):
     manifest_path = root / ".admin-console" / "manifest.json"
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     data["platform"]["id"] = name + "-000000"
+    data["validatedWith"] = dict(FIXTURE_STAMP)
     with open(str(manifest_path), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(data, indent=2) + "\n")
     return root
@@ -123,6 +127,7 @@ def write(root, rel, body):
 
 
 def save(root, manifest):
+    manifest["validatedWith"] = dict(FIXTURE_STAMP)
     with open(str(root / ".admin-console" / "manifest.json"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(manifest, indent=2) + "\n")
 
@@ -315,10 +320,10 @@ def build_saas():
     all_true(m)
     pass_gates(m)
     m["decisions"] = [{
-        "id": "dec.profile", "decision": "Run at the regulated profile",
+        "id": "dec.profile", "kind": "profile", "decision": "Run at the regulated profile",
         "reason": "Billing data and money movement are in scope",
         "evidence": ["evidence/security.log"], "status": "confirmed",
-        "appliesTo": ["subscription.cancel"],
+        "appliesTo": ["*"],
     }]
     # Not every lifecycle state is reachable by an operator, and the reachability
     # rule is right to ask. 'active' is entered by a Stripe webhook when a trial
@@ -428,7 +433,7 @@ def build_logistics():
     # init records the profile as an assumed decision; this platform's owner has
     # confirmed it, so decision-assumed is not one of the defects on show here.
     m["decisions"] = [{
-        "id": "dec.profile", "decision": "Run at the standard profile",
+        "id": "dec.profile", "kind": "profile", "decision": "Run at the standard profile",
         "reason": "Internal dispatch staff; no regulated data", "evidence": [],
         "status": "confirmed", "appliesTo": ["*"],
     }]
@@ -468,7 +473,8 @@ def build_matrix():
     })
     m["roles"] = [
         {"id": "ops", "name": "Ops", "responsibilities": ["Run it"], "scopes": ["all"],
-         "mfaRequired": True, "separationOfDuties": []},   # separation-of-duties for the critical command
+         "mfaRequired": True, "separationOfDuties": [],     # separation-of-duties for the critical command
+         "mfaRequred": True},                               # unknown-field: a misspelt key
     ]
     m["entities"] = [
         {"id": "alpha", "name": "Alpha", "sourceOfTruth": "postgres:alpha",
@@ -584,6 +590,7 @@ def build_matrix():
                            "privilegedReadsWhenRequired": False})   # privileged-read-audit
     write(root, "evidence/shared.log", "run finished\n  0 errors across 118 files\n")
     cross["data"]["evidence"] = ["evidence/shared.log"]         # evidence-shared (a gate and a section)
+    cross["experience"]["evidence"] = ["tests/alpha.spec.ts"]   # evidence-is-test-file (a test as section proof)
     gates = {g["id"]: g for g in m["qualityGates"]}
     m["qualityGates"] = [g for g in m["qualityGates"] if g["id"] != "lint"]   # gate-missing
     gates["build"].update({"status": "pending"})                                # gate-not-passed
@@ -595,7 +602,7 @@ def build_matrix():
     gates["performance"].update({"status": "passed", "evidence": [],            # gate-evidence-missing
                                  "threshold": "p95 under 800ms"})
     gates["browser"].update({"status": "passed", "threshold": "critical flows pass",
-                             "evidence": ["tests/alpha.spec.ts"]})              # evidence-is-test-file
+                             "evidence": ["tests/alpha.spec.ts"]})              # evidence-not-output (source code)
     gates["security"].update({"status": "passed", "threshold": "0 findings",   # gate-evidence-unrelated
                               "evidence": ["evidence/shared.log"]})
     m["decisions"] = [

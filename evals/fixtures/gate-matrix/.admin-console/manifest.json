@@ -54,7 +54,8 @@
         "all"
       ],
       "mfaRequired": true,
-      "separationOfDuties": []
+      "separationOfDuties": [],
+      "mfaRequred": true
     }
   ],
   "entities": [
@@ -570,7 +571,9 @@
       "keyboardCriticalFlowsTested": false,
       "responsiveCriticalFlowsTested": false,
       "localizationRequirementsHandled": false,
-      "evidence": []
+      "evidence": [
+        "tests/alpha.spec.ts"
+      ]
     }
   },
   "qualityGates": [
@@ -716,7 +719,7 @@
   ],
   "agents": [],
   "validatedWith": {
-    "ruleset": "30d8ebc4",
-    "skill": "d137e35"
+    "ruleset": "fixture",
+    "skill": "fixture"
   }
 }

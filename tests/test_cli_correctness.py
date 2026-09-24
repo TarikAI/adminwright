@@ -7,6 +7,7 @@ an object stored as a string, a crash on a list where a string belonged, a claim
 decided from files that do not survive a clone, a lock two waiters both "held".
 """
 
+import errno
 import json
 import os
 import re
@@ -171,60 +172,75 @@ class TestClaims(TempProject):
         self.assertEqual(stamp["ruleset"], acm.ruleset_version())
 
 
+HOLD_LOCK = (
+    "import importlib.util, sys, time\n"
+    "spec = importlib.util.spec_from_file_location('acm', %r)\n"
+    "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+    "lock = m.FileLock(%r); lock.__enter__()\n"
+    "print('held', flush=True)\n"
+    "time.sleep(120)\n"
+)
+
+
 class TestFileLock(unittest.TestCase):
-    """6.8 -- a stale takeover must be atomic, and a crashed holder must be diagnosable."""
+    """6.8 -- an OS lock: released when its holder exits, never orphaned, never shared.
+
+    The previous lock was the lock file's existence. Waiters read it on every poll;
+    on Windows an open reader makes the holder's delete fail, the failure was
+    swallowed, and 15 of 16 parallel writers timed out after 30 seconds.
+    """
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="adminwright-lock-"))
         self.addCleanup(lambda: __import__("shutil").rmtree(str(self.tmp), ignore_errors=True))
         self.path = self.tmp / ".lock"
 
-    def test_the_lock_records_pid_and_token(self):
+    def hold_in_child(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", HOLD_LOCK % (str(SCRIPT), str(self.path))],
+            stdout=subprocess.PIPE,
+        )
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        self.assertEqual(proc.stdout.readline().decode().strip(), "held")
+        return proc
+
+    def test_the_holder_is_readable_while_the_lock_is_held(self):
+        # Windows byte-range locks are mandatory; the lock byte must not cover the pid.
         with acm.FileLock(self.path):
             text = self.path.read_text(encoding="utf-8")
             self.assertIn("pid=" + str(os.getpid()), text)
-            self.assertIn("token=", text)
-        self.assertFalse(self.path.exists())
 
-    def test_a_lock_that_was_taken_over_is_not_deleted_by_its_old_holder(self):
-        lock = acm.FileLock(self.path)
-        lock.__enter__()
-        self.path.write_text("pid=1\ntoken=someone-else\n", encoding="utf-8")
-        lock.__exit__(None, None, None)
-        self.assertTrue(self.path.exists(), "the new holder's lock must survive")
-        self.assertIn("someone-else", self.path.read_text(encoding="utf-8"))
-
-    def test_a_timeout_names_the_holder_its_age_and_the_remedy(self):
-        self.path.write_text("pid=%d\ntoken=live\n" % os.getpid(), encoding="utf-8")
+    def test_a_timeout_names_the_holder(self):
+        child = self.hold_in_child()
         with self.assertRaises(acm.LockError) as caught:
-            with acm.FileLock(self.path, timeout=0.6):
+            with acm.FileLock(self.path, timeout=0.5):
                 pass
         message = str(caught.exception)
-        self.assertIn("pid " + str(os.getpid()), message)
-        self.assertIn("s.", message)
-        self.assertIn("delete", message)
+        self.assertIn("pid " + str(child.pid), message)
+        self.assertIn("released automatically", message)
 
-    def test_a_dead_holders_lock_is_taken_over_quickly(self):
-        done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
-                              capture_output=True, text=True)
-        dead_pid = int(done.stdout.strip())
-        self.path.write_text("pid=%d\ntoken=dead\n" % dead_pid, encoding="utf-8")
-        past = time.time() - 30
-        os.utime(str(self.path), (past, past))
+    def test_a_killed_holder_releases_the_lock_at_once(self):
+        child = self.hold_in_child()
+        child.kill()
+        child.wait()
         started = time.time()
-        with acm.FileLock(self.path, stale=120, timeout=20):
+        with acm.FileLock(self.path, timeout=10):
             pass
-        self.assertLess(time.time() - started, 10, "a dead holder must not cost the full timeout")
+        self.assertLess(time.time() - started, 2, "a dead holder must not cost any wait")
 
-    def test_only_one_of_many_racing_takeovers_wins(self):
-        self.path.write_text("pid=1\ntoken=old\n", encoding="utf-8")
-        past = time.time() - 500
-        os.utime(str(self.path), (past, past))
+    def test_a_lock_file_left_on_disk_does_not_block(self):
+        self.path.write_text("pid=1\nsince=0\n", encoding="utf-8")
+        started = time.time()
+        with acm.FileLock(self.path, timeout=5):
+            pass
+        self.assertLess(time.time() - started, 1)
+
+    def test_holders_never_overlap(self):
         script = (
             "import sys, time, importlib.util\n"
             "spec = importlib.util.spec_from_file_location('acm', %r)\n"
             "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
-            "with m.FileLock(%r, stale=120, timeout=30):\n"
+            "with m.FileLock(%r, timeout=60):\n"
             "    open(%r, 'a').write(str(__import__('os').getpid()) + ' in\\n')\n"
             "    time.sleep(0.15)\n"
             "    open(%r, 'a').write(str(__import__('os').getpid()) + ' out\\n')\n"
@@ -239,6 +255,49 @@ class TestFileLock(unittest.TestCase):
             self.assertEqual(lines[index], pid + " in")
             self.assertEqual(lines[index + 1], pid + " out",
                              "two holders overlapped: " + " | ".join(lines))
+
+    def test_sixteen_parallel_adds_all_land(self):
+        """The field reproduction: 16 `add` processes against one manifest."""
+        project = Path(tempfile.mkdtemp(prefix="adminwright-lock-adds-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(str(project), ignore_errors=True))
+        fixture = Path(__file__).resolve().parent.parent / "evals" / "fixtures" / "saas-clean"
+        __import__("shutil").copytree(str(fixture), str(project / "p"))
+        manifest = project / "p" / ".admin-console" / "manifest.json"
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+        procs = []
+        for index in range(16):
+            gap = {"id": "par-%d" % index, "severity": "low", "description": "parallel %d" % index,
+                   "status": "open", "rationale": "", "evidence": []}
+            procs.append(subprocess.Popen(
+                [sys.executable, str(SCRIPT), "add", "--manifest", str(manifest), "--kind", "gap",
+                 "--json", json.dumps(gap)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            ))
+        failures = []
+        for proc in procs:
+            _out, err = proc.communicate(timeout=120)
+            if proc.returncode:
+                failures.append(err.decode("utf-8", "replace")[:200])
+        self.assertEqual(failures, [])
+        stored = json.loads(manifest.read_text(encoding="utf-8"))
+        ids = {gap["id"] for gap in stored["gaps"]}
+        self.assertTrue({"par-%d" % i for i in range(16)} <= ids)
+
+    def test_a_filesystem_without_os_locks_falls_back_to_a_soft_lock(self):
+        original = acm._os_try_lock
+
+        def unsupported(fd):
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        acm._os_try_lock = unsupported
+        self.addCleanup(setattr, acm, "_os_try_lock", original)
+        with acm.FileLock(self.path, timeout=1):
+            self.assertTrue(self.path.with_name(".lock.soft").exists())
+            with self.assertRaises(acm.LockError) as caught:
+                with acm.FileLock(self.path, timeout=0.3):
+                    pass
+            self.assertIn("delete", str(caught.exception))
+        self.assertFalse(self.path.with_name(".lock.soft").exists())
 
 
 class TestCrashes(TempProject):
@@ -452,9 +511,9 @@ class TestRuleMatrix(unittest.TestCase):
     def test_the_doc_table_equals_the_emitted_one(self):
         doc = (Path(SCRIPT).parent.parent / "references" / "rule-matrix.md").read_text(encoding="utf-8")
         _code, out, _err = run("emit", "--format", "rule-matrix")
-        table = [line for line in out.splitlines() if line.startswith("|")]
-        documented = [line for line in doc.splitlines() if line.startswith("|")]
-        self.assertEqual(documented, table, "regenerate: emit --format rule-matrix --out references/rule-matrix.md")
+        # The whole file, header included: the documented regeneration command must
+        # reproduce it byte for byte.
+        self.assertEqual(doc, out, "regenerate: emit --format rule-matrix --out references/rule-matrix.md")
 
 
 if __name__ == "__main__":

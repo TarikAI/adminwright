@@ -1,10 +1,8 @@
 # Working state of the admin-console tooling. Commit the manifest, its schema copy,
-# the worklogs and the emitted reports; never these.
-locks/
-.lock
-*.tmp
-*.stale.*
-ocr-bundle*.json
-ocr-record-*.json
-ocr-diff-*.json
-ocr-scan-*.json
+# the worklogs, the emitted reports and the ocr-record/ocr-diff/ocr-scan review files
+# (gaps cite them as evidence); never these.
+/locks/
+/.lock
+/.lock.soft
+/*.tmp
+/ocr-bundle*.json

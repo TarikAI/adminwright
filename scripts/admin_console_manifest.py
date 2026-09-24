@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import errno
 import hashlib
 import json
 import os
@@ -39,6 +40,15 @@ import time
 import unicodedata
 from collections import Counter
 from pathlib import Path
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+try:  # Windows
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_PATH = SKILL_ROOT / "assets" / "admin-console.manifest.template.json"
@@ -69,6 +79,12 @@ SENSITIVITIES = ("public", "internal", "confidential", "restricted")
 TENANCIES = ("single-tenant", "multi-tenant", "hybrid", "unknown")
 DIRECTIONS = ("inbound", "outbound", "bidirectional")
 DECISION_STATUSES = ("assumed", "confirmed", "superseded")
+# What a decision is about. Only a 'not-applicable' decision can justify a
+# not-applicable command or required gate: any confirmed decision that merely named
+# the id -- including the manifest's own profile decision -- used to satisfy it.
+DECISION_KINDS = ("profile", "not-applicable", "risk-acceptance", "buy-vs-build", "design", "other")
+# A console with no tests or no security review is never releasable, whatever is decided.
+ALWAYS_REQUIRED_GATES = ("tests", "security")
 GAP_SEVERITIES = ("critical", "high", "medium", "low")
 GAP_STATUSES = ("open", "fixed", "accepted", "blocked")
 FEEDBACK_CATEGORIES = ("gap", "friction", "incorrect-guidance", "new-pattern", "tooling")
@@ -228,8 +244,16 @@ def fold_confusables(text):
 URL_PREFIXES = ("http://", "https://")
 NOT_REQUIRED_PATTERN = re.compile(r"^not-required:\s*\S+", re.I)
 
-LOCK_STALE_SECONDS = 120.0
 LOCK_TIMEOUT_SECONDS = 30.0
+# Windows byte-range locks are mandatory, so the lock byte lives far past the
+# holder's pid line (see FileLock).
+_WINDOWS_LOCK_OFFSET = 1 << 20
+_LOCK_CONTENTION_ERRNOS = frozenset(
+    code for code in (
+        errno.EACCES, errno.EAGAIN, getattr(errno, "EWOULDBLOCK", errno.EAGAIN),
+        getattr(errno, "EDEADLK", None), getattr(errno, "EDEADLOCK", None),
+    ) if code is not None
+)
 EVIDENCE_READ_LIMIT = 512 * 1024
 
 OFF, WARN, ERROR = "off", "warn", "error"
@@ -325,6 +349,16 @@ RULES = {
     "implementer-unrecorded": LATE,
     "not-applicable-undecided": STRICT_ONLY,
     "contested-needs-gap": LATE,
+    # round 2: monorepo and headless layouts
+    "project-root-outside": E3,
+    # round 2: not-applicable needs a decision about not-applicability
+    "gate-always-required": QUALITY,
+    "gate-not-applicable-undecided": QUALITY,
+    "profile-decision-mismatch": E3,
+    "profile-decision-missing": STRICT_ONLY,
+    "profile-below-regulated-data": E3,
+    # round 2: evidence is the output of a run
+    "evidence-not-output": QUALITY,
 }
 
 # Rules that describe an UNFINISHED model rather than a malformed one.
@@ -545,6 +579,18 @@ def surface_of(capability):
     return values or ["ui"]
 
 
+def is_headless(manifest):
+    """A console with capabilities but no admin UI at all: an admin API, CLI or chat surface.
+
+    Keyboard and responsive flows, the accessibility gate and the browser gate are
+    properties of screens; a console that has none cannot pass or fail them.
+    """
+    capabilities = [cap for _p, _e, cap in iter_capabilities(manifest)]
+    if not capabilities or as_list(manifest.get("screens")):
+        return False
+    return not any("ui" in surface_of(cap) for cap in capabilities)
+
+
 SCANNED_CAPABILITY_FIELDS = (
     "dataBinding",
     "serverOperations",
@@ -582,6 +628,8 @@ class Findings:
         # sharing rules can ask "is one README standing in for every gate?"
         self.evidence_index = []
         self.manifest_dir = None
+        self.manifest_file = None
+        self.manifest_digest = ""
         self.static_allowed = frozenset()
 
     def severity_for(self, rule):
@@ -638,15 +686,16 @@ def decode_text_bytes(data, source, allow_utf16=False):
     BOM"; `Out-File` and `>` can produce UTF-16. A BOM is accepted silently here
     and never written back (write_text_file emits none).
     """
-    if data.startswith(codecs.BOM_UTF8):
-        return data[len(codecs.BOM_UTF8):].decode("utf-8")
-    if allow_utf16 and data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-        return data.decode("utf-16")
     try:
+        if data.startswith(codecs.BOM_UTF8):
+            return data[len(codecs.BOM_UTF8):].decode("utf-8")
+        if allow_utf16 and data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+            return data.decode("utf-16")
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        # A UTF-16 file saved by a Windows editor is a realistic accident, not an
-        # exotic attack. Fail as a usage error, not a traceback.
+        # A UTF-16 file saved by a Windows editor, or a byte-order mark followed by
+        # legacy code-page bytes, is a realistic accident, not an exotic attack.
+        # Fail as a usage error, never a traceback.
         raise ManifestError(
             str(source) + " is not valid UTF-8 (a UTF-16 or legacy code-page file?). "
             "Re-save it as UTF-8; a byte-order mark is fine."
@@ -762,178 +811,212 @@ def stderr(message):
     print(message, file=sys.stderr)
 
 
-def pid_alive(pid):
-    """Best-effort: is this process still running on this machine?"""
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
+def _is_lock_contention(exc):
+    """True when an OS lock attempt failed only because someone else holds it."""
+    return isinstance(exc, (BlockingIOError, PermissionError)) or exc.errno in _LOCK_CONTENTION_ERRNOS
 
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-            if not handle:
-                # 5 = access denied: the process exists but is not ours.
-                return ctypes.windll.kernel32.GetLastError() == 5
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        except (AttributeError, OSError):
-            return True
+
+def _os_try_lock(fd):
+    """Take the OS lock on an open file without waiting.
+
+    Returns True when taken and False when another process holds it. Raises
+    OSError when this filesystem cannot take OS locks at all (ENOLCK on some
+    network mounts), which the caller answers with the soft-lock fallback.
+    """
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
+        if msvcrt is not None:
+            # Windows byte-range locks are mandatory: bytes one process has locked
+            # cannot be read by any other. The lock therefore sits far past the end
+            # of the file, so the holder's pid at the start stays readable.
+            os.lseek(fd, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return True
-    return True
+    except OSError as exc:
+        if _is_lock_contention(exc):
+            return False
+        raise
+
+
+def _os_unlock(fd):
+    if msvcrt is not None:
+        os.lseek(fd, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 class FileLock:
-    """Exclusive lock on a single path. Breaks locks older than the stale window.
+    """Exclusive, crash-safe lock on one path, held with an operating-system lock.
 
-    The lock file records the holder's pid and a random token. Two things depend
-    on that. A stale lock is taken over by atomically RENAMING it away (only one
-    contender's rename can succeed), and it is released only if the file still
-    carries our token -- with a bare unlink, two waiters that both judged the lock
-    stale each "took" it, and the first to finish deleted the second's live lock.
-    And when a caller does time out, the message names the holder, the lock's
-    age, and what to do about it, instead of "held by another process".
+    The lock is an OS lock (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows)
+    taken on a small lock file that is never deleted; the file's existence means
+    nothing. The operating system drops the lock the moment the holding process
+    exits, for any reason, so there is no stale-lock window, no takeover race and
+    no delete to fail: a crashed writer's lock file is just a file, and the next
+    writer locks it at once.
+
+    Field-tested history: the previous lock was the file's existence. Waiters read
+    it on every poll, and on Windows an open reader makes the holder's delete fail;
+    the failure was swallowed, the lock was orphaned, and 15 of 16 parallel writers
+    timed out after 30 seconds.
+
+    The holder writes its pid and start time at the start of the file. Waiters read
+    that only when they give up, to say who holds the lock in the timeout message.
+
+    A filesystem that cannot take OS locks (some network mounts answer ENOLCK or
+    EOPNOTSUPP) falls back to exclusively creating `<lock>.soft`. That fallback has
+    no automatic takeover: a crashed holder's soft lock must be deleted by hand, and
+    the timeout message says so.
     """
 
-    def __init__(self, path, stale=LOCK_STALE_SECONDS, timeout=LOCK_TIMEOUT_SECONDS):
+    def __init__(self, path, stale=None, timeout=LOCK_TIMEOUT_SECONDS):
         self.path = Path(path)
-        self.stale = stale
         self.timeout = timeout
-        self.held = False
-        self.token = "%d-%s" % (os.getpid(), os.urandom(6).hex())
+        # Accepted for callers written against the old lock; OS locks never go
+        # stale, so it has no effect.
+        self.stale = stale
+        self.fd = None
+        self.soft = None
 
-    def read_holder(self):
-        try:
-            text = self.path.read_text(encoding="utf-8")
-        except OSError:
-            return None, ""
-        pid = 0
-        token = ""
-        for line in text.splitlines():
-            if line.startswith("pid="):
-                try:
-                    pid = int(line[4:].strip())
-                except ValueError:
-                    pid = 0
-            elif line.startswith("token="):
-                token = line[6:].strip()
-        return pid, token
+    @property
+    def soft_path(self):
+        return self.path.with_name(self.path.name + ".soft")
+
+    def _holder_text(self):
+        for candidate in (self.path, self.soft_path):
+            try:
+                with open(str(candidate), "rb") as handle:
+                    text = handle.read(512).decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            if text.strip():
+                return text
+        return ""
 
     def describe_holder(self):
-        pid, _token = self.read_holder()
-        try:
-            age = int(time.time() - self.path.stat().st_mtime)
-        except OSError:
-            age = None
-        text = "held by pid " + str(pid) if pid else "held by an unknown process"
-        if age is not None:
-            text += " for " + str(age) + "s"
+        pid = ""
+        since = None
+        for line in self._holder_text().splitlines():
+            if line.startswith("pid="):
+                pid = line[4:].strip()
+            elif line.startswith("since="):
+                try:
+                    since = float(line[6:].strip())
+                except ValueError:
+                    since = None
+        text = "held by pid " + pid if pid else "held by another process"
+        if since is not None:
+            text += " (for " + str(max(0, int(time.time() - since))) + "s)"
         return text
 
-    def take_over_stale(self):
-        """Remove a dead or stale lock; True if this process did it.
-
-        A bare rename-and-delete is not safe: two waiters both judge the lock stale,
-        the first removes it and takes a fresh one, and the second then removes THAT
-        one. So removal happens under a short-lived guard file only one process can
-        create, and the staleness is re-checked under it.
-        """
-        guard = self.path.with_name(self.path.name + ".takeover")
+    def _record_holder(self, fd):
+        stamp = ("pid=" + str(os.getpid()) + "\nsince=" + ("%.3f" % time.time()) + "\n").encode("utf-8")
         try:
-            handle = os.open(str(guard), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, stamp)
+            os.ftruncate(fd, len(stamp))
         except OSError:
-            try:
-                if time.time() - guard.stat().st_mtime > 10.0:
-                    guard.unlink()  # a guard left by a crash between create and unlink
-            except OSError:
-                pass
-            return False
+            pass  # diagnostics only; the lock itself is held
+
+    def _same_file(self, fd):
+        """POSIX: the path must still name the file we locked (someone may have deleted it)."""
+        if msvcrt is not None:
+            return True  # Windows refuses to delete a file another process holds open
         try:
-            os.close(handle)
-            try:
-                age = time.time() - self.path.stat().st_mtime
-            except OSError:
-                return True  # already gone
-            holder_pid, _token = self.read_holder()
-            dead = age > 2.0 and holder_pid and not pid_alive(holder_pid)
-            if age > self.stale or dead:
-                try:
-                    self.path.unlink()
-                except OSError:
-                    return False
-                return True
+            return os.fstat(fd).st_ino == os.stat(str(self.path)).st_ino
+        except OSError:
             return False
-        finally:
-            try:
-                guard.unlink()
-            except OSError:
-                pass
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.time() + self.timeout
+        delay = 0.005
+        while True:
+            fd = None
+            try:
+                fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o644)
+            except PermissionError:
+                fd = None  # Windows: the file is mid-creation elsewhere; retry
+            except OSError as exc:
+                raise LockError("Cannot open lock " + str(self.path) + ": " + str(exc))
+            if fd is not None:
+                try:
+                    taken = _os_try_lock(fd)
+                except OSError as exc:
+                    os.close(fd)
+                    return self._enter_soft(deadline, exc)
+                if taken and self._same_file(fd):
+                    self.fd = fd
+                    self._record_holder(fd)
+                    return self
+                if taken:
+                    try:
+                        _os_unlock(fd)
+                    except OSError:
+                        pass
+                os.close(fd)
+            if time.time() >= deadline:
+                raise LockError(
+                    "Manifest lock " + str(self.path) + " is " + self.describe_holder()
+                    + "; waited " + ("%g" % self.timeout) + "s. The lock is released "
+                    "automatically when that process exits; if it is still running, wait "
+                    "for it or stop it."
+                )
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+
+    def _enter_soft(self, deadline, reason):
+        soft = self.soft_path
         while True:
             try:
-                handle = os.open(
-                    str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644
-                )
-            except FileExistsError:
-                age = None
-                try:
-                    age = time.time() - self.path.stat().st_mtime
-                except OSError:
-                    age = None
-                holder_pid, _token = self.read_holder()
-                dead = (
-                    age is not None and age > 2.0 and holder_pid and not pid_alive(holder_pid)
-                )
-                if age is not None and (age > self.stale or dead):
-                    self.take_over_stale()
-                    continue
-                if time.time() >= deadline:
-                    raise LockError(
-                        "Manifest lock " + self.path.name + " is " + self.describe_holder()
-                        + ". If that process is gone, delete " + str(self.path) + " and retry."
-                    )
-                time.sleep(0.2)
-                continue
-            except PermissionError as exc:
-                # Windows raises Access Denied, not FileExistsError, while the
-                # previous holder's unlink is still pending — a contention
-                # state, not a permission problem, so retry to the deadline
-                # like any other held lock. Field-tested: eight concurrent
-                # records, one killed outright by [Errno 13] on the lock.
-                if time.time() >= deadline:
-                    raise LockError(
-                        "Cannot create lock " + str(self.path) + " after "
-                        + str(self.timeout) + "s: " + str(exc)
-                    )
-                time.sleep(0.05)
-                continue
+                handle = os.open(str(soft), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except (FileExistsError, PermissionError):
+                handle = None
             except OSError as exc:
-                raise LockError("Cannot create lock " + str(self.path) + ": " + str(exc))
-            os.write(
-                handle, ("pid=" + str(os.getpid()) + "\ntoken=" + self.token + "\n").encode("utf-8")
-            )
-            os.close(handle)
-            self.held = True
-            return self
+                raise LockError(
+                    "Cannot lock " + str(self.path) + " (" + str(reason) + ") and cannot create "
+                    "the fallback " + str(soft) + ": " + str(exc)
+                )
+            if handle is not None:
+                self._record_holder(handle)
+                os.close(handle)
+                self.soft = soft
+                return self
+            if time.time() >= deadline:
+                raise LockError(
+                    "Manifest lock " + str(soft) + " is " + self.describe_holder() + ". This "
+                    "filesystem cannot take operating-system locks (" + str(reason) + "), so "
+                    "a crashed holder's lock is not released automatically: if no adminwright "
+                    "command is running, delete " + str(soft) + " and retry."
+                )
+            time.sleep(0.1)
 
     def __exit__(self, exc_type, exc, tb):
-        if self.held:
-            _pid, token = self.read_holder()
-            # Only remove a lock that is still ours: if it was taken over while we
-            # ran, the file now belongs to someone else.
-            if token == self.token or (_pid is None):
+        if self.fd is not None:
+            fd, self.fd = self.fd, None
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.ftruncate(fd, 0)
+            except OSError:
+                pass
+            try:
+                _os_unlock(fd)
+            except OSError:
+                pass  # closing the descriptor releases it regardless
+            os.close(fd)
+        elif self.soft is not None:
+            soft, self.soft = self.soft, None
+            for attempt in range(20):
                 try:
-                    self.path.unlink()
+                    soft.unlink()
+                    break
+                except FileNotFoundError:
+                    break
                 except OSError:
-                    pass
-            self.held = False
+                    # A reader has it open for a moment (Windows refuses the delete).
+                    time.sleep(0.01 * (attempt + 1))
         return False
 
 
@@ -1038,12 +1121,36 @@ def escapes_root(candidate, project_root):
     return root != resolved and root not in resolved.parents
 
 
-def inside_manifest_dir(candidate, manifest_dir):
-    """True when evidence lives in the manifest's own working directory.
+# The files the tooling itself keeps beside a manifest. In the default layout they
+# all live in .admin-console/, so that whole folder is off limits; a manifest placed
+# beside an app (`init --manifest apps/admin/console.json`) shares its folder with
+# the app, and only these are the tool's.
+MANIFEST_WORKING_DIRS = frozenset(("locks", "worklog", "worklogs"))
+MANIFEST_WORKING_FILES = frozenset(
+    (".gitignore", ".lock", ".lock.soft", "admin-console.manifest.schema.json")
+)
+
+
+def split_manifest_location(location):
+    """(folder, file) for a manifest given as its file or as its folder."""
+    if location is None:
+        return None, None
+    location = Path(location)
+    if location.suffix.lower() == ".json":
+        return location.parent, location
+    return location, None
+
+
+def inside_manifest_dir(candidate, manifest_dir, manifest_file=None):
+    """True when evidence is the manifest or one of the tooling's working files.
 
     `.admin-console/manifest.json` is real, non-empty JSON. Citing it as a test
     or as gate evidence proves nothing but that the manifest exists, and the
     manifest is exactly what the evidence is supposed to be checked against.
+
+    Only the tooling's own files count. Refusing everything in the manifest's
+    folder turned `init --manifest apps/admin/console.json` -- the documented
+    monorepo layout -- into 38 errors, one for every real test and log of the app.
     """
     try:
         resolved = candidate.resolve()
@@ -1051,12 +1158,27 @@ def inside_manifest_dir(candidate, manifest_dir):
         return False
     if ".admin-console" in resolved.parts:
         return True
-    if manifest_dir is not None:
+    if manifest_file is not None:
         try:
-            base = Path(manifest_dir).resolve()
+            if resolved == Path(manifest_file).resolve():
+                return True
         except OSError:
-            return False
-        return resolved == base or base in resolved.parents
+            pass
+    if manifest_dir is None:
+        return False
+    try:
+        base = Path(manifest_dir).resolve()
+    except OSError:
+        return False
+    if resolved.parent == base:
+        name = resolved.name
+        return (
+            name in MANIFEST_WORKING_FILES
+            or name.endswith(".tmp")
+            or (name.startswith("ocr-") and name.endswith(".json"))
+        )
+    if base in resolved.parents:
+        return resolved.relative_to(base).parts[0] in MANIFEST_WORKING_DIRS
     return False
 
 
@@ -1082,6 +1204,46 @@ def path_state(candidate):
         return "missing"
 
 
+def decode_evidence(data):
+    """Decode an evidence file the way the tool that wrote it encoded it.
+
+    PowerShell 5.1's `>` and `Out-File` write UTF-16LE with a byte-order mark;
+    decoded as UTF-8, `build` became `b\x00u\x00i\x00l\x00d` and an honest gate log
+    failed gate-evidence-unrelated. A UTF-16 file without a BOM is recognised by
+    its NUL bytes: in UTF-16 ASCII text every other byte is zero.
+    """
+    if data.startswith(codecs.BOM_UTF8):
+        return data[len(codecs.BOM_UTF8):].decode("utf-8", errors="replace")
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16", errors="replace")
+    if len(data) >= 8 and data.count(b"\x00") * 3 > len(data):
+        odd_nuls = data[1::2].count(0)
+        even_nuls = data[0::2].count(0)
+        return data.decode("utf-16-le" if odd_nuls >= even_nuls else "utf-16-be", errors="replace")
+    return data.decode("utf-8", errors="replace")
+
+
+_HEAD_CACHE = {}
+
+
+def read_head_bytes(candidate):
+    """The first EVIDENCE_READ_LIMIT bytes and the size, cached per (path, mtime, size).
+
+    Validation reads each evidence file several times (existence, content scan,
+    token match, sharing); the cache makes that one read.
+    """
+    info = candidate.stat()
+    key = (str(candidate), info.st_mtime_ns, info.st_size)
+    cached = _HEAD_CACHE.get(key)
+    if cached is None:
+        with open(str(candidate), "rb") as handle:
+            cached = (handle.read(EVIDENCE_READ_LIMIT), info.st_size)
+        if len(_HEAD_CACHE) > 512:
+            _HEAD_CACHE.clear()
+        _HEAD_CACHE[key] = cached
+    return cached
+
+
 def read_head(candidate):
     try:
         if candidate.is_dir():
@@ -1092,11 +1254,63 @@ def read_head(candidate):
                 if sum(len(c) for c in chunks) > EVIDENCE_READ_LIMIT:
                     break
             return "\n".join(chunks)
-        with open(str(candidate), "rb") as handle:
-            data = handle.read(EVIDENCE_READ_LIMIT)
-        return data.decode("utf-8", errors="replace")
+        return decode_evidence(read_head_bytes(candidate)[0])
     except OSError:
         return ""
+
+
+def evidence_digest(candidate):
+    """Identity of a file's content, so a copy of a file counts as that file.
+
+    Sharing rules keyed by path let `cp README.md evidence/<gate>.log`, or a hard
+    link to the manifest, pass as independent evidence.
+    """
+    try:
+        data, size = read_head_bytes(candidate)
+    except OSError:
+        return ""
+    return hashlib.sha256(data + b"|" + str(size).encode("ascii")).hexdigest()[:24]
+
+
+# Files that describe a project instead of recording a run. Cited as a quality gate
+# or a crossCutting section they prove only that the repository has a README.
+NON_EVIDENCE_NAMES = frozenset((
+    "package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "bun.lockb", "tsconfig.json", "jsconfig.json", "deno.json", "pyproject.toml", "setup.py",
+    "setup.cfg", "pipfile", "pipfile.lock", "poetry.lock", "requirements.txt", "cargo.toml",
+    "cargo.lock", "go.mod", "go.sum", "gemfile", "gemfile.lock", "composer.json", "composer.lock",
+    "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "makefile", "dockerfile",
+    "docker-compose.yml", "docker-compose.yaml", "compose.yaml", ".gitignore", ".editorconfig",
+    "security.md", "code_of_conduct.md", "contributing.md", "agents.md", "claude.md", "gemini.md",
+    "notice", "skill.md",
+))
+NON_EVIDENCE_PREFIXES = (
+    "readme", "changelog", "license", "licence", "tsconfig.", ".eslintrc", ".prettierrc",
+    ".babelrc", ".env",
+)
+CONFIG_FILE_PATTERN = re.compile(r"\.config\.(?:js|cjs|mjs|ts|cts|mts|json|ya?ml|toml)$|\.config$", re.I)
+# Source code is not the output of running it; a quality gate needs the run.
+SOURCE_SUFFIXES = frozenset((
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".py", ".rb", ".go", ".rs",
+    ".java", ".kt", ".kts", ".cs", ".php", ".swift", ".scala", ".ex", ".exs", ".dart", ".vue",
+    ".svelte", ".sql", ".groovy",
+))
+
+
+def non_evidence_reason(candidate, role):
+    """Why a cited file cannot be evidence for this role, or ''."""
+    name = candidate.name.lower()
+    normalised = str(candidate).replace("\\", "/").lower()
+    if (
+        name in NON_EVIDENCE_NAMES
+        or name.startswith(NON_EVIDENCE_PREFIXES)
+        or CONFIG_FILE_PATTERN.search(name)
+        or "/.github/workflows/" in normalised
+    ):
+        return "a project or configuration file"
+    if role == "gate" and candidate.suffix.lower() in SOURCE_SUFFIXES:
+        return "source code"
+    return ""
 
 
 # An assertion in any of the languages this skill targets. A test file listed
@@ -1244,12 +1458,12 @@ def check_evidence_list(
                 "evidence path resolves outside the project: " + raw.strip(),
             )
             continue
-        if inside_manifest_dir(candidate, findings.manifest_dir):
+        if inside_manifest_dir(candidate, findings.manifest_dir, findings.manifest_file):
             findings.add(
                 "evidence-inside-manifest-dir",
                 entry_path,
-                "'" + raw.strip() + "' is inside .admin-console/; the manifest and its "
-                "working files are the claim, not evidence for it",
+                "'" + raw.strip() + "' is the manifest or one of the tooling's working files; "
+                "the manifest is the claim, not evidence for it",
             )
             continue
         state = path_state(candidate)
@@ -1272,6 +1486,26 @@ def check_evidence_list(
                 "evidence path is empty or whitespace only: " + raw.strip(),
             )
             continue
+        digest = evidence_digest(candidate)
+        if digest and digest == findings.manifest_digest:
+            findings.add(
+                "evidence-inside-manifest-dir",
+                entry_path,
+                "'" + raw.strip() + "' is a copy of the manifest; the manifest is the claim, "
+                "not evidence for it",
+            )
+            continue
+        if not expect_assertions:
+            reason = non_evidence_reason(candidate, role)
+            if reason:
+                findings.add(
+                    "evidence-not-output",
+                    entry_path,
+                    "'" + raw.strip() + "' is " + reason + ", not the output of running "
+                    "anything; record the command's output instead (references/verification.md, "
+                    "'Capturing gate output')",
+                )
+                continue
         body = read_head(candidate)
         if expect_assertions:
             # A test file is not placeholder-scanned: fabricated fixtures, mocks
@@ -1322,6 +1556,7 @@ def check_evidence_list(
                 "field": entry_path,
                 "path": str(candidate.resolve()),
                 "raw": raw.strip(),
+                "digest": digest,
             }
         )
     if required and entries and not resolved:
@@ -1776,6 +2011,7 @@ def structural_findings(manifest, findings, release):
 
     roles_on_screens = set()
     roles_on_caps = set()
+    roles_on_ui_caps = set()
     linked_capabilities = set()
     for screen in screens:
         roles_on_screens.update(
@@ -1785,14 +2021,18 @@ def structural_findings(manifest, findings, release):
             value for value in as_list(screen.get("capabilities")) if isinstance(value, str)
         )
     for _path, _entity, capability in iter_capabilities(manifest):
-        roles_on_caps.update(
-            value for value in as_list(capability.get("roles")) if isinstance(value, str)
-        )
+        actors = [value for value in as_list(capability.get("roles")) if isinstance(value, str)]
+        roles_on_caps.update(actors)
+        if "ui" in surface_of(capability):
+            roles_on_ui_caps.update(actors)
 
     for index, role in enumerate(roles):
         rid = text_of(role.get("id")) or "#" + str(index)
         path = "roles[" + rid + "]"
-        if rid not in roles_on_screens:
+        # A role that acts only through an API, CLI, job or chat surface has no
+        # screen to be granted; demanding one made every headless operator role
+        # fail release at standard and regulated.
+        if rid not in roles_on_screens and (rid in roles_on_ui_caps or rid not in roles_on_caps):
             findings.add("role-unused", path, "role is not granted access to any screen")
         if rid not in roles_on_caps:
             findings.add("role-unused", path, "role is not the actor on any capability")
@@ -2065,8 +2305,11 @@ def collect_escape_text(manifest):
 
 
 def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None):
+    """`manifest_dir` is the manifest's file (preferred) or its folder."""
     findings = Findings(profile, phase)
-    findings.manifest_dir = manifest_dir
+    findings.manifest_dir, findings.manifest_file = split_manifest_location(manifest_dir)
+    if findings.manifest_file is not None and findings.manifest_file.is_file():
+        findings.manifest_digest = evidence_digest(findings.manifest_file)
     release = phase == "release"
     check_required(manifest, TOP_LEVEL_KEYS, "manifest", findings)
     if isinstance(manifest, dict):
@@ -2094,6 +2337,7 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
             "profile-invalid", "manifest.profile", "must be one of: " + ", ".join(PROFILES)
         )
 
+    check_project_root(manifest, findings)
     validate_platform(manifest, findings, release)
     for key in COLLECTION_KEYS:
         if key in manifest:
@@ -2108,6 +2352,7 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
     validate_cross_cutting(manifest, findings, release, project_root)
     validate_gates(manifest, findings, release, project_root)
     validate_decisions(manifest, findings, release)
+    check_profile_decision(manifest, findings)
     validate_gaps(manifest, findings, release)
     validate_agents(manifest, findings)
 
@@ -2132,6 +2377,50 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
             if not as_list(manifest.get(key)):
                 findings.add("plan-note", key, "not modeled yet")
     return findings
+
+
+def repository_top(start):
+    """The nearest folder at or above `start` that holds a .git entry, or None."""
+    try:
+        current = Path(start).resolve()
+    except OSError:
+        return None
+    for folder in [current] + list(current.parents):
+        if (folder / ".git").exists():
+            return folder
+    return None
+
+
+def check_project_root(manifest, findings):
+    """`projectRoot` decides where every evidence path resolves, so it must stay in the repo.
+
+    `set --path projectRoot --value ../../elsewhere` pointed every evidence path at a
+    folder no reviewer of this repository can see, and release passed.
+    """
+    declared = manifest.get("projectRoot")
+    if not isinstance(declared, str) or not declared.strip() or findings.manifest_dir is None:
+        return
+    text = declared.strip()
+    if os.path.isabs(text) or re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith(("/", "\\")):
+        findings.add(
+            "project-root-outside",
+            "manifest.projectRoot",
+            "'" + text + "' is absolute; record it relative to the manifest's folder so every "
+            "clone resolves evidence the same way",
+        )
+        return
+    try:
+        resolved = (Path(findings.manifest_dir) / text).resolve()
+    except OSError:
+        return
+    top = repository_top(findings.manifest_dir)
+    if top is not None and resolved != top and top not in resolved.parents:
+        findings.add(
+            "project-root-outside",
+            "manifest.projectRoot",
+            "'" + text + "' resolves outside the repository that holds the manifest (" + str(top)
+            + "); evidence must live where reviewers of this repository can see it",
+        )
 
 
 def validate_platform(manifest, findings, release):
@@ -2210,12 +2499,7 @@ def validate_roles(manifest, findings):
 
 def validate_entities(manifest, findings, release, role_ids):
     seen_capability_ids = set()
-    confirmed_targets = set()
-    for _dpath, decision in iter_named(manifest, "decisions"):
-        if decision.get("status") == "confirmed":
-            confirmed_targets.update(
-                value for value in as_list(decision.get("appliesTo")) if isinstance(value, str)
-            )
+    confirmed_targets = not_applicable_targets(manifest)
     for eid, entity in iter_entities(manifest):
         path = "entities[" + eid + "]"
         check_required(
@@ -2345,8 +2629,8 @@ def validate_entities(manifest, findings, release, role_ids):
                 "not-applicable-undecided",
                 path + ".status",
                 "a not-applicable " + str(capability.get("kind")) + " needs a confirmed decision "
-                "whose appliesTo names '" + cid + "'; without one it is a deferred capability "
-                "relabelled so that release accepts it",
+                "of kind 'not-applicable' whose appliesTo names '" + cid + "'; without one it is a "
+                "deferred capability relabelled so that release accepts it",
             )
 
 
@@ -2472,6 +2756,7 @@ def validate_cross_cutting(manifest, findings, release, project_root):
     platform = as_dict(manifest.get("platform"))
     capabilities = [cap for _p, _e, cap in iter_capabilities(manifest)]
     implemented = [cap for cap in capabilities if cap.get("status") == "implemented"]
+    headless = is_headless(manifest)
     required_true = {
         "authentication": ["implemented", "mfaForPrivilegedRoles", "sessionRevocation"],
         "authorization": ["serverEnforced", "defaultDeny", "objectAndScopeChecks"],
@@ -2489,6 +2774,10 @@ def validate_cross_cutting(manifest, findings, release, project_root):
             "correlationIdsExposedSafely",
         ],
     }
+    if headless:
+        # No screen exists, so there is no keyboard path or layout to test, and no
+        # interface artifact to cite. Localization still applies to what operators read.
+        required_true["experience"] = ["localizationRequirementsHandled"]
     if platform.get("tenancy") in ("multi-tenant", "hybrid"):
         required_true["data"].append("tenantIsolationTested")
     if any(cap.get("risk") in ("high", "critical") for cap in implemented):
@@ -2513,6 +2802,8 @@ def validate_cross_cutting(manifest, findings, release, project_root):
                     "must be true for release",
                 )
         path = "crossCutting." + section + ".evidence"
+        if headless and section == "experience" and not nonempty(values.get("evidence")):
+            continue
         if not nonempty(values.get("evidence")):
             findings.add(
                 "crosscutting-evidence",
@@ -2552,6 +2843,8 @@ def validate_cross_cutting(manifest, findings, release, project_root):
 
 def validate_gates(manifest, findings, release, project_root):
     gates = {}
+    decided = not_applicable_targets(manifest)
+    headless = is_headless(manifest)
     for path, gate in iter_named(manifest, "qualityGates"):
         gid = text_of(gate.get("id"))
         if gid:
@@ -2577,14 +2870,38 @@ def validate_gates(manifest, findings, release, project_root):
                 findings.add("required-field-empty", path + ".threshold", "a passed gate needs a measurable threshold")
         if status == "not-applicable" and not nonempty(gate.get("rationale")):
             findings.add("gate-rationale-missing", path + ".rationale", "gate is not-applicable without rationale")
+        if status == "not-applicable" and gid in ALWAYS_REQUIRED_GATES:
+            findings.add(
+                "gate-always-required",
+                path + ".status",
+                "the " + gid + " gate can never be not-applicable: every console has tests to run "
+                "and a security review to pass",
+            )
+        elif (
+            status == "not-applicable"
+            and gid in REQUIRED_GATES
+            and gid not in decided
+            and not (headless and gid in ("browser", "accessibility"))
+        ):
+            # Six of the eight required gates could be waved through with a one-line
+            # rationale, which made every rule about gate evidence moot.
+            findings.add(
+                "gate-not-applicable-undecided",
+                path + ".status",
+                "a required gate can be not-applicable only with a confirmed decision of kind "
+                "'not-applicable' whose appliesTo names '" + gid + "'",
+            )
         if release and status not in ("passed", "not-applicable"):
             findings.add("gate-not-passed", path + ".status", "is '" + str(status) + "', not passed")
     for gid in REQUIRED_GATES:
         if gid not in gates:
             findings.add("gate-missing", "qualityGates", "missing required gate '" + gid + "'")
     if release:
+        headless = is_headless(manifest)
         for gid in NONFUNCTIONAL_GATES:
             entry = gates.get(gid)
+            if headless and gid == "accessibility":
+                continue  # no interface to audit
             if entry and entry[1].get("status") != "passed":
                 findings.add(
                     "nonfunctional-gate-required",
@@ -2593,10 +2910,73 @@ def validate_gates(manifest, findings, release, project_root):
                 )
 
 
+def decision_kind(decision):
+    """A decision's kind; the profile decision `init` writes is recognised by its id."""
+    kind = text_of(decision.get("kind"))
+    if kind:
+        return kind
+    return "profile" if text_of(decision.get("id")) == "dec.profile" else "other"
+
+
+def not_applicable_targets(manifest):
+    """Ids named by a CONFIRMED decision about not-applicability ('*' names nothing)."""
+    targets = set()
+    for _path, decision in iter_named(manifest, "decisions"):
+        if decision.get("status") != "confirmed" or decision_kind(decision) != "not-applicable":
+            continue
+        targets.update(
+            value for value in as_list(decision.get("appliesTo"))
+            if isinstance(value, str) and value != "*"
+        )
+    return targets
+
+
+PROFILE_WORD = re.compile(r"\b(internal|standard|regulated)\b", re.I)
+
+
+def check_profile_decision(manifest, findings):
+    """The manifest's profile must be the one its profile decision records.
+
+    `set --path profile --value internal` lowered a regulated manifest's release bar
+    in one write while dec.profile still read "Run at the regulated profile".
+    """
+    declared = manifest.get("profile")
+    if declared not in PROFILES:
+        return
+    live = [
+        (path, decision) for path, decision in iter_named(manifest, "decisions")
+        if decision_kind(decision) == "profile" and decision.get("status") != "superseded"
+    ]
+    if not live:
+        findings.add(
+            "profile-decision-missing",
+            "decisions",
+            "no decision records why this manifest runs at the '" + declared + "' profile; "
+            "choosing a profile is a recorded decision (kind 'profile')",
+        )
+    for path, decision in live:
+        named = PROFILE_WORD.search(text_of(decision.get("decision")))
+        if not named or named.group(1).lower() != declared:
+            findings.add(
+                "profile-decision-mismatch",
+                path + ".decision",
+                "the profile decision says '" + text_of(decision.get("decision")) + "' but the "
+                "manifest profile is '" + declared + "'; change both together (`set --path profile` "
+                "updates the decision and marks it assumed until the owner confirms it)",
+            )
+    if declared == "internal" and as_list(as_dict(manifest.get("platform")).get("regulatedData")):
+        findings.add(
+            "profile-below-regulated-data",
+            "manifest.profile",
+            "platform.regulatedData is not empty, so this console handles regulated data; "
+            "the internal profile is for small internal tools with named operators",
+        )
+
+
 def validate_decisions(manifest, findings, release):
     caps = capability_index(manifest)
     known = set(caps)
-    for key in ("screens", "entities", "workQueues", "integrations", "roles", "gaps"):
+    for key in ("screens", "entities", "workQueues", "integrations", "roles", "gaps", "qualityGates"):
         for _path, item in iter_named(manifest, key):
             value = text_of(item.get("id"))
             if value:
@@ -2604,6 +2984,8 @@ def validate_decisions(manifest, findings, release):
     for path, decision in iter_named(manifest, "decisions"):
         check_required(decision, ("id", "decision", "reason", "evidence", "status"), path, findings)
         check_enum(decision.get("status"), DECISION_STATUSES, path + ".status", findings, "status")
+        if "kind" in decision:
+            check_enum(decision.get("kind"), DECISION_KINDS, path + ".kind", findings, "kind")
         if not nonempty(decision.get("reason")):
             findings.add("decision-reason-missing", path + ".reason", "every decision must record why it was taken")
         unknown = sorted(
@@ -2817,7 +3199,9 @@ def validate_evidence(manifest, findings, project_root):
                         isinstance(entry, str)
                         and evidence_kind(entry) == "path"
                         and evidence_path(entry, project_root) is not None
-                        and inside_manifest_dir(evidence_path(entry, project_root), findings.manifest_dir)
+                        and inside_manifest_dir(
+                            evidence_path(entry, project_root), findings.manifest_dir, findings.manifest_file
+                        )
                     )
                 ]
             check_evidence_list(
@@ -2851,7 +3235,9 @@ def check_evidence_sharing(manifest, findings):
     """
     by_path = {}
     for entry in findings.evidence_index:
-        by_path.setdefault(entry["path"], []).append(entry)
+        # By content, not path: a copy or a hard link of one file is that file.
+        by_path.setdefault(entry.get("digest") or entry["path"], []).append(entry)
+    gate_records = {text_of(gate.get("id")): gate for _p, gate in iter_named(manifest, "qualityGates")}
     test_roles = ("capability-test", "screen-test", "item-test", "policy-test")
     for _path, uses in sorted(by_path.items()):
         roles = {use["role"] for use in uses}
@@ -2866,7 +3252,21 @@ def check_evidence_sharing(manifest, findings):
             )
         gate_owners = sorted({use["owner"] for use in uses if use["role"] == "gate"})
         cross_owners = sorted({use["owner"] for use in uses if use["role"] == "cross"})
-        if len(gate_owners) > 2 or (gate_owners and cross_owners):
+        # One CI log may honestly record several gates when it shows each one's
+        # command running; without the commands it is one file asked to prove three.
+        multi_step = False
+        if len(gate_owners) > 2:
+            body = " ".join(read_head(Path(uses[0]["path"])).lower().split())
+            commands = [
+                " ".join(text_of(as_dict(gate_records.get(gid)).get("command")).lower().split())
+                for gid in gate_owners
+            ]
+            multi_step = all(command and command in body for command in commands)
+        if (
+            (len(gate_owners) > 2 and not multi_step)
+            or (gate_owners and cross_owners)
+            or len(cross_owners) > 1
+        ):
             first = evidence_uses[0]
             findings.add(
                 "evidence-shared",
@@ -2905,6 +3305,12 @@ def check_evidence_sharing(manifest, findings):
         tokens = gate_tokens(gate)
         related = False
         for entry in owned:
+            # evidence/security.log for the security gate: real `npm audit` output
+            # ("found 0 vulnerabilities") names neither the gate nor the command.
+            stem = re.sub(r"[^a-z0-9]+", " ", Path(entry["path"]).stem.lower())
+            if gid and gid.lower() in stem.split():
+                related = True
+                break
             body = read_head(Path(entry["path"])).lower()
             if any(token in body for token in tokens):
                 related = True
@@ -2913,9 +3319,10 @@ def check_evidence_sharing(manifest, findings):
             findings.add(
                 "gate-evidence-unrelated",
                 path + ".evidence",
-                "no evidence file for gate '" + gid + "' mentions '" + gid + "'"
-                + (" or its command" if text_of(gate.get("command")) else "")
-                + "; record the gate's own output (the `command` field names what ran)",
+                "no evidence file for gate '" + gid + "' is named for the gate or mentions '"
+                + gid + "'" + (" or its command" if text_of(gate.get("command")) else "")
+                + "; record the gate's own output, e.g. evidence/" + gid + ".log with the command "
+                "line at the top",
             )
 
 
@@ -3269,8 +3676,26 @@ def emit_gap_report(manifest, profile):
     return "\n".join(lines) + "\n"
 
 
+RULE_MATRIX_HEADER = (
+    "# Rule severity matrix\n"
+    "\n"
+    "This file is generated from the validator's `RULES`, not written by hand:\n"
+    "`python scripts/admin_console_manifest.py emit --format rule-matrix --out references/rule-matrix.md`\n"
+    "regenerates all of it, and `tests/test_cli_correctness.py` fails if it drifts from the code.\n"
+    "[verification.md](verification.md) explains what each gate means; this file states exactly\n"
+    "how severe each one is at each profile.\n"
+    "\n"
+    "Each cell is the severity at that profile: `error` blocks (exit 1), `warn` is printed and\n"
+    "does not block, `off` is silent. A `*` marks a completeness rule: it describes an\n"
+    "unfinished model rather than a malformed one, so outside `--phase release` an `error` is\n"
+    "reported as a `warn` (an incremental build is not blocked by a role nothing uses yet). Every\n"
+    "finding prints its rule id in brackets, so a line of `validate` output can be looked up here.\n"
+    "\n"
+)
+
+
 def emit_rule_matrix():
-    """RULES as a markdown table, so the published matrix cannot drift from the code."""
+    """The whole rule-matrix reference, generated, so the published matrix cannot drift."""
     lines = [
         "| Rule | internal | standard | regulated |",
         "|---|---|---|---|",
@@ -3281,7 +3706,7 @@ def emit_rule_matrix():
         lines.append(
             "| `" + name + "`" + mark + " | " + " | ".join(tiers) + " |"
         )
-    return "\n".join(lines) + "\n"
+    return RULE_MATRIX_HEADER + "\n".join(lines) + "\n"
 
 
 EMITTERS = {
@@ -3531,6 +3956,7 @@ DEFAULTS = {
     },
     "decision": {
         "id": "",
+        "kind": "other",
         "decision": "",
         "reason": "",
         "evidence": [],
@@ -4338,18 +4764,47 @@ def project_root_of(manifest_path, manifest=None):
     return base.parent
 
 
+# Anchored with a leading slash: `init --manifest apps/admin/console.json` writes this
+# beside an app, where an unanchored `locks/` also ignored apps/admin/src/features/locks/.
+# The ocr-record/diff/scan files are NOT ignored: gaps cite them as evidence, so they
+# must reach every clone. Bundles are transient working state.
 ADMIN_CONSOLE_GITIGNORE = (
     "# Working state of the admin-console tooling. Commit the manifest, its schema copy,\n"
-    "# the worklogs and the emitted reports; never these.\n"
-    "locks/\n"
-    ".lock\n"
-    "*.tmp\n"
-    "*.stale.*\n"
-    "ocr-bundle*.json\n"
-    "ocr-record-*.json\n"
-    "ocr-diff-*.json\n"
-    "ocr-scan-*.json\n"
+    "# the worklogs, the emitted reports and the ocr-record/ocr-diff/ocr-scan review files\n"
+    "# (gaps cite them as evidence); never these.\n"
+    "/locks/\n"
+    "/.lock\n"
+    "/.lock.soft\n"
+    "/*.tmp\n"
+    "/ocr-bundle*.json\n"
 )
+
+
+def write_working_gitignore(target_dir):
+    """Create the working-state .gitignore, or add the missing lines to an existing one.
+
+    An existing .gitignore used to be left alone, so a manifest placed in an app
+    folder that already had one never ignored its lock files.
+    """
+    ignore_path = target_dir / ".gitignore"
+    wanted = [line for line in ADMIN_CONSOLE_GITIGNORE.splitlines() if line and not line.startswith("#")]
+    if not ignore_path.exists():
+        write_text_file(ignore_path, ADMIN_CONSOLE_GITIGNORE)
+        return "created"
+    try:
+        existing = decode_text_bytes(ignore_path.read_bytes(), ignore_path, allow_utf16=True)
+    except OSError as exc:
+        raise ManifestError("Cannot read " + str(ignore_path) + ": " + str(exc))
+    present = {line.strip() for line in existing.splitlines()}
+    missing = [line for line in wanted if line not in present]
+    if not missing:
+        return "unchanged"
+    text = (
+        existing.rstrip("\n") + "\n\n# adminwright working state (added by `init`)\n"
+        + "\n".join(missing) + "\n"
+    )
+    write_text_file(ignore_path, text)
+    return "updated"
 
 
 def cmd_init(args):
@@ -4417,6 +4872,7 @@ def cmd_init(args):
     # (decision-assumed) until someone with authority confirms it.
     manifest["decisions"] = [{
         "id": "dec.profile",
+        "kind": "profile",
         "decision": "Run at the " + args.profile + " profile",
         "reason": "chosen when the manifest was created; not yet confirmed with the owner",
         "evidence": [],
@@ -4426,11 +4882,11 @@ def cmd_init(args):
     commit_manifest(target, manifest)
     schema_copy = target_dir / "admin-console.manifest.schema.json"
     shutil.copyfile(str(SCHEMA_PATH), str(schema_copy))
-    ignore_path = target_dir / ".gitignore"
-    if not ignore_path.exists():
-        write_text_file(ignore_path, ADMIN_CONSOLE_GITIGNORE)
+    ignore_state = write_working_gitignore(target_dir)
     print("Created " + str(target))
     print("Created " + str(schema_copy))
+    if ignore_state != "unchanged":
+        print(ignore_state.capitalize() + " " + str(target_dir / ".gitignore") + " (lock and bundle files)")
     print("Profile: " + args.profile + " (recorded as the assumed decision dec.profile; confirm it)")
     print("Project root: " + relative_root + " (relative to the manifest's folder)")
     print("adminwright " + skill_version() + ", ruleset " + ruleset_version())
@@ -4534,7 +4990,7 @@ def cmd_validate(args):
         Path(args.project_root).resolve() if args.project_root else project_root_of(manifest_path, manifest)
     )
     findings = validate_manifest(
-        manifest, args.phase, project_root, profile, manifest_dir=manifest_path.parent
+        manifest, args.phase, project_root, profile, manifest_dir=manifest_path
     )
     if args.json:
         print(
@@ -4572,7 +5028,7 @@ def summarize(manifest):
     return {
         "platform": text_of(platform.get("name")) or "unnamed platform",
         "profile": active_profile(manifest, None)[0],
-        "archetypes": as_list(platform.get("archetypes")),
+        "archetypes": [label(value) for value in as_list(platform.get("archetypes"))],
         "tenancy": platform.get("tenancy"),
         "counts": {
             "roles": len(as_list(manifest.get("roles"))),
@@ -4716,7 +5172,7 @@ def cmd_emit(args):
     health_phase = "release" if args.format == "gap-report" else "plan"
     health = validate_manifest(
         manifest, health_phase, project_root_of(manifest_path, manifest), profile,
-        manifest_path.parent,
+        manifest_path,
     )
     if health.errors:
         stderr(
@@ -4773,6 +5229,11 @@ def cmd_add(args):
             if target is None:
                 raise ManifestError("entity '" + args.entity + "' is not in the manifest")
             collection = target.setdefault("capabilities", [])
+            if not isinstance(collection, list):
+                raise ManifestError(
+                    "entities[" + args.entity + "].capabilities is not an array; repair it with "
+                    "`set --path 'entities[" + args.entity + "].capabilities' --value '[]' --replace` first"
+                )
             existing = [
                 text_of(cap.get("id")) for cap in collection if isinstance(cap, dict)
             ]
@@ -4807,7 +5268,7 @@ def cmd_add(args):
             batch_ids.add(entry_id)
         collection.extend(entries)
         introduced, warned = new_findings(
-            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path
         )
         if introduced and not args.allow_invalid:
             stderr("Refusing to write: the new " + kind + " introduces validation errors.")
@@ -4837,7 +5298,7 @@ def report_overridden(introduced, allow_invalid, manifest, manifest_path):
     profile = active_profile(manifest, None)[0]
     release = validate_manifest(
         manifest, "release", project_root_of(manifest_path, manifest), profile,
-        manifest_path.parent,
+        manifest_path,
     )
     still = {(i["rule"], i["path"]) for i in release.errors}
     persisting = [i for i in introduced if (i["rule"], i["path"]) in still]
@@ -4848,6 +5309,35 @@ def report_overridden(introduced, allow_invalid, manifest, manifest_path):
         )
     else:
         stderr("None of them fail `validate --phase release`; they were plan-phase findings.")
+
+
+def sync_profile_decision(manifest, old, new):
+    """Keep the profile decision in step with `profile`, and make the change unconfirmed.
+
+    Returns a note for the operator. Lowering the profile in one quiet write was the
+    way around the release bar; now the decision says what changed and waits for the
+    owner, and profile-decision-mismatch catches a profile edited any other way.
+    """
+    decisions = manifest.setdefault("decisions", [])
+    if not isinstance(decisions, list):
+        raise ManifestError("manifest.decisions is not an array; repair it before changing the profile")
+    live = [
+        item for item in decisions
+        if isinstance(item, dict) and decision_kind(item) == "profile" and item.get("status") != "superseded"
+    ]
+    text = "Run at the " + new + " profile"
+    reason = "changed from '" + str(old) + "' by `set`; not yet confirmed with the owner"
+    if live:
+        live[0].update({"kind": "profile", "decision": text, "status": "assumed", "reason": reason})
+        for extra in live[1:]:
+            extra["status"] = "superseded"
+        return "dec.profile now reads '" + text + "' and is assumed until the owner confirms it"
+    taken = {text_of(item.get("id")) for item in decisions if isinstance(item, dict)}
+    new_id = "dec.profile" if "dec.profile" not in taken else "dec.profile-" + new
+    decisions.append(merge_defaults("decision", {
+        "id": new_id, "kind": "profile", "decision": text, "reason": reason, "appliesTo": ["*"],
+    }))
+    return "recorded the assumed decision " + new_id + ": '" + text + "'"
 
 
 def cmd_set(args):
@@ -4864,11 +5354,14 @@ def cmd_set(args):
             if changed:
                 stderr("note: rewrote backslashes as '/' in " + str(changed) + " path(s) of " + args.path)
         container[key] = value
+        profile_note = None
+        if segments == [("profile", None)] and isinstance(value, str) and value != previous:
+            profile_note = sync_profile_decision(manifest, previous, value)
         renamed = None
         if key == "id" and isinstance(previous, str) and previous and isinstance(value, str) and previous != value:
             renamed = (previous, value)
         introduced, warned = new_findings(
-            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent,
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path,
             renamed=renamed,
         )
         if introduced and not args.allow_invalid:
@@ -4878,6 +5371,16 @@ def cmd_set(args):
             return 2
         commit_manifest(manifest_path, manifest)
     print(args.path + ": " + json.dumps(previous) + " -> " + json.dumps(value))
+    if profile_note:
+        stderr("note: " + profile_note)
+        if (
+            isinstance(previous, str) and previous in PROFILES and value in PROFILES
+            and PROFILES.index(value) < PROFILES.index(previous)
+        ):
+            stderr(
+                "WARNING: the profile was lowered from " + previous + " to " + value
+                + "; the release bar drops with it. Confirm the decision with the owner."
+            )
     report_new_warnings(warned)
     report_overridden(introduced, args.allow_invalid, manifest, manifest_path)
     return 0
@@ -4918,7 +5421,7 @@ def cmd_remove(args):
         collection, index = find_item(manifest, args.kind, args.id, args.entity)
         collection.pop(index)
         introduced, warned = new_findings(
-            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path
         )
         if introduced and not args.allow_invalid:
             stderr("Refusing to remove: something still depends on " + args.kind + " '" + args.id + "'.")
@@ -5026,7 +5529,7 @@ def cmd_rename(args):
         collection[index]["id"] = new_id
         changed = rewrite_references(manifest, args.kind, args.id, new_id)
         introduced, warned = new_findings(
-            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent,
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path,
             renamed=(args.id, new_id),
         )
         if introduced and not args.allow_invalid:
@@ -5167,6 +5670,8 @@ def cmd_claim(args):
             return 3
 
         agents = manifest.setdefault("agents", [])
+        if not isinstance(agents, list):
+            raise ManifestError("manifest.agents is not an array; repair it before claiming")
         record = existing
         if record is None:
             record = merge_defaults("agent", {"id": args.agent, "role": args.role})
@@ -5222,7 +5727,7 @@ def cmd_claim(args):
         # The claim writes the manifest, so it goes through the same guard as add
         # and set: a claim must not be the way to smuggle in an invalid record.
         introduced, _warned = new_findings(
-            before, manifest, project_root_of(manifest_path, manifest), manifest_path.parent
+            before, manifest, project_root_of(manifest_path, manifest), manifest_path
         )
         if introduced:
             for path in acquired:
@@ -6135,6 +6640,78 @@ def configure_console():
             reconfigure(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             pass
+    # Agents routinely merge stderr into the same pipe (`2>&1 | head`), so both
+    # streams need the same tolerance.
+    if not isinstance(sys.stdout, ReaderSafeStdout):
+        sys.stdout = ReaderSafeStdout(sys.stdout)
+    if not isinstance(sys.stderr, ReaderSafeStdout):
+        sys.stderr = ReaderSafeStdout(sys.stderr)
+
+
+def _reader_gone(exc):
+    """A write failed because whoever reads our stdout has stopped reading.
+
+    POSIX reports that as EPIPE (BrokenPipeError). Windows reports EINVAL, and
+    often only when the interpreter flushes stdout at exit -- after a command has
+    already committed its writes, which turned `harvest | head -1` into exit 120.
+    """
+    return isinstance(exc, BrokenPipeError) or getattr(exc, "errno", None) in (errno.EPIPE, errno.EINVAL)
+
+
+class ReaderSafeStdout:
+    """stdout that treats a reader leaving early as the end of output, not a failure.
+
+    `emit ... | head -1` and `harvest | Select-Object -First 1` are ordinary uses:
+    the command's work is done, only the rest of its report is unwanted. Output is
+    then dropped (stdout is pointed at the null device, so the interpreter's own
+    flush at exit succeeds too), and the command's exit code stands. Any other
+    output error still raises.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.reader_gone = False
+
+    def _drop(self):
+        self.reader_gone = True
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, self._stream.fileno())
+            os.close(devnull)
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def write(self, text):
+        if self.reader_gone:
+            return len(text)
+        try:
+            return self._stream.write(text)
+        except OSError as exc:
+            if not _reader_gone(exc):
+                raise
+            self._drop()
+            return len(text)
+
+    def flush(self):
+        if self.reader_gone:
+            try:
+                self._stream.flush()
+            except OSError:
+                pass
+            return
+        try:
+            self._stream.flush()
+        except OSError as exc:
+            if not _reader_gone(exc):
+                raise
+            self._drop()
+            try:
+                self._stream.flush()
+            except OSError:
+                pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
 
 
 def main():
@@ -6142,17 +6719,15 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     try:
-        return args.func(args)
+        code = args.func(args)
+        # Flush here, inside the handlers, rather than at interpreter exit where a
+        # closed reader becomes an unhandled error and exit 120.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return code
     except ManifestError as exc:
         stderr("ERROR: " + str(exc))
         return 2
-    except BrokenPipeError:
-        # `... | head`: the reader left early. Not a failure of this command.
-        try:
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        except (OSError, ValueError):
-            pass
-        return 0
     except KeyboardInterrupt:
         stderr("Interrupted")
         return 2

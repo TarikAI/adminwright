@@ -1,8 +1,8 @@
 # Rule severity matrix
 
-This table is generated from the validator's `RULES`, not written by hand:
+This file is generated from the validator's `RULES`, not written by hand:
 `python scripts/admin_console_manifest.py emit --format rule-matrix --out references/rule-matrix.md`
-regenerates it, and `tests/test_cli_correctness.py` fails if it drifts from the code.
+regenerates all of it, and `tests/test_cli_correctness.py` fails if it drifts from the code.
 [verification.md](verification.md) explains what each gate means; this file states exactly
 how severe each one is at each profile.
 
@@ -37,6 +37,7 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `evidence-file-empty` | warn | error | error |
 | `evidence-inside-manifest-dir` | error | error | error |
 | `evidence-is-test-file` | warn | error | error |
+| `evidence-not-output` | warn | error | error |
 | `evidence-not-resolvable` | warn | error | error |
 | `evidence-path-missing` | error | error | error |
 | `evidence-shared` | off | warn | error |
@@ -45,10 +46,12 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `feedback-scope` | warn | warn | warn |
 | `gap-rationale-missing` | error | error | error |
 | `gap-unresolved` | error | error | error |
+| `gate-always-required` | warn | error | error |
 | `gate-evidence-missing` | error | error | error |
 | `gate-evidence-path` | warn | error | error |
 | `gate-evidence-unrelated` | off | warn | error |
 | `gate-missing` | error | error | error |
+| `gate-not-applicable-undecided` | warn | error | error |
 | `gate-not-passed` | error | error | error |
 | `gate-rationale-missing` | error | error | error |
 | `high-risk-controls`* | error | error | error |
@@ -68,7 +71,11 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `placeholder-scan` | error | error | error |
 | `plan-note` | warn | warn | warn |
 | `privileged-read-audit` | off | error | error |
+| `profile-below-regulated-data` | error | error | error |
+| `profile-decision-mismatch` | error | error | error |
+| `profile-decision-missing` | off | warn | error |
 | `profile-invalid` | error | error | error |
+| `project-root-outside` | error | error | error |
 | `rationale-required` | error | error | error |
 | `release-status-unresolved` | error | error | error |
 | `required-field-empty` | error | error | error |

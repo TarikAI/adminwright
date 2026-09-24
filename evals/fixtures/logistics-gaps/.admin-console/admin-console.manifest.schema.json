@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://adminify.local/schemas/admin-console.manifest.schema.json",
+  "$id": "https://raw.githubusercontent.com/TarikAI/adminwright/main/assets/admin-console.manifest.schema.json",
   "title": "Admin Console Capability Manifest",
   "description": "Manifest v2. The schema describes shape; scripts/admin_console_manifest.py enforces the profile-scaled rules, evidence resolution, placeholder scanning, and structural coverage that the schema cannot express.",
   "type": "object",
@@ -167,6 +167,13 @@
               "type": "string"
             }
           }
+        },
+        "domainTerms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Real domain nouns that happen to be placeholder words ('Todo' in a task app, 'Sample' in a lab system, 'Mock exam' in an exam product). Each must name an entity (its id or name). Inside implementation fields the term is read as vocabulary when it is part of a longer identifier (TodoRepository.findAll); on its own it is still a placeholder."
         }
       }
     },
@@ -499,6 +506,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Role ids allowed to operate this integration (replay, rotate credentials, reconcile). Checked against roles[]."
           }
         }
       }
@@ -768,6 +782,17 @@
               "type": "string"
             },
             "description": "Capability, screen, entity, or role ids this decision governs. '*' means the whole manifest (a profile or scope decision)."
+          },
+          "kind": {
+            "enum": [
+              "profile",
+              "not-applicable",
+              "risk-acceptance",
+              "buy-vs-build",
+              "design",
+              "other"
+            ],
+            "description": "What the decision is about. 'profile' records the chosen profile and must name manifest.profile; 'not-applicable' is the only kind that can justify a not-applicable command, job or export, or a not-applicable required quality gate (its appliesTo names them); 'risk-acceptance' is a human accepting a gap. Absent means 'other'."
           }
         }
       }
@@ -1202,6 +1227,10 @@
         "reviewedBy": {
           "type": "string",
           "description": "Who performed the review. Must be present when reviewStatus is 'reviewed' and must differ from owner, implementedBy and any implementer that held the capability, so 'reviewed by someone other than the implementer' is verifiable rather than asserted (an error at the regulated profile, a warning at standard)."
+        },
+        "contestedBy": {
+          "type": "string",
+          "description": "Agent id that last set reviewStatus to contested. A contest is cleared by a different reviewer: reviewedBy must not equal contestedBy while the contest's gap is open."
         }
       }
     }

@@ -206,7 +206,39 @@ class TestSharedEvidence(ReleaseGateCase):
         self.save()
         code, out, _err = self.validate()
         self.assertEqual(code, 1, out)
-        self.assertIn("evidence-shared", out)
+        self.assertIn("evidence-not-output", out)
+
+    def test_project_files_are_not_evidence_at_standard(self):
+        for name, body in (("tsconfig.json", '{"compilerOptions": {"strict": true}}\n'),
+                           ("vitest.config.ts", "export default { test: { include: ['tests'] } }\n"),
+                           ("SECURITY.md", "# Security\n\nReport issues privately.\n")):
+            self.write_file(name, body)
+        self.data["qualityGates"][1]["evidence"] = ["tsconfig.json"]
+        self.data["qualityGates"][3]["evidence"] = ["vitest.config.ts"]
+        self.data["crossCutting"]["safety"]["evidence"] = ["SECURITY.md"]
+        self.assertIn("evidence-not-output", self.errors("standard"))
+        self.assertEqual(acm.RULES["evidence-not-output"], acm.QUALITY)
+
+    def test_one_document_for_every_section_is_shared(self):
+        self.write_file("docs/review.md", "Console review 2026-09-20\n- 18 operations exercised\n")
+        for values in self.data["crossCutting"].values():
+            values["evidence"] = ["docs/review.md"]
+        self.assertIn("evidence-shared", self.errors("regulated"))
+
+    def test_a_copy_of_one_log_is_still_that_log(self):
+        body = "run finished\n  build typecheck lint: 0 errors across 118 files\n"
+        for name in ("build", "typecheck", "lint"):
+            self.write_file("evidence/copy-" + name + ".log", body)
+        for gate in self.data["qualityGates"][:3]:
+            gate["evidence"] = ["evidence/copy-" + gate["id"] + ".log"]
+        self.assertIn("evidence-shared", self.errors("regulated"))
+
+    def test_a_copy_of_the_manifest_is_refused(self):
+        self.save()
+        (self.root / "evidence" / "build.log").write_bytes(self.manifest.read_bytes())
+        code, out, _err = self.validate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("is a copy of the manifest", out)
 
     def test_evidence_inside_the_manifest_directory_is_refused(self):
         self.data["qualityGates"][0]["evidence"] = [".admin-console/manifest.json"]
@@ -215,16 +247,35 @@ class TestSharedEvidence(ReleaseGateCase):
             self.assertIn("evidence-inside-manifest-dir", self.errors(profile), profile)
 
     def test_a_test_file_cannot_double_as_gate_evidence(self):
+        # Test source cited for a gate is source code, not the run's output.
         self.data["qualityGates"][3]["evidence"] = ["tests/user.spec.ts"]
+        self.assertIn("evidence-not-output", self.errors("standard"))
+
+    def test_a_test_file_cannot_double_as_section_evidence(self):
+        self.data["crossCutting"]["audit"]["evidence"] = ["tests/user.spec.ts"]
         self.assertIn("evidence-is-test-file", self.rule_names("standard"))
         self.assertIn("evidence-is-test-file", self.errors("standard"))
         self.assertEqual(acm.RULES["evidence-is-test-file"], acm.QUALITY)
 
     def test_gate_evidence_must_mention_its_gate_at_regulated(self):
-        self.write_file("evidence/lint.log", "run finished\n  0 errors across 118 files\n")
+        self.write_file("evidence/run.log", "run finished\n  0 errors across 118 files\n")
+        for gate in self.data["qualityGates"]:
+            if gate["id"] == "lint":
+                gate["evidence"] = ["evidence/run.log"]
         self.assertIn("gate-evidence-unrelated", self.errors("regulated"))
         self.assertNotIn("gate-evidence-unrelated", self.errors("standard"))
         self.assertIn("gate-evidence-unrelated", self.rule_names("standard"))
+
+    def test_real_tool_output_in_a_file_named_for_the_gate_passes(self):
+        # `npm audit` prints neither "security" nor its own command line.
+        self.write_file("evidence/security.log", "found 0 vulnerabilities\n")
+        self.assertNotIn("gate-evidence-unrelated", self.rule_names("regulated"))
+
+    def test_a_utf16_log_from_powershell_is_read(self):
+        path = self.root / "evidence" / "build.log"
+        path.write_bytes("next build\r\n  Compiled successfully in 41.2s\r\n".encode("utf-16"))
+        self.assertNotIn("gate-evidence-unrelated", self.rule_names("regulated"))
+        self.assertNotIn("evidence-file-empty", self.rule_names("regulated"))
 
     def test_a_declared_command_can_stand_in_for_the_gate_name(self):
         self.write_file("evidence/lint.log", "eslint .\n  0 problems across 118 files\n")
@@ -468,6 +519,9 @@ class TestProfileOverride(ReleaseGateCase):
     def test_a_stricter_profile_is_always_allowed(self):
         self.profile = "standard"
         self.data["profile"] = "standard"
+        for decision in self.data["decisions"]:
+            if decision["id"] == "dec.profile":
+                decision["decision"] = "Run at the standard profile"
         self.save()
         code, out, err = run("validate", "--manifest", self.manifest, "--project-root",
                              self.root, "--phase", "release", "--profile", "regulated")
@@ -502,13 +556,27 @@ class TestNotApplicableRelabel(ReleaseGateCase):
 
     def test_a_confirmed_decision_makes_it_pass(self):
         self.add_command()
-        self.data["decisions"] = [{
-            "id": "dec.purge", "decision": "No purge command", "reason": "legal hold",
-            "evidence": [], "status": "confirmed", "appliesTo": ["user.purge"],
-        }]
+        self.data["decisions"].append({
+            "id": "dec.purge", "kind": "not-applicable", "decision": "No purge command",
+            "reason": "legal hold", "evidence": [], "status": "confirmed",
+            "appliesTo": ["user.purge"],
+        })
         self.save()
         code, out, err = self.validate()
         self.assertEqual(code, 0, out + err)
+
+    def test_a_decision_about_something_else_is_not_enough(self):
+        # The critic's reproduction: the fixture's own profile decision named the
+        # capability, and any confirmed decision naming it used to count.
+        self.add_command()
+        for decision in self.data["decisions"]:
+            if decision["id"] == "dec.profile":
+                decision["appliesTo"] = ["user.purge"]
+        self.data["decisions"].append({
+            "id": "dec.design", "kind": "design", "decision": "Keep purge out of the UI",
+            "reason": "risk", "evidence": [], "status": "confirmed", "appliesTo": ["user.purge"],
+        })
+        self.assertIn("not-applicable-undecided", self.errors("regulated"))
 
     def test_an_assumed_decision_is_not_enough(self):
         self.add_command()
