@@ -125,6 +125,32 @@ class TestLessonsSurviveTheInstall(unittest.TestCase):
         self.assertIn("not a git checkout", out)
         self.assertIn("github.com/TarikAI/adminwright", out)
 
+    def test_two_outbox_lessons_with_one_title_both_survive(self):
+        base = make_skill_copy(self.tmp / "skill")
+        first = list(LESSON)
+        second = [a if a != "Rotate first." else "SECOND DIFFERENT LESSON" for a in LESSON]
+        second[second.index("gap")] = "tooling"
+        for args in (first, second):
+            code, _out, err = run_copy(base, *args, env=self.env)
+            self.assertEqual(code, 0, err)
+        outbox = self.home / "outbox" / "lessons"
+        names = sorted(p.name for p in outbox.glob("*.md"))
+        self.assertEqual(names, ["2026-09-23-rotate-keys-before-export-2.md",
+                                 "2026-09-23-rotate-keys-before-export.md"])
+        bodies = "".join(p.read_text(encoding="utf-8") for p in outbox.glob("*.md"))
+        self.assertIn("Rotate first.", bodies, "the first lesson must not be overwritten")
+        self.assertIn("SECOND DIFFERENT LESSON", bodies)
+        for path in outbox.glob("*.md"):
+            self.assertNotIn(b"\r\n", path.read_bytes(), path.name + " must be LF-only")
+
+    def test_undated_outbox_lessons_with_one_title_both_survive(self):
+        base = make_skill_copy(self.tmp / "skill")
+        args = [a for a in LESSON if a not in ("--date", "2026-09-23")]
+        for _ in range(2):
+            code, _out, err = run_copy(base, *args, env=self.env)
+            self.assertEqual(code, 0, err)
+        self.assertEqual(len(list((self.home / "outbox" / "lessons").glob("undated-*.md"))), 2)
+
     def test_an_explicit_lessons_dir_is_honoured(self):
         base = make_skill_copy(self.tmp / "skill")
         target = self.tmp / "clone" / "lessons"

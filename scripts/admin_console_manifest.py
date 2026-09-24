@@ -6290,6 +6290,49 @@ def lesson_date(raw):
                         + json.dumps(value))
 
 
+def create_new_file(path, text):
+    """Write `text` to a file that must not exist yet (O_EXCL); False if it does.
+
+    write_text_file replaces its target by design; a lesson must never replace
+    another one. The file is written LF-only, as UTF-8 without a BOM.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(str(path), flags, 0o644)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+    except BaseException:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def create_outbox_lesson(directory, stem, text):
+    """<stem>.md, else <stem>-2.md, -3.md ...: an earlier lesson is never overwritten.
+
+    The outbox named lessons <date>-<slug>.md and wrote them with a plain
+    replace, so two lessons with one title on one day -- or two long titles
+    sharing their first 60 characters, or two undated ones -- kept only the
+    second, with a success message for both.
+    """
+    for number in range(1, 1000):
+        path = directory / (stem + ("" if number == 1 else "-" + str(number)) + ".md")
+        if create_new_file(path, text):
+            return path
+    raise ManifestError("the outbox already holds 999 lessons named " + stem + ".md; " + str(directory))
+
+
 def cmd_lesson_add(args):
     if args.status == "adopted":
         raise ManifestError(
@@ -6321,8 +6364,11 @@ def cmd_lesson_add(args):
     if outbox:
         # Not a checkout: numbering and the index belong to the repository, and a
         # plugin cache is replaced on update. Park the lesson where it survives.
-        path = lessons_dir / ((date if date != "unknown" else "undated") + "-" + slug + ".md")
-        write_text_file(path, build_lesson_text("pending", args, date))
+        with FileLock(lessons_dir / ".lock"):
+            path = create_outbox_lesson(
+                lessons_dir, (date if date != "unknown" else "undated") + "-" + slug,
+                build_lesson_text("pending", args, date),
+            )
         print("Wrote " + str(path))
         print(
             "This copy of adminwright (" + str(SKILL_ROOT) + ") is not a git checkout of the "
@@ -6334,9 +6380,15 @@ def cmd_lesson_add(args):
         )
         return 0
     with FileLock(lessons_dir / ".lock"):
-        lesson_id = "%04d" % next_lesson_number(lessons_dir)
-        path = lessons_dir / (lesson_id + "-" + slug + ".md")
-        write_text_file(path, build_lesson_text(lesson_id, args, date))
+        # Exclusive creation even under the lock: a writer that does not take it
+        # (an older copy of this script) must never have its lesson replaced.
+        for _attempt in range(100):
+            lesson_id = "%04d" % next_lesson_number(lessons_dir)
+            path = lessons_dir / (lesson_id + "-" + slug + ".md")
+            if create_new_file(path, build_lesson_text(lesson_id, args, date)):
+                break
+        else:
+            raise ManifestError("could not allocate a lesson id in " + str(lessons_dir))
         rebuild_lesson_index(lessons_dir)
     print("Wrote " + str(path))
     print("Updated " + str(lessons_dir / "index.md"))
