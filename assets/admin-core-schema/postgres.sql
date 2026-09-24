@@ -531,6 +531,11 @@ CREATE INDEX data_subject_request_queue ON data_subject_request (state, due_at);
 --     chain does and does not prove.
 --   * At regulated profile, pair this with grants.sql: revoked UPDATE / DELETE /
 --     TRUNCATE for a separate application role.
+--   * Every function that reads a table pins SET search_path = <schema>, pg_temp.
+--     A trigger runs with the caller's search_path, where the caller's own temporary
+--     tables come first: in the unqualified copies (Django, Prisma, Laravel, Rails) a
+--     session could otherwise CREATE TEMP TABLE approval_request and approve its own
+--     request. Listing pg_temp last is what stops that.
 
 -- Canonical hash input for one audit_event row: the JSON array (jsonb canonical
 -- text form) of the values below, in this order; timestamps as UTC ISO-8601 with
@@ -566,7 +571,7 @@ $$;
 -- one. A row inserted with no payload at all records redaction_policy 'none', since
 -- no policy was applied to anything.
 CREATE OR REPLACE FUNCTION admin_core.audit_event_chain_link()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = admin_core, pg_temp AS $$
 DECLARE
     last_seq  bigint;
     last_hash text;
@@ -609,7 +614,7 @@ CREATE TRIGGER audit_event_chain_link
 -- event names the row, which catches a drop made with the update trigger disabled.
 CREATE OR REPLACE FUNCTION admin_core.verify_audit_chain(p_chain_id text DEFAULT NULL)
 RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
-LANGUAGE plpgsql STABLE AS $$
+LANGUAGE plpgsql STABLE SET search_path = admin_core, pg_temp AS $$
 DECLARE
     r         admin_core.audit_event%ROWTYPE;
     cur_chain text;
@@ -718,7 +723,7 @@ REVOKE ALL ON FUNCTION admin_core.scrub_audit_payload(bigint, text, text, bigint
 -- Separation of duties: the requester may not approve their own request. Enforced
 -- here rather than in application code because it is the whole point of the control.
 CREATE OR REPLACE FUNCTION admin_core.enforce_separation_of_duties()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = admin_core, pg_temp AS $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM admin_core.approval_request r
@@ -770,7 +775,7 @@ $$ LANGUAGE plpgsql;
 -- the audit record. A session that sets it to 'on', or at another row's event, is
 -- refused.
 CREATE OR REPLACE FUNCTION admin_core.audit_event_guard_update()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = admin_core, pg_temp AS $$
 DECLARE
     scrub_event text := current_setting('admin_core.scrub', true);
 BEGIN

@@ -1215,6 +1215,21 @@ class TestCanonicalIsSelfConsistent(unittest.TestCase):
         self.assertIn("NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL", link)
         self.assertIn("NEW.redaction_policy := 'none'", link)
 
+    def test_every_function_that_reads_a_table_pins_its_search_path(self):
+        # round-2 finding: a trigger runs with the caller's search_path, where the caller's own
+        # temporary tables are searched first; in the unqualified carriers a session could create
+        # TEMP TABLE approval_request and approve its own request. pg_temp must be listed last.
+        sql = strip_sql_comments(read("postgres.sql"))
+        found = 0
+        for m in re.finditer(r"CREATE OR REPLACE FUNCTION admin_core\.(\w+)\(.*?\$\$(.*?)\$\$", sql, re.S):
+            name, body = m.group(1), m.group(2)
+            header = sql[m.start(): m.start() + m.group(0).index("$$")]
+            if re.search(r"\b(?:FROM|INTO|UPDATE|JOIN)\s+admin_core\.\w+|%ROWTYPE", body):
+                found += 1
+                with self.subTest(function=name):
+                    self.assertIn("SET search_path = admin_core, pg_temp", header)
+        self.assertGreaterEqual(found, 5)
+
     def test_scrub_guard_needs_the_rows_scrub_event(self):
         # audit finding 5.11 (round 2): the guard trusted a user-settable flag, so any role with
         # UPDATE could drop payloads with no audit record. It must look the named event up.

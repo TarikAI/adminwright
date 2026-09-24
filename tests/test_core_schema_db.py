@@ -13,10 +13,12 @@ concurrent writers keep the audit hash chain gap-free.
 Standard library only (Python 3.9+).
 """
 
+import os
 import subprocess
 import unittest
 
-from _core_schema_pg import ENABLED, PSQL, SCHEMA, SKIP_REASON, PgCase, readme_verification_sql
+from _core_schema_pg import (ENABLED, PSQL, SCHEMA, SKIP_REASON, PgCase, readme_verification_sql,
+                             unqualified_schema_sql)
 
 # The chain-link trigger as it was at d6c64a8: it hashed a payload only when one was present and
 # otherwise kept whatever before_hash / after_hash / redaction_policy the writer supplied.
@@ -266,6 +268,57 @@ END $t$;
         result = self.psql(db, "-f", script)
         self.assertIn("scrub paths ok", result.stderr + result.stdout)
         self.assertEqual((result.stderr + result.stdout).count("ok: refused"), 2)
+
+    def test_temporary_tables_cannot_stand_in_for_the_real_ones(self):
+        # round-2 finding: in the unqualified carriers a trigger ran with the caller's search_path,
+        # where the caller's own temporary tables come first, so a fresh session could create
+        # TEMP TABLE approval_request and approve its own request (and fake a scrub event the
+        # same way). The same install must also pass the README verification in public.
+        db = self.new_database(apply_schema=False)
+        self.psql(db, "-f", self.sql_file("unqualified.sql", unqualified_schema_sql()))
+        verified = self.psql(db, "-f", self.sql_file("verify.sql", readme_verification_sql("public")))
+        self.assertIn("all admin_core checks passed", verified.stderr + verified.stdout)
+        app = "aw_app_%s" % self.tag
+        self.roles.append(app)
+        self.psql("postgres", "-c", "CREATE ROLE \"%s\" LOGIN PASSWORD 'pw-%s'" % (app, self.tag))
+        self.psql(db, "-c", """
+GRANT USAGE ON SCHEMA public TO "%(app)s";
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO "%(app)s";
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "%(app)s";
+INSERT INTO admin_actor (auth_subject, display_name) VALUES ('alice', 'Alice');
+INSERT INTO admin_permission (key, resource, action) VALUES ('probe.thing', 'probe', 'thing');
+INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason, expires_at)
+SELECT 'probe.thing', '{}', 'h', 'thing', id, 'r', now() + interval '1 day' FROM admin_actor;
+INSERT INTO audit_event (occurred_at, environment, action, target_type, target_id, result, before_state)
+VALUES (now(), 'production', 'user.update', 'user', 'u1', 'succeeded', '{"email":"x@example.com"}');
+""" % {"app": app})
+        attacks = {
+            "self-approval behind a temporary approval_request": (
+                "CREATE TEMP TABLE approval_request (id bigint, requested_by bigint); "
+                "INSERT INTO approval_decision (request_id, approver_id, decision, reason) "
+                "SELECT r.id, r.requested_by, 'approved', 'self' FROM public.approval_request r",
+                "separation of duties"),
+            "payload drop behind a temporary audit_event": (
+                "CREATE TEMP TABLE audit_event (id bigint, action text, target_type text, target_id text); "
+                "INSERT INTO audit_event SELECT 999999, 'audit.scrub_payload', 'audit_event', e.id::text "
+                "FROM public.audit_event e; "
+                "SET admin_core.scrub = '999999'; "
+                "UPDATE public.audit_event SET before_state = NULL, redaction_policy = 'silent'",
+                "audit.scrub_payload event"),
+        }
+        for label, (sql, expected) in attacks.items():
+            with self.subTest(attack=label):
+                # a fresh session for each: the attack depends on the temporary table existing
+                # before the trigger function is first planned in that session
+                result = subprocess.run(
+                    [PSQL, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-U", app, "-d", db, "-c", sql],
+                    capture_output=True, encoding="utf-8", errors="replace", timeout=300,
+                    env=dict(os.environ, PGPASSWORD="pw-%s" % self.tag),
+                )
+                self.assertNotEqual(result.returncode, 0, "%s was allowed" % label)
+                self.assertIn(expected, result.stderr)
+        self.assertEqual(self.scalar(db, "SELECT count(*) FROM approval_decision"), "0")
+        self.assertEqual(self.scalar(db, "SELECT count(*) FROM audit_event WHERE before_state IS NOT NULL"), "1")
 
     def test_verification_is_not_vacuous_forged_payload_hash(self):
         # round-2 finding: an INSERT could set before_hash with no payload, so the row looked scrubbed

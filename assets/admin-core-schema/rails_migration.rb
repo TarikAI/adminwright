@@ -28,7 +28,10 @@
 #
 # PostgreSQL only; tables land in the default (public) schema and admin_actor.email
 # is text rather than citext. Adapt table names to project convention, but keep
-# admin_permission.key equal to the manifest capability id.
+# admin_permission.key equal to the manifest capability id. If the tables live in
+# another schema, change every SET search_path = public, pg_temp line to it, keeping
+# pg_temp last (it stops a session's temporary tables shadowing the real ones inside
+# the triggers).
 
 class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
   def up
@@ -344,7 +347,7 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
     # execution_result change), so it cannot be re-attributed to get past it.
     execute <<~'SQL'
       CREATE OR REPLACE FUNCTION enforce_separation_of_duties()
-      RETURNS trigger AS $$
+      RETURNS trigger SET search_path = public, pg_temp AS $$
       BEGIN
           IF EXISTS (
               SELECT 1 FROM approval_request r
@@ -615,7 +618,7 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       $$;
 
       CREATE OR REPLACE FUNCTION audit_event_chain_link()
-      RETURNS trigger AS $$
+      RETURNS trigger SET search_path = public, pg_temp AS $$
       DECLARE
           last_seq  bigint;
           last_hash text;
@@ -650,7 +653,7 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
 
       CREATE OR REPLACE FUNCTION verify_audit_chain(p_chain_id text DEFAULT NULL)
       RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
-      LANGUAGE plpgsql STABLE AS $$
+      LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $$
       DECLARE
           r         audit_event%ROWTYPE;
           cur_chain text;
@@ -755,7 +758,7 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       $$ LANGUAGE plpgsql;
 
       CREATE OR REPLACE FUNCTION audit_event_guard_update()
-      RETURNS trigger AS $$
+      RETURNS trigger SET search_path = public, pg_temp AS $$
       DECLARE
           scrub_event text := current_setting('admin_core.scrub', true);
       BEGIN

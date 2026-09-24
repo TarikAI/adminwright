@@ -5,8 +5,9 @@
 -- django_models.py). Table and column names are the canonical ones (the models set
 -- db_column= wherever Django's default <field>_id would differ), and nothing is
 -- schema-qualified: the tables are assumed to be in the default (public) schema. If
--- yours are elsewhere, change the SET search_path line in scrub_audit_payload() and
--- qualify the table names in the functions.
+-- yours are elsewhere, change every SET search_path = public, pg_temp line to that
+-- schema. Keep pg_temp last: it is what stops a session's temporary table named
+-- approval_request or audit_event from standing in for the real one inside a trigger.
 --
 -- The statements below are copied verbatim from postgres.sql (schema qualifier
 -- removed) and tests/test_core_schema.py fails if the two drift apart.
@@ -25,7 +26,7 @@
 -- Then run grants.sql (psql) for the regulated profile.
 
 CREATE OR REPLACE FUNCTION enforce_separation_of_duties()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = public, pg_temp AS $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM approval_request r
@@ -75,7 +76,7 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION audit_event_chain_link()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = public, pg_temp AS $$
 DECLARE
     last_seq  bigint;
     last_hash text;
@@ -110,7 +111,7 @@ CREATE TRIGGER audit_event_chain_link
 
 CREATE OR REPLACE FUNCTION verify_audit_chain(p_chain_id text DEFAULT NULL)
 RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
-LANGUAGE plpgsql STABLE AS $$
+LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $$
 DECLARE
     r         audit_event%ROWTYPE;
     cur_chain text;
@@ -215,7 +216,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION audit_event_guard_update()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = public, pg_temp AS $$
 DECLARE
     scrub_event text := current_setting('admin_core.scrub', true);
 BEGIN

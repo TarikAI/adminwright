@@ -56,6 +56,18 @@ def integrity_section():
     return sql[start: sql.index("\nCOMMIT;", start)] + "\n"
 
 
+def unqualified_schema_sql():
+    """postgres.sql as the Django, Prisma, Laravel and Rails carriers install it: every table in
+    public and no schema qualifier, with the same rewrite tests/test_core_schema.py uses to prove
+    their function text equals the canonical text (the admin_core.scrub setting and the advisory
+    lock key are string literals and keep their names)."""
+    sql = (SCHEMA / "postgres.sql").read_text(encoding="utf-8")
+    sql = sql.replace("CREATE SCHEMA IF NOT EXISTS admin_core;", "")
+    sql = sql.replace("SET LOCAL search_path = admin_core, public;", "SET LOCAL search_path = public;")
+    sql = sql.replace("SET search_path = admin_core, pg_temp", "SET search_path = public, pg_temp")
+    return re.sub(r"(?<!['\w])admin_core\.", "", sql)
+
+
 def canonical_check_names():
     text = re.sub(r"--[^\n]*", "", (SCHEMA / "postgres.sql").read_text(encoding="utf-8"))
     return set(re.findall(r"CONSTRAINT\s+(\w+)\s+CHECK\b", text))

@@ -142,6 +142,26 @@ class TestDjangoTranslationOnPostgres(PgCase):
         verified = self.psql(db, "-f", self.sql_file("verify.sql", readme_verification_sql("public")))
         self.assertIn("all admin_core checks passed", verified.stderr + verified.stdout)
 
+        # django_triggers.sql names its tables unqualified: a fresh session's temporary table
+        # called approval_request must not stand in for the real one inside the SoD trigger.
+        self.psql(db, "-c", """
+INSERT INTO admin_actor (auth_subject, display_name) VALUES ('shadow-alice', 'Alice');
+INSERT INTO admin_permission (key, resource, action) VALUES ('shadow.thing', 'shadow', 'thing');
+INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason, expires_at)
+SELECT 'shadow.thing', '{}', 'h', 'thing', id, 'r', now() + interval '1 day' FROM admin_actor
+ WHERE auth_subject = 'shadow-alice';
+""")
+        shadowed = self.psql(
+            db, "-c",
+            "CREATE TEMP TABLE approval_request (id bigint, requested_by bigint); "
+            "INSERT INTO approval_decision (request_id, approver_id, decision, reason, decided_at) "
+            "SELECT r.id, r.requested_by, 'approved', 'self', now() FROM public.approval_request r "
+            "WHERE r.command_key = 'shadow.thing'",
+            check=False,
+        )
+        self.assertNotEqual(shadowed.returncode, 0, "self-approval behind a temporary approval_request was allowed")
+        self.assertIn("separation of duties", shadowed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,8 +5,9 @@
 --   npx prisma migrate dev --create-only
 -- (or paste it into the migration.sql it creates), review, then apply. Nothing is
 -- schema-qualified: Prisma creates the tables in the default (public) schema. If you
--- map them elsewhere, change the SET search_path line in scrub_audit_payload() and
--- qualify the table names in the functions.
+-- map them elsewhere, change every SET search_path = public, pg_temp line to that
+-- schema. Keep pg_temp last: it is what stops a session's temporary table named
+-- approval_request or audit_event from standing in for the real one inside a trigger.
 --
 -- Contents:
 --   1. CHECK constraints. The enum-like columns are native PostgreSQL enums in
@@ -90,7 +91,7 @@ CREATE UNIQUE INDEX feature_flag_key_scope_unique
 -- 3. Triggers and functions --------------------------------------------------
 
 CREATE OR REPLACE FUNCTION enforce_separation_of_duties()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = public, pg_temp AS $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM approval_request r
@@ -140,7 +141,7 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION audit_event_chain_link()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = public, pg_temp AS $$
 DECLARE
     last_seq  bigint;
     last_hash text;
@@ -175,7 +176,7 @@ CREATE TRIGGER audit_event_chain_link
 
 CREATE OR REPLACE FUNCTION verify_audit_chain(p_chain_id text DEFAULT NULL)
 RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
-LANGUAGE plpgsql STABLE AS $$
+LANGUAGE plpgsql STABLE SET search_path = public, pg_temp AS $$
 DECLARE
     r         audit_event%ROWTYPE;
     cur_chain text;
@@ -280,7 +281,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION audit_event_guard_update()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = public, pg_temp AS $$
 DECLARE
     scrub_event text := current_setting('admin_core.scrub', true);
 BEGIN
