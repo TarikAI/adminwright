@@ -219,6 +219,8 @@ BEGIN
         RAISE EXCEPTION 'VERIFY FAILED: an insert kept writer-supplied payload hashes or a redaction policy without a payload'
             USING ERRCODE = 'XX000';
     END IF;
+    -- Enum-like columns hold only their listed values (a CHECK; a native enum in Prisma, 22P02).
+    PERFORM pg_temp.expect_refused('unknown audit result', 'INSERT INTO audit_event (occurred_at, environment, action, target_type, result) VALUES (now(), ''production'', ''x'', ''x'', ''bogus'')', '23514|22P02');
 
     -- 2. audit_event is append-only, and the rows are still there afterwards.
     PERFORM pg_temp.expect_refused('UPDATE audit_event', 'UPDATE audit_event SET reason = ''x'' WHERE id = ' || ev1, 'P0001');
@@ -307,6 +309,9 @@ BEGIN
     SELECT count(*) INTO n FROM feature_flag WHERE key = 'verify.flag';
     IF n <> 3 THEN RAISE EXCEPTION 'VERIFY FAILED: expected 3 flag rows, found %', n USING ERRCODE = 'XX000'; END IF;
     PERFORM pg_temp.expect_refused('duplicate flag scope', 'INSERT INTO feature_flag (key, environment) VALUES (''verify.flag'', ''production'')', '23505');
+    INSERT INTO config_setting (key, value, value_type, environment)
+    VALUES ('verify.setting', '1', 'number', 'production'), ('verify.setting', '1', 'number', 'staging');
+    PERFORM pg_temp.expect_refused('duplicate config_setting scope', 'INSERT INTO config_setting (key, value, value_type, environment) VALUES (''verify.setting'', ''2'', ''number'', ''production'')', '23505');
     PERFORM pg_temp.expect_refused('secret value stored inline', 'INSERT INTO config_setting (key, value, value_type, is_secret, environment) VALUES (''k'', ''"s3cret"'', ''string'', true, ''production'')', '23514');
 
     -- 8. impersonation: one live session, bounded duration, an end reason.
@@ -321,9 +326,11 @@ BEGIN
     UPDATE impersonation_session SET ended_at = now(), ended_reason = 'operator_exit' WHERE id = sess;
     PERFORM pg_temp.expect_refused('acted-as subject without a session', format('INSERT INTO audit_event (occurred_at, actor_id, effective_actor_id, environment, action, target_type, result) VALUES (now(), %s, ''customer-1'', ''production'', ''x'', ''x'', ''succeeded'')', alice), '23514');
 
-    -- 9. jobs: deleting a job cannot take its per-item failures with it.
-    INSERT INTO admin_job (kind, initiated_by, environment, input_summary, input_hash)
-    VALUES ('verify.bulk', alice, 'production', '{}', 'h') RETURNING id INTO job;
+    -- 9. jobs: a repeated idempotency key is refused, and deleting a job cannot take its
+    --    per-item failures with it.
+    INSERT INTO admin_job (kind, initiated_by, environment, input_summary, input_hash, idempotency_key)
+    VALUES ('verify.bulk', alice, 'production', '{}', 'h', 'verify-idem-1') RETURNING id INTO job;
+    PERFORM pg_temp.expect_refused('duplicate job idempotency key', format('INSERT INTO admin_job (kind, initiated_by, environment, input_summary, input_hash, idempotency_key) VALUES (''verify.bulk'', %s, ''production'', ''{}'', ''h2'', ''verify-idem-1'')', bob), '23505');
     INSERT INTO admin_job_failure (job_id, target_type, target_id, error_code) VALUES (job, 'user', 'u1', 'E1');
     PERFORM pg_temp.expect_refused('DELETE admin_job with failures', 'DELETE FROM admin_job WHERE id = ' || job, '23503|23001');
 

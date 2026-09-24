@@ -1613,7 +1613,12 @@ class TestPackContents(unittest.TestCase):
         block = re.search(r"```sql\n(.*?)\n```", section, re.S).group(1)
         for needle in ("VERIFY FAILED", "DELETE audit_event", "DELETE approval_decision",
                        "TRUNCATE audit_event", "verify_audit_chain", "scrub_audit_payload",
-                       "feature_flag", "count(*)"):
+                       "feature_flag", "count(*)",
+                       # round 2: every control the README calls database-enforced has a refused case
+                       "GUC-only payload drop", "another row''s scrub event", "payload dropped%",
+                       "re-attributing a request", "lowering required_approvals",
+                       "duplicate job idempotency key", "duplicate config_setting scope",
+                       "unknown audit result", "fulfilled under legal hold", "DELETE admin_job with failures"):
             self.assertIn(needle, block)
         self.assertTrue(block.lstrip().startswith("BEGIN;") and block.rstrip().endswith("ROLLBACK;"))
 

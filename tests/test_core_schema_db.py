@@ -334,6 +334,19 @@ VALUES (now(), 'production', 'user.update', 'user', 'u1', 'succeeded', '{"email"
             "re-attributing a request was allowed",
         )
 
+    def test_verification_is_not_vacuous_job_idempotency(self):
+        self.assert_verification_fails_without(
+            "DROP INDEX admin_core.admin_job_idempotency", "duplicate job idempotency key was allowed")
+
+    def test_verification_is_not_vacuous_config_setting_scope(self):
+        self.assert_verification_fails_without(
+            "DROP INDEX admin_core.config_setting_key_scope_unique", "duplicate config_setting scope was allowed")
+
+    def test_verification_is_not_vacuous_enum_check(self):
+        self.assert_verification_fails_without(
+            "ALTER TABLE admin_core.audit_event DROP CONSTRAINT audit_event_result_check",
+            "unknown audit result was allowed")
+
     def test_verification_is_not_vacuous_legal_hold(self):
         self.assert_verification_fails_without(
             "ALTER TABLE admin_core.data_subject_request DROP CONSTRAINT data_subject_request_hold_blocks_fulfilment",
