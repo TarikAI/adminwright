@@ -58,7 +58,7 @@ built-in `gen_random_uuid()` and the hash chain uses the built-in `sha256()`.
 
 The Django translation needs Django 5.1+. Django 6.1 requires PostgreSQL 15+, so on
 PostgreSQL 14 use Django 5.2 LTS (or 6.0). CI runs it with Django 5.2 on PostgreSQL 14 and with
-Django 6 on PostgreSQL 16.
+Django 6 on PostgreSQL 16 and 18.
 
 The script creates an `admin_core` schema. Rename it, or drop the schema statement and let the
 tables land in `public`, to match project convention (then pass `-v schema=public` to
@@ -155,15 +155,16 @@ SET LOCAL search_path = admin_core, public;
 -- them immediate so each refusal below is raised by the statement that caused it.
 SET CONSTRAINTS ALL IMMEDIATE;
 
--- Runs one statement that must be refused with the given SQLSTATE. Any other
--- outcome (allowed, or refused for a different reason) aborts with XX000.
+-- Runs one statement that must be refused with one of the given SQLSTATEs ('23503', or
+-- '23503|23001' where versions differ). Any other outcome (allowed, or refused for a
+-- different reason) aborts with XX000.
 CREATE FUNCTION pg_temp.expect_refused(label text, stmt text, expected text)
 RETURNS void LANGUAGE plpgsql AS $f$
 BEGIN
     BEGIN
         EXECUTE stmt;
     EXCEPTION WHEN OTHERS THEN
-        IF SQLSTATE = expected THEN
+        IF SQLSTATE = ANY (string_to_array(expected, '|')) THEN
             RAISE NOTICE 'ok: % refused (%)', label, SQLSTATE;
             RETURN;
         END IF;
@@ -237,7 +238,9 @@ BEGIN
     PERFORM pg_temp.expect_refused('UPDATE approval_decision', 'UPDATE approval_decision SET decision = ''approved'' WHERE request_id = ' || req, 'P0001');
     PERFORM pg_temp.expect_refused('DELETE approval_decision', 'DELETE FROM approval_decision WHERE request_id = ' || req, 'P0001');
     PERFORM pg_temp.expect_refused('TRUNCATE approval_decision CASCADE', 'TRUNCATE approval_decision CASCADE', 'P0001');
-    PERFORM pg_temp.expect_refused('DELETE approval_request with decisions', 'DELETE FROM approval_request WHERE id = ' || req, '23503');
+    -- PostgreSQL 18 reports an ON DELETE RESTRICT refusal as 23001 (restrict_violation);
+    -- older versions, and NO ACTION keys such as Django's, report 23503.
+    PERFORM pg_temp.expect_refused('DELETE approval_request with decisions', 'DELETE FROM approval_request WHERE id = ' || req, '23503|23001');
     SELECT count(*) INTO n FROM approval_decision WHERE request_id = req;
     IF n <> 1 THEN RAISE EXCEPTION 'VERIFY FAILED: the rejection did not survive (% rows)', n USING ERRCODE = 'XX000'; END IF;
 

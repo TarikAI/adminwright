@@ -157,6 +157,9 @@ jobs:
             django: "django>=5.2,<6"
           - postgres: "16"
             django: "django>=6,<7"
+          # 18 reports ON DELETE RESTRICT refusals as 23001, not 23503: keep it in the matrix.
+          - postgres: "18"
+            django: "django>=6,<7"
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
