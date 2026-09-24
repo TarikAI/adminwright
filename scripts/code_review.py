@@ -92,6 +92,7 @@ import argparse
 import codecs
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -141,6 +142,12 @@ ENV_TIMEOUT = "ADMINWRIGHT_OCR_TIMEOUT"
 # A review can legitimately run for minutes (endpoint mode calls an LLM per
 # file); this only bounds a hang. --timeout / ADMINWRIGHT_OCR_TIMEOUT raise it.
 DEFAULT_TIMEOUT_SECONDS = 900
+
+# The most either may ask for. A day is far past any real review, and it keeps
+# the value inside what the platform's waits accept: `--timeout 1e30` used to
+# make communicate() raise OverflowError, which left ocr running and exited 1
+# ("findings recorded") with a traceback. A non-finite value is refused.
+MAX_TIMEOUT_SECONDS = 24 * 3600
 
 # A review bundle nobody recorded within this long is treated as abandoned.
 BUNDLE_TTL_SECONDS = 24 * 3600
@@ -256,18 +263,35 @@ def command_prefix(executable):
 
 
 def ocr_timeout(args=None):
-    """Seconds one ocr call may run: --timeout, else ADMINWRIGHT_OCR_TIMEOUT, else 900."""
+    """Seconds one ocr call may run: --timeout, else ADMINWRIGHT_OCR_TIMEOUT, else 900.
+
+    Finite and positive, and at most MAX_TIMEOUT_SECONDS (a larger value is
+    lowered to it, with a note).
+    """
     value = getattr(args, "timeout", None)
+    source = "--timeout"
     if value is None:
         raw = os.environ.get(ENV_TIMEOUT, "").strip()
         if not raw:
             return DEFAULT_TIMEOUT_SECONDS
+        source = ENV_TIMEOUT
         try:
             value = float(raw)
         except ValueError:
             raise ReviewError(ENV_TIMEOUT + " must be a number of seconds, not '" + raw + "'")
-    if not value > 0:
+    if not value > 0:  # NaN fails this too
         raise ReviewError("the ocr timeout must be a positive number of seconds")
+    if math.isinf(value):
+        raise ReviewError(
+            source + " must be a finite number of seconds, at most " + str(MAX_TIMEOUT_SECONDS)
+            + "; ocr runs are always bounded"
+        )
+    if value > MAX_TIMEOUT_SECONDS:
+        stderr(
+            "note: " + source + " " + format(value, "g") + " is above the "
+            + str(MAX_TIMEOUT_SECONDS) + "-second maximum; using " + str(MAX_TIMEOUT_SECONDS)
+        )
+        return MAX_TIMEOUT_SECONDS
     return value
 
 
@@ -318,7 +342,10 @@ def run_bounded(command, env, timeout):
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
         raise
-    except KeyboardInterrupt:
+    except BaseException:
+        # Ctrl-C, or anything communicate() itself raises (an OverflowError
+        # from a wait the platform could not honour once left the review
+        # running): whatever happens here, ocr and its children do not outlive it.
         kill_tree(proc)
         raise
     return subprocess.CompletedProcess(command, proc.returncode, stdout, errors)
@@ -1614,7 +1641,8 @@ def build_parser():
     )
     timeout_help = (
         "seconds one ocr call may run before it is stopped (default "
-        + str(DEFAULT_TIMEOUT_SECONDS) + " or ADMINWRIGHT_OCR_TIMEOUT)"
+        + str(DEFAULT_TIMEOUT_SECONDS) + " or ADMINWRIGHT_OCR_TIMEOUT; at most "
+        + str(MAX_TIMEOUT_SECONDS) + ")"
     )
 
     diff_parser = subparsers.add_parser(

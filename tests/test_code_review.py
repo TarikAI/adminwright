@@ -1430,6 +1430,41 @@ class Timeouts(TempConsole):
             self.assertNotIn("Traceback", err)
         self.assertEqual(self.ocr_calls(), [])
 
+    def test_a_non_finite_timeout_is_refused_before_ocr_runs(self):
+        # `--timeout inf` crashed communicate() with OverflowError: exit 1
+        # ("findings recorded"), a traceback, and ocr left running.
+        for command, args, env in (
+            ("diff", ("--timeout", "inf"), {}),
+            ("diff", ("--timeout", "nan"), {}),
+            ("scan", (), {"ADMINWRIGHT_OCR_TIMEOUT": "inf"}),
+            ("diff", (), {"ADMINWRIGHT_OCR_TIMEOUT": "-Infinity"}),
+        ):
+            code, _out, err = self.review(command, "--manifest", self.manifest, *args, env=env)
+            self.assertEqual(code, 2, (command, args, env, err))
+            self.assertNotIn("Traceback", err)
+        self.assertEqual(self.ocr_calls(), [])
+
+    def test_a_huge_timeout_is_lowered_to_the_maximum_not_a_crash(self):
+        for command, args, env in (
+            ("diff", ("--timeout", "1e30"), {}),
+            ("scan", (), {"ADMINWRIGHT_OCR_TIMEOUT": "1e30"}),
+        ):
+            code, _out, err = self.review(command, "--manifest", self.manifest, *args, env=env)
+            self.assertIn(code, (0, 1), (command, err))
+            self.assertNotIn("Traceback", err)
+            self.assertIn("using " + str(bridge.MAX_TIMEOUT_SECONDS), err)
+        self.assertEqual(bridge.ocr_timeout(mock.Mock(timeout=1e30)), bridge.MAX_TIMEOUT_SECONDS)
+        self.assertEqual(bridge.ocr_timeout(mock.Mock(timeout=120.0)), 120.0)
+
+    def test_ocr_is_stopped_whatever_communicate_raises(self):
+        proc = mock.Mock(pid=4242)
+        proc.communicate.side_effect = OverflowError("timestamp out of range for platform time_t")
+        with mock.patch.object(bridge.subprocess, "Popen", return_value=proc):
+            with mock.patch.object(bridge, "kill_tree") as kill:
+                with self.assertRaises(OverflowError):
+                    bridge.run_bounded(["ocr"], {}, 5)
+        kill.assert_called_once_with(proc)
+
     def test_a_slow_but_finishing_ocr_is_not_cut_off(self):
         self.diff("--timeout", "20", env={"FAKE_SLEEP": "0.5"})
 

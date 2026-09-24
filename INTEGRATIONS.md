@@ -98,7 +98,7 @@ ocr config set model <model-id-from-the-gateway>
 |---|---|
 | `ADMINWRIGHT_OCR_BIN` | The `ocr` executable to run instead of `ocr` on PATH. A value that names no file is an error (exit 2 naming the variable), never "ocr is not on PATH". |
 | `ADMINWRIGHT_NODE_BIN` | Windows npm installs only: the `node` that runs the resolved `ocr.js` (see below). Default: the `node.exe` beside the shim, then `node` on PATH. |
-| `ADMINWRIGHT_OCR_TIMEOUT` | Seconds one `ocr` call may run before it and its child processes are stopped (default 900); `--timeout` on `diff`/`scan` overrides it. |
+| `ADMINWRIGHT_OCR_TIMEOUT` | Seconds one `ocr` call may run before it and its child processes are stopped (default 900); `--timeout` on `diff`/`scan` overrides it. Either must be a finite positive number (`inf` is refused, exit 2); a value above 86400 (a day) is lowered to 86400 with a note. |
 | `OCR_NO_UPDATE` | Set to `1` by the bridge on every `ocr` call. The npm launcher otherwise checks npm for a newer version and can run `npm i -g` in the background each time it starts. |
 
 ### The three commands
