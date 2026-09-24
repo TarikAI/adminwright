@@ -30,6 +30,9 @@
  * another schema, change every SET search_path = public, pg_temp line to it, keeping
  * pg_temp last (it stops a session's temporary tables shadowing the real ones inside
  * the triggers).
+ *
+ * VERSIONS. Laravel 11+. On Laravel 10, timestampTz() defaults to precision 0 (whole
+ * seconds, unlike postgres.sql's timestamptz); pass 6 as its second argument there.
  */
 
 use Illuminate\Database\Migrations\Migration;
