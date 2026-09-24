@@ -631,18 +631,51 @@ class TestFeedbackScope(TempProject):
         self.assertEqual(code, 2)
         self.assertIn("needs a scope", err)
 
+    VALID = ("SKILL.md", "references/verification.md", "scripts", "agents", "scripts/code_review.py",
+             "assets", "assets/admin-core-schema", "assets/admin-core-schema/postgres.sql",
+             "INTEGRATIONS.md", "lessons", "lessons/README.md", "evals")
+    INVALID = ("somewhere", "docs/readme.md", "../SKILL.md", "references/nope-does-not-exist.md",
+               "scripts/../../etc/passwd", "agents/../../x", "./SKILL.md", "/etc/passwd",
+               "references", "skill.md", "scripts\\code_review.py", ".github", "")
+
     def test_valid_scopes_are_accepted(self):
-        for index, scope in enumerate(("SKILL.md", "references/verification.md", "scripts",
-                                       "agents", "scripts/code_review.py")):
-            entry = dict(self.FEEDBACK, id="fb-00" + str(index), scope=scope)
+        for index, scope in enumerate(self.VALID):
+            entry = dict(self.FEEDBACK, id="fb-" + str(100 + index), scope=scope)
             code, _o, err = self.cli("add", "--kind", "feedback", "--json", json.dumps(entry))
             self.assertEqual(code, 0, scope + err)
+        code, out, _err = self.validate(phase="plan")
+        self.assertNotIn("[feedback-scope]", out)
 
     def test_an_invalid_scope_is_refused(self):
-        for scope in ("somewhere", "docs/readme.md", "../SKILL.md"):
+        for scope in self.INVALID:
             entry = dict(self.FEEDBACK, scope=scope)
-            code, _o, _err = self.cli("add", "--kind", "feedback", "--json", json.dumps(entry))
+            code, _o, err = self.cli("add", "--kind", "feedback", "--json", json.dumps(entry))
             self.assertEqual(code, 2, scope)
+            self.assertIn("needs a scope", err, scope)
+
+    def test_validate_warns_on_a_scope_that_names_nothing(self):
+        data = self.read()
+        data["feedback"].append(dict(self.FEEDBACK, status="open",
+                                     scope="references/nope-does-not-exist.md"))
+        self.write(data)
+        code, out, _err = self.validate(phase="plan")
+        self.assertEqual(code, 0)
+        self.assertIn("[feedback-scope]", out)
+        self.assertIn("names nothing that exists in the skill", out)
+
+    def test_feedback_and_lesson_scopes_are_one_vocabulary(self):
+        lessons = self.tmp / "lessons"
+        shutil.copytree(str(SKILL_ROOT / "lessons"), str(lessons))
+        for scope in ("scripts", "agents", "assets/admin-core-schema/postgres.sql", "INTEGRATIONS.md"):
+            args = [a if a != "references/security-governance.md" else scope for a in LESSON]
+            code, _o, err = run(*args, "--lessons-dir", lessons)
+            self.assertEqual(code, 0, scope + err)
+        for scope in ("references", "scripts/../SKILL.md", "references/nope-does-not-exist.md"):
+            args = [a if a != "references/security-governance.md" else scope for a in LESSON]
+            code, _o, _err = run(*args, "--lessons-dir", lessons)
+            self.assertEqual(code, 2, scope)
+        for scope in self.VALID + self.INVALID:
+            self.assertEqual(acm.skill_scope_problem(scope) is None, scope in self.VALID, scope)
 
     def test_an_existing_unscoped_entry_warns(self):
         data = self.read()

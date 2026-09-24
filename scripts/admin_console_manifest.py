@@ -133,13 +133,12 @@ COLLECTION_KEYS = (
 )
 
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
-# The one file or area of the skill a feedback entry would change. Clustering
-# buckets observations by it, so an entry without one lands in "unassigned" and
-# can never group with anything.
-FEEDBACK_SCOPE_PATTERN = re.compile(
-    r"^(?:SKILL\.md|references/[A-Za-z0-9_.-]+\.md|scripts(?:/[A-Za-z0-9_./-]+)?"
-    r"|agents(?:/[A-Za-z0-9_./-]+)?)$"
-)
+# The one file or area of the skill a feedback entry (or a lesson) would change.
+# Clustering buckets observations by it, so an entry without one lands in
+# "unassigned" and can never group with anything. This is only the SHAPE -- a
+# relative path with '/' and no '.', '..' or hidden segment; skill_scope_problem
+# also requires it to exist in the skill.
+FEEDBACK_SCOPE_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$")
 _PLACEHOLDER_WORDS = (
     r"mock(?:s|ed|ing)?|fake(?:s|d)?|stub(?:s|bed|bing)?|dumm(?:y|ies)"
     r"|placeholder(?:s)?|lorem|demo-only|todo(?:s)?|tbd|fixme|coming-soon|wip|xxx+"
@@ -2644,13 +2643,13 @@ def validate_gaps(manifest, findings, release):
         check_required(item, ("id", "observation", "category", "proposedChange", "evidence", "status"), path, findings)
         check_enum(item.get("category"), FEEDBACK_CATEGORIES, path + ".category", findings, "category")
         check_enum(item.get("status"), FEEDBACK_STATUSES, path + ".status", findings, "status")
-        if item.get("status") == "open" and not FEEDBACK_SCOPE_PATTERN.match(text_of(item.get("scope"))):
+        scope_problem = skill_scope_problem(item.get("scope")) if item.get("status") == "open" else None
+        if scope_problem:
             findings.add(
                 "feedback-scope",
                 path + ".scope",
-                "name the one thing this would change: a references/<file>.md path, SKILL.md, "
-                "scripts, or agents; an unscoped entry cannot be grouped with the same finding "
-                "from another project",
+                scope_problem + "; " + SKILL_SCOPE_HINT + ". An entry without a valid scope "
+                "cannot be grouped with the same finding from another project",
             )
     # With the feedback checks because only `harvest` reads it: it is how the
     # promotion bar tells one project from another.
@@ -4337,7 +4336,7 @@ LESSON_INDEX_PREAMBLE = (
     "procedure are in [README.md](README.md). The promotion bar is in\n"
     "[../references/skill-evolution.md](../references/skill-evolution.md).\n"
     "\n"
-    "`scope` is skill-root-relative and names the single reference file the rule lands in.\n"
+    "`scope` is skill-root-relative and names the one file or area the rule lands in.\n"
 )
 # `platforms` carries the promotion bar: "seen on two or more distinct
 # projects" is unreadable from an index that does not name the projects.
@@ -4882,10 +4881,11 @@ def cmd_add(args):
                 raise ManifestError(kind + " '" + entry_id + "' already exists" + duplicate_where)
             if entry_id in batch_ids:
                 raise ManifestError(kind + " '" + entry_id + "' appears twice in this batch")
-            if kind == "feedback" and not FEEDBACK_SCOPE_PATTERN.match(text_of(entry.get("scope"))):
+            if kind == "feedback" and skill_scope_problem(entry.get("scope")):
                 raise ManifestError(
-                    "feedback '" + entry_id + "' needs a scope: the one thing it would change, "
-                    "as a references/<file>.md path, SKILL.md, scripts, or agents"
+                    "feedback '" + entry_id + "' needs a scope: its scope "
+                    + json.dumps(entry.get("scope")) + " " + skill_scope_problem(entry.get("scope"))
+                    + "; " + SKILL_SCOPE_HINT
                 )
             batch_ids.add(entry_id)
         collection.extend(entries)
@@ -5897,11 +5897,51 @@ def clean_block(text):
     )
 
 
-def scope_exists(scope, lessons_dir):
-    relative = Path(scope)
-    if relative.is_absolute() or ".." in relative.parts:
-        return False
-    return any((base / relative).is_file() for base in (Path(lessons_dir).parent, SKILL_ROOT))
+SKILL_SCOPE_HINT = (
+    "name the one file or area of the skill it would change, as a path from the skill root "
+    "that exists, e.g. SKILL.md, references/architecture.md, scripts, agents, "
+    "assets/admin-core-schema, lessons or INTEGRATIONS.md"
+)
+
+
+def skill_path_exists(root, relative):
+    """Whether root/relative exists, matching every segment's case exactly.
+
+    Exact case on every platform: 'skill.md' exists on Windows and not on Linux,
+    and a scope must bucket the same way wherever the store was harvested.
+    """
+    current = Path(root)
+    for segment in relative.split("/"):
+        try:
+            if segment not in os.listdir(str(current)):
+                return False
+        except OSError:
+            return False
+        current = current / segment
+    return True
+
+
+def skill_scope_problem(scope, roots=None):
+    """None when `scope` names an existing file or area of the skill, else what is wrong.
+
+    The one validator for feedback[].scope (add refuses, validate warns) and
+    `lesson add --scope`: they used to disagree -- feedback accepted a
+    nonexistent references/nope.md and 'scripts/../../etc/passwd' but refused
+    assets/, INTEGRATIONS.md and lessons/, while lesson add refused the bare
+    'scripts' and 'agents' scopes that feedback and promote use.
+    """
+    value = scope.strip() if isinstance(scope, str) else ""
+    if not value:
+        return "is missing"
+    if "\\" in value:
+        return "uses '\\'; write the path with '/'"
+    if not FEEDBACK_SCOPE_PATTERN.match(value):
+        return "is not a relative path inside the skill (no leading '/', and no '.', '..' or hidden segments)"
+    if value == "references":
+        return "names the whole references/ folder; name the one reference file"
+    if any(skill_path_exists(root, value) for root in (roots or (SKILL_ROOT,))):
+        return None
+    return "names nothing that exists in the skill"
 
 
 def build_lesson_text(lesson_id, args, date):
@@ -5972,11 +6012,12 @@ def cmd_lesson_add(args):
     else:
         outbox = True
         lessons_dir = global_store_dir() / "outbox" / "lessons"
-    if not scope_exists(args.scope, lessons_dir):
-        raise ManifestError(
-            "--scope '" + args.scope + "' is not an existing file under the skill root; name the "
-            "one reference the rule lands in, e.g. references/architecture.md"
-        )
+    # An explicit --lessons-dir may sit in another clone of the skill: accept a
+    # scope that exists there too.
+    roots = (lessons_dir.parent, SKILL_ROOT) if args.lessons_dir else (SKILL_ROOT,)
+    problem = skill_scope_problem(args.scope, roots)
+    if problem:
+        raise ManifestError("--scope " + json.dumps(args.scope) + " " + problem + "; " + SKILL_SCOPE_HINT)
     try:
         lessons_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:

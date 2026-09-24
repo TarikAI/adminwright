@@ -61,7 +61,7 @@ The frontmatter runs from the first line `---` to the next line that is exactly 
 | `title` | one line | the rule in imperative form, not the symptom |
 | `date` | `"YYYY-MM-DD"` | the date the lesson was opened, never edited afterwards; `lesson add` refuses anything that is not a calendar date in that form |
 | `category` | `gap` \| `friction` \| `incorrect-guidance` \| `new-pattern` \| `tooling` | same vocabulary as `feedback[].category` in the manifest; may be re-classified at review, with a `Review notes` line |
-| `scope` | a reference path, skill-root-relative, e.g. `references/architecture.md` | exactly one file, and it must exist. A rule that needs two files is two lessons or one badly placed rule |
+| `scope` | the one file or area the rule lands in, skill-root-relative: a file such as `references/architecture.md` or `SKILL.md`, or an area such as `scripts`, `agents` or `assets/admin-core-schema` | it must exist in the skill; the bare `references` folder is refused, name the reference. `lesson add` accepts exactly what `feedback[].scope` accepts, so a promoted candidate's scope is copied as is. A rule that needs two references is two lessons or one badly placed rule |
 | `status` | `proposed` \| `adopted` \| `rejected` \| `superseded` | see section 7 |
 | `confidence` | `observed-once` \| `repeated` \| `confirmed` | see below |
 | `platforms` | list of archetypes and stack seams seen | written empty; fill from the manifest's `platform.archetypes` and `platform.stack`. Must be non-empty before adoption |
@@ -117,7 +117,8 @@ arguments and creates the last two empty.
    Confirm the target reference stays under 400 lines.
 5. Run the regression check: would this rule have blocked a build that shipped correctly?
    If yes, scope it or reject it.
-6. Edit the one reference named in `scope`. One lesson, one file, one edit.
+6. Edit the one file named in `scope` (for an area scope such as `scripts`, the file
+   `Proposed edit` names). One lesson, one file, one edit.
 7. Set `status: adopted`, append a dated review note, and update the row in
    [index.md](index.md) in the same edit.
 8. Close the originating manifest entry with

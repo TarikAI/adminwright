@@ -97,7 +97,7 @@ Commands, and exactly what each writes:
 | Share, opt-in | `promote --export <file>` | a sanitised bundle; sharing happens only when you open a pull request |
 | Weigh contributions | `promote --include-community` | nothing; adds contributed evidence to the bar calculation |
 | Read the queue | `lesson list --status proposed` | nothing |
-| Adopt | edit of the one reference named in `scope` | the guidance change |
+| Adopt | edit of the one file named in `scope`, or in `Proposed edit` for an area scope | the guidance change |
 | Close the lesson | edit of the lesson frontmatter and its index row to `status: adopted` | the lesson and the index |
 | Close the project entry | `set --manifest <path> --path 'feedback[fb-003].status' --value promoted` | the manifest entry |
 
@@ -150,8 +150,9 @@ Before opening, run `lesson list` and read the `rejected` and `adopted` entries.
 idea matches a rejected lesson, either add new evidence from a distinct project to that
 lesson or drop it. Do not open a second file for the same idea.
 
-`lesson add` requires a title, a category from the feedback vocabulary, a `scope` (the single
-reference file the rule would land in, named by its inventory path; it must exist), a
+`lesson add` requires a title, a category from the feedback vocabulary, a `scope` (the one
+file or area the rule would land in, skill-root-relative; it must exist, and it is checked
+exactly as `feedback[].scope` is, so a promoted candidate's scope is copied as is), a
 trigger, and a rule. It writes the frontmatter and the five headings exactly as
 [../lessons/README.md](../lessons/README.md) documents them, with `status: proposed`,
 `confidence: observed-once` (or `--confidence repeated|confirmed`), `platforms` from
@@ -161,7 +162,8 @@ trigger, and a rule. It writes the frontmatter and the five headings exactly as
 adopted id) cannot drift; `lesson index` does the same on demand. Outside a git checkout of
 the skill it writes to `$ADMINWRIGHT_HOME/outbox/lessons/` instead. Fill `platforms` from the project manifest's
 `platform.archetypes` and `platform.stack` before review. A lesson cannot be adopted with
-empty `platforms`, an empty `Proposed edit`, or a `scope` that is not a real reference file.
+empty `platforms`, an empty `Proposed edit`, or a `scope` that does not exist in the skill; an
+area scope such as `scripts` is narrowed to the file it changes in `Proposed edit`.
 
 Field definitions and status transitions are in [../lessons/README.md](../lessons/README.md).
 
