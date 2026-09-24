@@ -2149,50 +2149,202 @@ class AdvisoryPins(unittest.TestCase):
         self.assertIn({"dependency-name": "alibaba/open-code-review"}, actions["ignore"])
 
 
+def load_fixture_module(name):
+    spec = importlib.util.spec_from_file_location("ocr_fixture_" + name, OCR_FIXTURES / (name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Variables that would point ocr at another endpoint or config than the test's.
+OCR_ENDPOINT_VARIABLES = (
+    "OCR_CONFIG_PATH", "OCR_LLM_URL", "OCR_LLM_TOKEN", "OCR_LLM_MODEL",
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
+)
+
+
 @unittest.skipUnless(
-    os.environ.get("ADMINWRIGHT_REAL_OCR") and shutil.which("ocr"),
+    os.environ.get("ADMINWRIGHT_REAL_OCR"),
     "opt-in: set ADMINWRIGHT_REAL_OCR=1 with the real ocr CLI installed",
 )
-class RealCliSmoke(unittest.TestCase):
-    """Check the command surface against a real ocr install when one exists.
+class RealCliSmoke(TempConsole):
+    """The bridge against the real `ocr` CLI (opt-in: ADMINWRIGHT_REAL_OCR=1).
 
-    Every other test fakes the binary through ADMINWRIGHT_OCR_BIN and accepts
-    any flags; this is the only guard against a renamed flag or subcommand
-    reaching users. Opt-in (ADMINWRIGHT_REAL_OCR=1) so an ordinary test run
-    never executes a globally installed CLI that phones home; skipped where
-    ocr is absent, because the bridge itself is optional. It only runs
-    `ocr <subcommand> --help`, with the update check switched off.
+    Every other test fakes the binary and accepts any flag, which is how a
+    renamed flag, or a reply in words the bridge did not expect (R2), could
+    reach users while the suite stayed green. So this class
+
+    * derives every subcommand and flag the bridge passes from the bridge
+      itself (run against the argv-logging fake), then finds each in the real
+      `ocr <subcommand> --help`: a flag added to the bridge is covered with
+      no table to update;
+    * runs real reviews, a real scan and a real delegate diff through the
+      bridge against fake_llm.FakeLLM, a stand-in OpenAI-compatible endpoint
+      on 127.0.0.1, and checks what the bridge makes of the replies.
+
+    HOME, USERPROFILE, APPDATA and LOCALAPPDATA point into the test's own
+    directory and OCR_NO_UPDATE=1 for every ocr run, so the user's
+    ~/.opencodereview is never read or written (the npm launcher reads, and
+    may delete, an update hint there even for --help). With the variable set
+    and no `ocr` on PATH the class fails instead of skipping: whoever opted in
+    asked for the real CLI. CI's ocr-smoke job runs it against the version
+    ocr-advisory.yml pins and against npm's latest.
     """
 
-    def help_text(self, *args):
-        executable = shutil.which("ocr")
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not shutil.which("ocr"):
+            raise AssertionError("ADMINWRIGHT_REAL_OCR is set, but no `ocr` is on PATH")
+        cls.fake_llm = load_fixture_module("fake_llm")
+        cls.capture = load_fixture_module("capture")
+
+    def isolated_env(self):
+        """env overrides for run(): a private home, and no inherited endpoint."""
+        home = self.tmp / "ocr-home"
+        env = {
+            "ADMINWRIGHT_OCR_BIN": None, "ADMINWRIGHT_NODE_BIN": None, "OCR_NO_UPDATE": "1",
+            "HOME": str(home), "USERPROFILE": str(home),
+            "APPDATA": str(home / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(home / "AppData" / "Local"),
+        }
+        for key in ("APPDATA", "LOCALAPPDATA"):
+            Path(env[key]).mkdir(parents=True, exist_ok=True)
+        env.update((key, None) for key in OCR_ENDPOINT_VARIABLES)
+        return env
+
+    def real_ocr(self, *args):
+        """Run the real ocr itself (as the bridge would launch it), isolated."""
         env = dict(os.environ)
-        env["OCR_NO_UPDATE"] = "1"
+        for key, value in self.isolated_env().items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
         proc = subprocess.run(
-            [executable, *args, "--help"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
+            bridge.command_prefix(shutil.which("ocr")) + list(args),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=env, stdin=subprocess.DEVNULL,
         )
-        self.assertEqual(proc.returncode, 0, "ocr " + " ".join(args) + " --help failed")
-        return (proc.stdout or "") + (proc.stderr or "")
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
-    def test_flags_the_bridge_passes_exist(self):
-        for args, flags in (
-            (("review",), ("--audience", "--format", "--rule")),
-            (("scan",), ("--audience", "--format", "--rule")),
-            (("delegate", "preview"), ("--format", "--rule")),
-            (("delegate", "rule"), ("--format", "--rule")),
-        ):
-            text = self.help_text(*args)
-            for flag in flags:
-                self.assertIn(flag, text, flag + " missing from ocr " + " ".join(args))
+    def help_text(self, *subcommand):
+        code, text = self.real_ocr(*(subcommand + ("--help",)))
+        self.assertEqual(code, 0, "ocr " + " ".join(subcommand) + " --help failed: " + text)
+        return text
 
-    def test_helper_subcommands_from_integrations_exist(self):
-        self.assertIn("set", self.help_text("config"))
-        self.assertIn("check", self.help_text("rules"))
+    def bridge_argv(self):
+        """Every argv the bridge hands ocr, from each command shape it has."""
+        self.diff("--from", "main", "--to", "feature")
+        self.diff("--commit", "abc1234")
+        for extra in (("--from", "main", "--to", "feature"), ("--commit", "abc1234")):
+            code, _out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr", *extra)
+            self.assertEqual(code, 1, err)
+        code, _out, err = self.review("scan", "--manifest", self.manifest, "--path", "src")
+        self.assertEqual(code, 1, err)
+        return [call["args"] for call in self.ocr_calls()]
+
+    def test_every_subcommand_and_flag_the_bridge_passes_exists(self):
+        seen = {}
+        for argv in self.bridge_argv():
+            words = []
+            for token in argv:
+                if token.startswith("-"):
+                    break
+                words.append(token)
+            subcommand = tuple(words[:2]) if words[:1] == ["delegate"] else tuple(words[:1])
+            seen.setdefault(subcommand, set()).update(t for t in argv if t.startswith("--"))
+        # The table is derived, so first prove the derivation saw every shape.
+        self.assertEqual(sorted(seen), [("delegate", "preview"), ("delegate", "rule"), ("review",), ("scan",)])
+        for subcommand in (("delegate", "preview"), ("review",)):
+            self.assertTrue({"--from", "--to", "--commit", "--repo", "--rule"} <= seen[subcommand], seen)
+        self.assertTrue({"--path", "--audience", "--format"} <= seen[("scan",)], seen)
+        self.assertTrue({"--audience", "--format"} <= seen[("review",)], seen)
+        for subcommand, flags in sorted(seen.items()):
+            text = self.help_text(*subcommand)
+            for flag in sorted(flags):
+                self.assertRegex(
+                    text, r"(?m)^\s+(?:-\w, )?" + re.escape(flag) + r"\b",
+                    flag + " is not a flag of `ocr " + " ".join(subcommand) + "`",
+                )
+        # `delegate rule` takes the reviewable files as positionals, after the flags.
+        self.assertIn("<path", self.help_text("delegate", "rule"))
+
+    def test_helper_commands_from_integrations_exist(self):
+        code, text = self.real_ocr("--version")
+        self.assertEqual(code, 0, text)
+        self.assertIn("open-code-review", text)
+        self.assertRegex(self.help_text("config"), r"(?m)^\s+set\b")
+        self.assertRegex(self.help_text("config"), r"(?m)^\s+provider\b")
+        self.assertRegex(self.help_text("config"), r"(?m)^\s+model\b")
+        self.assertRegex(self.help_text("rules"), r"(?m)^\s+check\b")
+        self.assertRegex(self.help_text("rules", "check"), r"(?m)^\s+--rule\b")
+
+    # -- real runs against the stand-in endpoint ---------------------------------
+
+    def make_repository(self):
+        """self.root as a git repository whose workspace changes four files."""
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        capture = self.capture
+        capture.git(str(self.root), "init", "-q")
+        capture.write_files(str(self.root), capture.BASE)
+        capture.git(str(self.root), "add", "--", *sorted(capture.BASE))
+        capture.git(str(self.root), "commit", "-q", "-m", "base")
+        capture.write_files(str(self.root), capture.CHANGES)
+
+    def through_bridge(self, *args, **llm_options):
+        with self.fake_llm.FakeLLM(comments=self.capture.COMMENTS, **llm_options) as llm:
+            env = self.isolated_env()
+            self.fake_llm.isolated_ocr_home(env["HOME"], llm.url)
+            return run(SCRIPT, *args, env=env)
+
+    def recorded_lines(self):
+        return sorted((gap["severity"], gap["description"].split(" — ")[0]) for gap in self.gaps())
+
+    def test_a_real_complete_review_is_recorded(self):
+        self.make_repository()
+        code, out, err = self.through_bridge("diff", "--manifest", self.manifest, "--engine", "ocr")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("2 finding(s) recorded as gaps", out)
+        self.assertEqual(self.recorded_lines(), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+
+    def test_a_real_partial_review_records_the_rest_and_names_the_failed_file(self):
+        self.make_repository()
+        code, out, err = self.through_bridge(
+            "diff", "--manifest", self.manifest, "--engine", "ocr", fail_paths=["src/b.py"]
+        )
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("2 finding(s) recorded as gaps", out)
+        self.assertIn("could not review 1 file(s)", err)
+        self.assertIn("src/b.py (provider", err)
+        self.assertEqual(self.recorded_lines(), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+
+    def test_a_real_scan_is_recorded(self):
+        self.make_repository()
+        code, out, err = self.through_bridge("scan", "--manifest", self.manifest, "--path", "src")
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.recorded_lines(), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+
+    def test_a_real_delegate_diff_bundles_exactly_the_changed_files(self):
+        self.make_repository()
+        code, out, err = self.through_bridge("diff", "--manifest", self.manifest, "--agent", "smoke")
+        self.assertEqual(code, 0, out + err)
+        bundle = json.loads(self.only_bundle().read_text(encoding="utf-8"))
+        self.assertEqual(
+            sorted(entry["path"] for entry in bundle["reviewable_files"]),
+            ["src/a.py", "src/b.py", "src/c.py", "src/d.py"],  # not README.md, not .admin-console/
+        )
+        self.assertTrue(bundle["rule_groups"])
+
+    def test_a_real_review_without_a_provider_gets_the_set_up_hint(self):
+        self.make_repository()
+        code, out, err = run(
+            SCRIPT, "diff", "--manifest", self.manifest, "--engine", "ocr", env=self.isolated_env()
+        )
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("ocr config provider", err)
+        self.assertEqual(self.gaps(), [])
 
 
 if __name__ == "__main__":
