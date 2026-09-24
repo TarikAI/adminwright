@@ -54,6 +54,14 @@ DIFFERENCES FROM postgres.sql that Django's ORM imposes (all deliberate):
     unique constraint below keeps the pair unique either way.
   * admin_actor.email is an EmailField (varchar) rather than citext, and Django's
     Now() is STATEMENT_TIMESTAMP() where postgres.sql uses now() (transaction start).
+  * Record-keeping timestamps (created_at, recorded_at, decided_at, changed_at) use
+    auto_now_add: the ORM stamps the current time whatever a caller passes.
+    Business timestamps (starts_at, granted_at, activated_at, started_at,
+    requested_at, queued_at, failed_at, received_at) use default=timezone.now, so a
+    caller can schedule a grant to start later or record a request received by post
+    on the day it arrived, as postgres.sql's plain defaults allow.
+  * The id columns assume DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+    (startproject's default), matching postgres.sql's bigserial keys.
   * Django FKs are DEFERRABLE INITIALLY DEFERRED, and on_delete is enforced by the
     ORM: PROTECT is NO ACTION in the database (which also blocks the delete, at
     commit rather than at the statement) and CASCADE is emulated by the ORM, so a
@@ -73,6 +81,7 @@ from datetime import timedelta
 from django.db import models
 from django.db.models import F, Func, Q, Value
 from django.db.models.functions import Coalesce, Now
+from django.utils import timezone
 
 
 class GenRandomUUID(Func):
@@ -229,7 +238,7 @@ class AdminActorRole(models.Model):
     )
     scope = models.JSONField(default=dict, db_default={})
     scope_tenant_id = models.TextField(null=True, blank=True)  # denormalized hot path
-    starts_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+    starts_at = models.DateTimeField(default=timezone.now, db_default=Now())
     expires_at = models.DateTimeField(null=True, blank=True)  # null = permanent
     granted_by = models.ForeignKey(
         AdminActor,
@@ -240,7 +249,7 @@ class AdminActorRole(models.Model):
     )
     granted_reason = models.TextField()
     ticket_ref = models.TextField(null=True, blank=True)
-    granted_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+    granted_at = models.DateTimeField(default=timezone.now, db_default=Now())
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_by = models.ForeignKey(
         AdminActor,
@@ -302,7 +311,7 @@ class AdminPolicyVersion(models.Model):
     version = models.TextField()  # unique: see Meta.constraints
     source_ref = models.TextField()  # manifest capability.authorizationPolicies[]
     checksum = models.TextField()
-    activated_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+    activated_at = models.DateTimeField(default=timezone.now, db_default=Now())
     retired_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -491,7 +500,7 @@ class ImpersonationSession(models.Model):
     # Opting into write impersonation is a deliberate, separately permissioned act.
     read_only = models.BooleanField(default=True, db_default=True)
     scope_restrictions = models.JSONField(default=dict, db_default={})
-    started_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+    started_at = models.DateTimeField(default=timezone.now, db_default=Now())
     expires_at = models.DateTimeField()
     ended_at = models.DateTimeField(null=True, blank=True)
     ended_reason = models.TextField(null=True, blank=True)
@@ -581,7 +590,7 @@ class ApprovalRequest(models.Model):
         db_column="requested_by",
         db_index=False,
     )
-    requested_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+    requested_at = models.DateTimeField(default=timezone.now, db_default=Now())
     reason = models.TextField()
     required_approvals = models.SmallIntegerField(default=1, db_default=1)
     state = models.CharField(
@@ -702,7 +711,7 @@ class AdminJob(models.Model):
     total_count = models.IntegerField(null=True, blank=True)
     processed_count = models.IntegerField(default=0, db_default=0)
     failed_count = models.IntegerField(default=0, db_default=0)
-    queued_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+    queued_at = models.DateTimeField(default=timezone.now, db_default=Now())
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     result_artifact = models.TextField(null=True, blank=True)
@@ -761,7 +770,7 @@ class AdminJobFailure(models.Model):
     target_id = models.TextField()
     error_code = models.TextField()
     error_detail = models.TextField(null=True, blank=True)
-    failed_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+    failed_at = models.DateTimeField(default=timezone.now, db_default=Now())
 
     class Meta:
         db_table = "admin_job_failure"
@@ -953,7 +962,7 @@ class ExportRequest(models.Model):
     row_count = models.IntegerField(null=True, blank=True)
     byte_size = models.BigIntegerField(null=True, blank=True)
     artifact_ref = models.TextField(null=True, blank=True)
-    requested_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+    requested_at = models.DateTimeField(default=timezone.now, db_default=Now())
     ready_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField()
     download_count = models.IntegerField(default=0, db_default=0)
@@ -999,7 +1008,7 @@ class DataSubjectRequest(models.Model):
     kind = models.CharField(max_length=16, choices=Kind.choices)
     subject_ref = models.TextField()
     tenant_id = models.TextField(null=True, blank=True)
-    received_at = models.DateTimeField(auto_now_add=True, db_default=Now())
+    received_at = models.DateTimeField(default=timezone.now, db_default=Now())
     due_at = models.DateTimeField()
     state = models.CharField(
         max_length=16, choices=State.choices, default=State.OPEN, db_default="open"

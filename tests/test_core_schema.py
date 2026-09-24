@@ -1567,6 +1567,25 @@ class TestPackContents(unittest.TestCase):
             self.assertIn(column, m.columns[table])
             self.assertNotIn(column + "_id", m.columns[table])
 
+    def test_django_keeps_caller_supplied_business_timestamps(self):
+        # audit finding 5.5 (round 2): auto_now_add overwrote starts_at, received_at ..., so a grant
+        # scheduled for next week went live at once. Only record-keeping columns may use it.
+        stamped = set()
+        for cls in ast.parse(read("django_models.py")).body:
+            if not isinstance(cls, ast.ClassDef):
+                continue
+            for stmt in cls.body:
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+                    kw = {k.arg: k.value for k in stmt.value.keywords}
+                    if isinstance(kw.get("auto_now_add"), ast.Constant) and kw["auto_now_add"].value:
+                        stamped.add(stmt.targets[0].id)
+        self.assertEqual(stamped, {"created_at", "recorded_at", "decided_at", "changed_at"})
+        src = read("django_models.py")
+        for field in ("starts_at", "granted_at", "activated_at", "started_at", "requested_at", "queued_at",
+                      "failed_at", "received_at"):
+            with self.subTest(field=field):
+                self.assertRegex(src, r"\b%s = models\.DateTimeField\(default=timezone\.now, db_default=Now\(\)\)" % field)
+
     def test_prisma_states_every_relation_action(self):
         # audit finding 5.6: an optional relation defaults to SetNull.
         src = re.sub(r"//[^\n]*", "", read("prisma.schema"))

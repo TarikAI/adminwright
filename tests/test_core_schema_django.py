@@ -82,6 +82,50 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 USE_TZ = True
 """
 
+# Runs inside the throwaway project through the ORM, the way application code would.
+ORM_PROBE = """\
+import datetime
+import django
+
+django.setup()
+from django.utils import timezone
+from admin_core.models import (AdminActor, AdminActorRole, AdminPermission, AdminRole, ApprovalRequest,
+                               DataSubjectRequest)
+
+alice = AdminActor.objects.create(auth_subject="orm-alice", display_name="Alice")
+carol = AdminActor.objects.create(auth_subject="orm-carol", display_name="Carol")
+role = AdminRole.objects.create(key="orm-role", name="ORM")
+
+# business timestamps keep what the caller gives (audit 5.5: auto_now_add overwrote them)
+start = timezone.now() + datetime.timedelta(days=7)
+grant = AdminActorRole.objects.create(actor=alice, role=role, granted_by=carol, granted_reason="scheduled",
+                                      starts_at=start)
+grant.refresh_from_db()
+assert grant.starts_at == start, ("a future grant start was overwritten", grant.starts_at, start)
+received = timezone.now() - datetime.timedelta(days=3)
+dsr = DataSubjectRequest.objects.create(kind="erasure", subject_ref="s1", received_at=received,
+                                        due_at=received + datetime.timedelta(days=30))
+dsr.refresh_from_db()
+assert dsr.received_at == received, ("a backdated receipt was overwritten", dsr.received_at, received)
+
+# ... and still default to now when the caller gives nothing
+role2 = AdminRole.objects.create(key="orm-role-2", name="ORM 2")
+now_grant = AdminActorRole.objects.create(actor=alice, role=role2, granted_by=carol, granted_reason="now")
+now_grant.refresh_from_db()
+assert abs(timezone.now() - now_grant.starts_at) < datetime.timedelta(minutes=5), now_grant.starts_at
+
+# the approval_request trigger lets Django's ordinary full save() change the lifecycle columns
+AdminPermission.objects.create(key="orm.thing", resource="orm", action="thing")
+request = ApprovalRequest.objects.create(command_key_id="orm.thing", payload={"amount": 10, "note": "x"},
+                                         payload_hash="h", target_type="thing", requested_by=alice,
+                                         reason="r", expires_at=timezone.now() + datetime.timedelta(days=1))
+request = ApprovalRequest.objects.get(pk=request.pk)
+request.state = "approved"
+request.save()
+assert ApprovalRequest.objects.get(pk=request.pk).state == "approved"
+print("orm probe ok")
+"""
+
 
 @unittest.skipUnless(ENABLED and django_ready(), SKIP_REASON + "; needs django>=5.1 and psycopg importable")
 class TestDjangoTranslationOnPostgres(PgCase):
@@ -161,6 +205,32 @@ SELECT 'shadow.thing', '{}', 'h', 'thing', id, 'r', now() + interval '1 day' FRO
         )
         self.assertNotEqual(shadowed.returncode, 0, "self-approval behind a temporary approval_request was allowed")
         self.assertIn("separation of duties", shadowed.stderr)
+
+        (project / "orm_probe.py").write_text(ORM_PROBE, encoding="utf-8")
+        probe = subprocess.run([sys.executable, "orm_probe.py"], cwd=str(project), env=env, capture_output=True,
+                               encoding="utf-8", errors="replace", timeout=300)
+        self.assertEqual(probe.returncode, 0, probe.stdout + probe.stderr)
+        self.assertIn("orm probe ok", probe.stdout)
+
+        # The migrated index set is postgres.sql's (audit 5.5): no FK or *_like indexes from Django,
+        # only the documented unique pair standing in for admin_role_permission's composite key.
+        canon = "%s_canon" % db
+        self.psql("postgres", "-c", 'DROP DATABASE IF EXISTS "%s"' % canon)
+        self.psql("postgres", "-c", 'CREATE DATABASE "%s"' % canon)
+        self.dbs.append(canon)
+        self.psql(canon, "-f", str(SCHEMA / "postgres.sql"))
+        query = ("SELECT i.relname || ':' || t.relname || ':' || x.indisunique || ':' || (x.indpred IS NOT NULL) "
+                 "|| ':' || x.indnkeyatts FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid "
+                 "JOIN pg_class t ON t.oid = x.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace "
+                 "WHERE n.nspname = '%s' AND t.relname NOT LIKE 'django%%'")
+        django_indexes = dict(r.split(":", 1) for r in self.scalar(db, query % "public").split())
+        canonical_indexes = dict(r.split(":", 1) for r in self.scalar(canon, query % "admin_core").split())
+        self.assertGreaterEqual(len(canonical_indexes), 40)
+        self.assertEqual(django_indexes.pop("admin_role_permission_pk"),
+                         "admin_role_permission:true:false:2")  # documented stand-in for the composite PK
+        self.assertEqual(django_indexes.pop("admin_role_permission_pkey"), "admin_role_permission:true:false:1")
+        self.assertEqual(canonical_indexes.pop("admin_role_permission_pkey"), "admin_role_permission:true:false:2")
+        self.assertEqual(django_indexes, canonical_indexes)
 
 
 if __name__ == "__main__":
