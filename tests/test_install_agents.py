@@ -1039,6 +1039,61 @@ class TestMachinePaths(InstallBase):
         self.assertTrue(self.project.joinpath(*MACHINE_FILE).is_file())
 
 
+def readme_section(path, heading):
+    """The text of one `## ` section of a Markdown file, subsections included."""
+    text = path.read_text(encoding="utf-8")
+    start = text.index(heading)
+    end = text.find("\n## ", start + 1)
+    return text[start:end if end != -1 else len(text)]
+
+
+# How agents/README.md names each harness in its tables.
+README_LABELS = {
+    "claude-code": "Claude Code",
+    "opencode": "opencode",
+    "codex": "Codex",
+    "gemini": "Gemini CLI",
+    "cursor": "Cursor",
+    "antigravity": "Antigravity",
+    "pi": "Pi",
+}
+
+
+class TestInstallDocs(unittest.TestCase):
+    """What agents/README.md says the installer does must match the sources and
+    the harnesses (ocr-installer#10)."""
+
+    def install_section(self):
+        return readme_section(SKILL_ROOT / "agents" / "README.md",
+                              "## Installing the agents into any harness")
+
+    def test_the_readme_names_every_claude_only_key_the_sources_carry(self):
+        # It said "`tools` and `model` ... are not carried over"; no source has
+        # `tools`, and the reviewers' `disallowedTools` went unmentioned.
+        keys = set()
+        for name in ia.AGENT_ORDER:
+            text = (SKILL_ROOT / "agents" / (name + ".md")).read_text(encoding="utf-8")
+            keys |= set(ia.frontmatter_fields(ia.FRONTMATTER.match(text).group(1)))
+        keys -= {"name", "description"}
+        self.assertIn("disallowedTools", keys)
+        section = self.install_section()
+        for key in sorted(keys):
+            self.assertIn("`" + key + "`", section,
+                          key + " reaches only Claude Code; agents/README.md must say so")
+
+    def test_the_readme_states_the_reviewer_guard_for_every_harness(self):
+        self.assertEqual(set(README_LABELS), set(ia.HARNESSES) - {"generic"},
+                         "a new harness needs a row in the reviewer-guard table")
+        section = self.install_section()
+        rows = dict(re.findall(r"^\| ([^|]+?) \| (Enforced|Not enforced|Not applicable)",
+                               section, re.MULTILINE))
+        for harness, label in README_LABELS.items():
+            self.assertIn(label, rows, harness + ": no reviewer-guard row")
+        self.assertEqual(rows["Claude Code"], "Enforced")
+        self.assertEqual([label for label, state in rows.items() if state == "Enforced"],
+                         ["Claude Code"], "only Claude Code enforces disallowedTools")
+
+
 class TestLineEndingsAndConsole(InstallBase):
     def test_every_written_file_uses_lf_only(self):
         # Path.write_text and open(..., "w") translate \n to \r\n on Windows,

@@ -66,9 +66,14 @@ python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <pr
 | `pi` | none — Pi has no built-in subagents | `.adminwright/agents/` | Pointer block for `AGENTS.md`, same flag |
 | `generic` | none | `.adminwright/agents/` | Any other harness: point it at the files, in the printed order |
 
-Native files carry only the fields that harness documents (`tools` and `model` from the
-Claude Code files are not carried over); `.adminwright/agents/` is the harness-neutral copy
-of the source files. The pointer block is delimited by marker comments, so rerunning with
+Native files carry only the fields their harness documents; `.adminwright/agents/` is the
+harness-neutral copy of the source files. Everything else in the source frontmatter is
+Claude Code-only — `model` (the harvester's `opus`), `disallowedTools` (the reviewers' edit
+guard), and any Claude Code field added later, such as `color` — so only the `claude-code`
+copies act on it; the neutral copy carries it verbatim for reference. Every other harness
+loses the reviewers' edit restriction: see
+[the reviewer edit guard](#the-reviewer-edit-guard-per-harness) below. The pointer block is
+delimited by marker comments, so rerunning with
 `--append-pointer` after the skill moves replaces it in place. Codex, Antigravity and Pi all
 read `AGENTS.md`, so the block there carries one marked section per harness installed into
 it: installing them one after another, in any order, keeps every harness's notes, and a
@@ -104,16 +109,80 @@ harness-specific notes where a harness's default behavior fights the skill:
   and the run closes with the skill's completion-report format with validate/coverage exit
   codes as evidence — never "production-ready" without them.
 - **Native subagents first, sequential passes as the fallback.** Codex, Gemini CLI, Cursor
-  and Antigravity discover the installed agents, so their notes say to dispatch each pass
-  to the agent of the same name (Codex spawns subagents when `AGENTS.md` asks it to). A
-  pass run in the main session instead, and every pass in Pi, announces the switch and
-  re-reads the manifest from disk, so the transcript shows where one role's authority
-  ended.
+  and Antigravity discover the installed agents, and the block names each one's directory;
+  the Codex, Gemini and Cursor notes say to dispatch each pass to the agent of the same name
+  (Codex spawns subagents when `AGENTS.md` asks it to). A pass run in the main session
+  instead, and every pass in Pi, announces the switch and re-reads the manifest from disk,
+  so the transcript shows where one role's authority ended.
 
 Learning transfers across harnesses the same way: conversation history stays in one tool,
 so each agent banks session learnings into the manifest's `feedback[]`, and the harvester
 moves them into the cross-project store (`$ADMINWRIGHT_HOME`, default `~/.adminwright`)
 that every harness shares.
+
+### The reviewer edit guard, per harness
+
+The qa, security and ux-reviewer sources carry `disallowedTools: Edit, NotebookEdit`: a
+reviewer must not edit the code it reviews, yet it still writes its worklog and the
+manifest, and qa writes tests, so file writes and the shell stay available. Only Claude Code
+enforces this; in every other harness the restriction is lost. None of them can say "no
+edit tool, writes allowed" in a project file, and their coarser switches — opencode's
+`permission.edit`, Codex's `sandbox_mode`, Cursor's `readonly` — would block the worklog
+and manifest writes too, so the installer maps the guard to none of them:
+
+| Harness | Guard | What the harness offers |
+|---|---|---|
+| Claude Code | Enforced | `disallowedTools` removes Edit and NotebookEdit; Write and Bash remain, so it stops in-place edits, not every write |
+| opencode | Not enforced | `permission.edit` gates `edit`, `write` and `apply_patch` together; path patterns under it can scope a reviewer's writes by hand |
+| Codex | Not enforced | No per-tool switch for edits; `sandbox_mode = "read-only"` blocks every write, and a parent session's live sandbox settings override the agent file |
+| Gemini CLI | Not enforced by the installer | `tools` is an allowlist of validated names (omitted, it inherits every tool), so dropping `replace` means listing all the others; a user-level policy rule does it cleanly (below) — project-level policies are currently disabled |
+| Cursor | Not enforced | `readonly: true` also blocks file writes and state-changing shell commands |
+| Antigravity | Not enforced | `tools` is an allowlist in which an unknown name can hang the subagent; its permissions gate `write_file` for edits and new files alike |
+| Pi | Not applicable | No subagents |
+
+Review independence does not rest on this guard: the manifest records who implemented and
+who reviewed each capability, and `validate` reports a review recorded by the capability's
+implementer (`reviewer-identity`).
+
+To add the guard to Gemini CLI for your own user, save this as
+`~/.gemini/policies/adminwright.toml`:
+
+```toml
+[[rule]]
+toolName = "replace"
+subagent = "adminwright-qa"
+decision = "deny"
+priority = 500
+denyMessage = "adminwright reviewers file gaps; they do not edit the code they review"
+
+[[rule]]
+toolName = "replace"
+subagent = "adminwright-security"
+decision = "deny"
+priority = 500
+denyMessage = "adminwright reviewers file gaps; they do not edit the code they review"
+
+[[rule]]
+toolName = "replace"
+subagent = "adminwright-ux-reviewer"
+decision = "deny"
+priority = 500
+denyMessage = "adminwright reviewers file gaps; they do not edit the code they review"
+```
+
+### Dispatch names and working trees
+
+In Claude Code the plugin registers the agents in its namespace: dispatch
+`adminwright:adminwright-architect`, `adminwright:adminwright-qa`, and so on. Copies
+installed with `--harness claude-code`, and the agents in every other harness, use the bare
+`adminwright-<role>` names.
+
+Run every pass in the project's own working tree. Do not give adminwright agents a worktree
+of their own — Claude Code's `isolation: worktree`, or Antigravity's `branch` workspace
+option: a worktree has its own copy of the manifest (Claude Code branches it from the default
+branch, not the current HEAD), and the claim locks under `.admin-console/locks/` are
+git-ignored, so passes in different worktrees see neither each other's manifest writes nor
+their claims.
 
 ## Installing the skill elsewhere
 
