@@ -194,11 +194,15 @@ category is recorded as `other` with a notice) and appears in `emit --format gap
 like any other finding. Every such gap carries `source: "ocr"` and never an `entity` or
 `capability` field: the validator ignores OCR-sourced gaps when it decides whether a
 lifecycle state has an accepted escape, so review text that happens to mention a state
-name cannot silence a lifecycle check. The gap's rationale ends in `fp:<12 hex>`, a
-fingerprint of `(path, start_line, content)`: a finding that is already an open, accepted
-or blocked gap is not written again (the summary says `N already recorded`, and the exit
-stays 1 because findings still exist), while a gap marked `fixed` that comes back is
-recorded anew. Findings are written as one atomic batch, so a refused `record` leaves the
+name cannot silence a lifecycle check. Each gap also carries `fingerprint`, 12 hex
+characters identifying `(path, start_line, content)`: a finding that is already an open,
+accepted or blocked gap is not written again (the summary says `N already recorded`, and
+the exit stays 1 because findings still exist), while a gap marked `fixed` that comes back
+is recorded anew. To accept a finding, `set` its `status` to `accepted` and write your own
+accepted-risk `rationale`; the fingerprint lives in its own field, so the next run still
+recognises it (a whole-object `set` that drops the field makes it new again). Gaps recorded
+before the field existed carry the key at the end of their rationale as `fp:<12 hex>`,
+which is honoured for as long as that text stays. Findings are written as one atomic batch, so a refused `record` leaves the
 manifest untouched and re-running after a refusal cannot duplicate gaps. Bundles and raw
 `ocr-*.json` output stay under `.admin-console/` because gaps cite them as evidence; keep
 them with the manifest.

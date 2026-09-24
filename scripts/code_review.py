@@ -539,7 +539,9 @@ def slug_for(path):
 # Gap statuses that still stand for an unresolved finding. A `fixed` gap that
 # OCR reports again is a regression and is recorded anew.
 LIVE_GAP_STATUSES = ("open", "accepted", "blocked")
-FINGERPRINT = re.compile(r"\bfp:([0-9a-f]{12})\b")
+# Gaps recorded before the `fingerprint` field existed carry it at the end of
+# their rationale instead.
+LEGACY_FINGERPRINT = re.compile(r"\bfp:([0-9a-f]{12})\b")
 
 
 def finding_fingerprint(finding):
@@ -555,9 +557,12 @@ def finding_fingerprint(finding):
 def read_gaps(manifest):
     """Best-effort read of gaps[]: (ids taken, fingerprints of live gaps).
 
-    Ids keep new gap ids unique; the fingerprints, stored in each gap's
-    rationale as `fp:<12 hex>`, keep a re-run from recording a finding that is
-    already an open, accepted or blocked gap.
+    Ids keep new gap ids unique; the fingerprints keep a re-run from recording
+    a finding that is already an open, accepted or blocked gap. A gap keeps its
+    fingerprint in its own `fingerprint` field, so accepting it the documented
+    way (status `accepted` plus a rewritten, accepted-risk rationale) does not
+    turn it into a new open gap on the next run. The `fp:<12 hex>` rationale
+    suffix that older gaps carry is still honoured while it is there.
     """
     try:
         data = json.loads(manifest.read_text(encoding="utf-8-sig"))
@@ -573,9 +578,14 @@ def read_gaps(manifest):
             continue
         if isinstance(gap.get("id"), str):
             ids.add(gap["id"])
+        if gap.get("status") not in LIVE_GAP_STATUSES:
+            continue
+        fingerprint = gap.get("fingerprint")
+        if isinstance(fingerprint, str) and fingerprint.strip():
+            prints.add(fingerprint.strip().lower())
         rationale = gap.get("rationale")
-        if gap.get("status") in LIVE_GAP_STATUSES and isinstance(rationale, str):
-            prints.update(FINGERPRINT.findall(rationale))
+        if isinstance(rationale, str):
+            prints.update(LEGACY_FINGERPRINT.findall(rationale))
     return ids, prints
 
 
@@ -702,12 +712,10 @@ def persist_findings(manifest, findings, engine, mode, evidence_path):
                     "severity": finding["severity"],
                     "description": description,
                     "status": "open",
-                    "rationale": (
-                        "OCR " + engine + " pass, " + mode + " mode, " + date
-                        + "; fp:" + fingerprint
-                    ),
+                    "rationale": "OCR " + engine + " pass, " + mode + " mode, " + date,
                     "evidence": [evidence_rel],
                     "source": "ocr",
+                    "fingerprint": fingerprint,
                 }
             )
         return gaps, duplicates

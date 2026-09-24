@@ -1107,6 +1107,57 @@ class Deduplication(TempConsole):
         self.assertEqual(self.record(self.payload())[0], 1)
         self.assertEqual(len(self.gaps()), 1)
 
+    def set_field(self, gap_id, field, value):
+        code, _out, err = run(
+            MANIFEST_SCRIPT, "set", "--manifest", self.manifest,
+            "--path", "gaps[" + gap_id + "]." + field, "--value", value,
+        )
+        self.assertEqual(code, 0, err)
+
+    def test_accepting_a_gap_the_documented_way_keeps_it_accepted(self):
+        # Audit 6.15: verification.md says to record a triaged finding with
+        # status accepted and a rationale. Rewriting the rationale used to wipe
+        # the `fp:` key stored in it, and the next run filed the finding again
+        # as a new open gap, turning the release gate red for an accepted risk.
+        self.assertEqual(self.record(self.payload(severity="critical"))[0], 1)
+        gap_id = self.gaps()[0]["id"]
+        self.set_field(gap_id, "rationale",
+                       "Accepted risk: internal-only tool, approved by ops lead (dec.ocr-accept)")
+        self.set_field(gap_id, "status", "accepted")
+        code, out, err = self.record(self.payload(severity="critical"))
+        self.assertEqual(code, 1, err)
+        self.assertIn("recorded 0 finding(s) as gaps (1 already recorded)", out)
+        gaps = self.gaps()
+        self.assertEqual([(g["id"], g["status"]) for g in gaps], [(gap_id, "accepted")])
+
+    def test_the_legacy_rationale_suffix_is_still_honoured(self):
+        # Gaps written before the `fingerprint` field keep their key in the
+        # rationale; a re-run must not duplicate them either.
+        finding = bridge.normalize_finding(comment())
+        legacy = {
+            "id": "ocr-20260901-src-orders-py-1", "severity": "high",
+            "description": "src/orders.py:10 — SQL built by string concatenation (security, high)",
+            "status": "open", "evidence": [],
+            "rationale": "OCR delegate pass, delegate review mode, 2026-09-01; fp:"
+            + bridge.finding_fingerprint(finding),
+            "source": "ocr",
+        }
+        code, _out, err = run(
+            MANIFEST_SCRIPT, "add", "--manifest", self.manifest, "--kind", "gap",
+            "--json", json.dumps(legacy),
+        )
+        self.assertEqual(code, 0, err)
+        code, out, err = self.record(self.payload())
+        self.assertEqual(code, 1, err)
+        self.assertIn("(1 already recorded)", out)
+        self.assertEqual(len(self.gaps()), 1)
+
+    def test_the_fingerprint_field_is_part_of_the_schema(self):
+        self.assertEqual(self.record(self.payload())[0], 1)
+        code, out, err = run(MANIFEST_SCRIPT, "validate", "--manifest", self.manifest, "--json")
+        self.assertNotIn("unknown-field", out + err)
+        self.assertIn("fingerprint", self.gaps()[0])
+
     def test_endpoint_reruns_do_not_duplicate(self):
         for _ in range(3):
             code, out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr")
@@ -1131,7 +1182,10 @@ class GapShape(TempConsole):
             self.assertEqual(gap["source"], "ocr")
             self.assertNotIn("entity", gap)
             self.assertNotIn("capability", gap)
-            self.assertRegex(gap["rationale"], r"; fp:[0-9a-f]{12}$")
+            # The dedupe key has its own field now (audit 6.15); the rationale
+            # is free text people rewrite when they accept a gap.
+            self.assertRegex(gap["fingerprint"], r"^[0-9a-f]{12}$")
+            self.assertNotIn("fp:", gap["rationale"])
 
     def test_endpoint_gaps_carry_the_same_marks(self):
         code, _out, err = self.review("diff", "--manifest", self.manifest, "--engine", "ocr")
