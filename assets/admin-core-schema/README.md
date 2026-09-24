@@ -177,7 +177,7 @@ END $f$;
 DO $verify$
 DECLARE
     alice bigint; bob bigint; carol bigint; ev1 bigint; ev2 bigint;
-    req bigint; role bigint; sess bigint; n bigint;
+    req bigint; role bigint; sess bigint; job bigint; n bigint;
 BEGIN
     INSERT INTO admin_actor (auth_subject, display_name) VALUES ('verify-alice', 'Alice') RETURNING id INTO alice;
     INSERT INTO admin_actor (auth_subject, display_name) VALUES ('verify-bob', 'Bob') RETURNING id INTO bob;
@@ -271,6 +271,12 @@ BEGIN
     PERFORM pg_temp.expect_refused('ending without a reason', 'UPDATE impersonation_session SET ended_at = now() WHERE id = ' || sess, '23514');
     UPDATE impersonation_session SET ended_at = now(), ended_reason = 'operator_exit' WHERE id = sess;
     PERFORM pg_temp.expect_refused('acted-as subject without a session', format('INSERT INTO audit_event (occurred_at, actor_id, effective_actor_id, environment, action, target_type, result) VALUES (now(), %s, ''customer-1'', ''production'', ''x'', ''x'', ''succeeded'')', alice), '23514');
+
+    -- 9. jobs: deleting a job cannot take its per-item failures with it.
+    INSERT INTO admin_job (kind, initiated_by, environment, input_summary, input_hash)
+    VALUES ('verify.bulk', alice, 'production', '{}', 'h') RETURNING id INTO job;
+    INSERT INTO admin_job_failure (job_id, target_type, target_id, error_code) VALUES (job, 'user', 'u1', 'E1');
+    PERFORM pg_temp.expect_refused('DELETE admin_job with failures', 'DELETE FROM admin_job WHERE id = ' || job, '23503|23001');
 
     RAISE NOTICE 'all admin_core checks passed';
 END

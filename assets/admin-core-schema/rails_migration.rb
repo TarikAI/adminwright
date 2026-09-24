@@ -400,7 +400,8 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
     SQL
 
     # Per-item failures. A job that reports only an aggregate count cannot tell
-    # the operator which rows to retry.
+    # the operator which rows to retry. RESTRICT, not CASCADE: deleting the job must
+    # not erase its failure history.
     create_table :admin_job_failure do |t|
       t.bigint :job_id, null: false
       t.text   :target_type, null: false
@@ -409,7 +410,7 @@ class CreateAdminCoreSchema < ActiveRecord::Migration[7.1]
       t.text   :error_detail
       t.timestamptz :failed_at, null: false, default: -> { 'now()' }
 
-      t.foreign_key :admin_job, column: :job_id, on_delete: :cascade
+      t.foreign_key :admin_job, column: :job_id, on_delete: :restrict
       t.index %i[job_id failed_at], name: 'admin_job_failure_job'
     end
 

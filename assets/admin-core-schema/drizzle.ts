@@ -417,13 +417,14 @@ export const adminJob = adminCore.table("admin_job", {
 
 /**
  * Per-item failures. A job that reports only an aggregate count cannot tell the
- * operator which rows to retry.
+ * operator which rows to retry. RESTRICT, not CASCADE: deleting the job must not
+ * erase its failure history.
  */
 export const adminJobFailure = adminCore.table("admin_job_failure", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
   jobId: bigint("job_id", { mode: "bigint" })
     .notNull()
-    .references(() => adminJob.id, { onDelete: "cascade" }),
+    .references(() => adminJob.id, { onDelete: "restrict" }),
   targetType: text("target_type").notNull(),
   targetId: text("target_id").notNull(),
   errorCode: text("error_code").notNull(),

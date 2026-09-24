@@ -468,7 +468,8 @@ model AdminJob {
 }
 
 /// Per-item failures. A job reporting only an aggregate count cannot tell the
-/// operator which rows to retry.
+/// operator which rows to retry. Restrict, not Cascade: deleting the job must not
+/// erase its failure history.
 model AdminJobFailure {
   id          BigInt   @id @default(autoincrement())
   jobId       BigInt   @map("job_id")
@@ -478,7 +479,7 @@ model AdminJobFailure {
   errorDetail String?  @map("error_detail")
   failedAt    DateTime @default(now()) @map("failed_at") @db.Timestamptz
 
-  job AdminJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  job AdminJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
 
   @@index([jobId, failedAt], map: "admin_job_failure_job")
   @@map("admin_job_failure")

@@ -401,7 +401,8 @@ return new class extends Migration
             ON admin_job (state, queued_at DESC) WHERE state IN ('queued','running')");
 
         // Per-item failures. A job reporting only an aggregate count cannot tell
-        // the operator which rows to retry.
+        // the operator which rows to retry. RESTRICT, not CASCADE: deleting the job
+        // must not erase its failure history.
         Schema::create('admin_job_failure', function (Blueprint $table) {
             $table->bigIncrements('id');
             $table->unsignedBigInteger('job_id');
@@ -411,7 +412,7 @@ return new class extends Migration
             $table->text('error_detail')->nullable();
             $table->timestampTz('failed_at')->useCurrent();
 
-            $table->foreign('job_id')->references('id')->on('admin_job')->cascadeOnDelete();
+            $table->foreign('job_id')->references('id')->on('admin_job')->restrictOnDelete();
             $table->index(['job_id', 'failed_at'], 'admin_job_failure_job');
         });
 

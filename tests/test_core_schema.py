@@ -1204,6 +1204,13 @@ class TestCanonicalIsSelfConsistent(unittest.TestCase):
         self.assertIn("tenant_id", CANON.columns["feature_flag"])
         self.assertIn("tenant_id", CANON.columns["config_change"])
 
+    def test_deleting_a_job_cannot_erase_its_failures(self):
+        # round-2 finding: admin_job_failure is immutable history, yet ON DELETE CASCADE let a
+        # job delete take its failure rows with it (test_same_foreign_key_delete_actions then
+        # holds every variant to the same RESTRICT).
+        self.assertEqual(CANON.fks[("admin_job_failure", "job_id")], "block")
+        self.assertRegex(read("postgres.sql"), r"job_id\s+bigint\s+NOT NULL REFERENCES admin_job\(id\) ON DELETE RESTRICT")
+
     def test_live_grant_uniqueness_covers_global_grants(self):
         self.assertIn("COALESCE(scope_tenant_id, '*')", read("postgres.sql"))
         live = CANON.index_defs["admin_actor_role_live_unique"]

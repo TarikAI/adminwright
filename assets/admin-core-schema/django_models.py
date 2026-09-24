@@ -748,11 +748,12 @@ class AdminJobFailure(models.Model):
     """Per-item failures.
 
     A job that reports only an aggregate count cannot tell the operator which rows
-    to retry.
+    to retry. PROTECT, not CASCADE: deleting the job must not erase its failure
+    history.
     """
 
     job = models.ForeignKey(
-        AdminJob, on_delete=models.CASCADE, related_name="failures", db_index=False
+        AdminJob, on_delete=models.PROTECT, related_name="failures", db_index=False
     )
     target_type = models.TextField()
     target_id = models.TextField()

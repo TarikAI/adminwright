@@ -360,10 +360,11 @@ CREATE INDEX admin_job_active
     WHERE state IN ('queued', 'running');
 
 -- Per-item failures. A job that reports only an aggregate count cannot tell the
--- operator which rows to retry.
+-- operator which rows to retry. Immutable history (grants.sql): RESTRICT, not
+-- CASCADE, or deleting the job would erase its failures with it.
 CREATE TABLE admin_job_failure (
     id          bigserial PRIMARY KEY,
-    job_id      bigint      NOT NULL REFERENCES admin_job(id) ON DELETE CASCADE,
+    job_id      bigint      NOT NULL REFERENCES admin_job(id) ON DELETE RESTRICT,
     target_type text        NOT NULL,
     target_id   text        NOT NULL,
     error_code  text        NOT NULL,

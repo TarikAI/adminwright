@@ -71,6 +71,15 @@ class TestCoreSchemaOnPostgres(PgCase):
             "DELETE approval_request with decisions",
         )
 
+    def test_verification_is_not_vacuous_job_failure_cascade(self):
+        # the pre-fix schema: deleting a job cascaded into its immutable failure rows
+        self.assert_verification_fails_without(
+            "ALTER TABLE admin_core.admin_job_failure DROP CONSTRAINT admin_job_failure_job_id_fkey; "
+            "ALTER TABLE admin_core.admin_job_failure ADD CONSTRAINT admin_job_failure_job_id_fkey "
+            "FOREIGN KEY (job_id) REFERENCES admin_core.admin_job(id) ON DELETE CASCADE",
+            "DELETE admin_job with failures was allowed",
+        )
+
     def test_grants_sql_takes_mutation_away_from_the_application_role(self):
         db = self.new_database()
         app, audit = "aw_app_%s" % self.tag, "aw_audit_%s" % self.tag
