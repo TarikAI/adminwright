@@ -1,0 +1,19 @@
+{
+  "captured_with": "open-code-review v1.12.9 (bccbc15f) windows/amd64",
+  "scenario": "no provider configured: nothing on stdout, exit 1",
+  "argv": [
+    "ocr",
+    "review",
+    "--audience",
+    "agent",
+    "--format",
+    "json",
+    "--rule",
+    "<skill>/assets/adminwright-ocr-rules.json",
+    "--repo",
+    "<repo>"
+  ],
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Error: resolve LLM endpoint: no valid LLM endpoint configured; one of OCR_LLM_URL/OCR_LLM_TOKEN/OCR_LLM_MODEL, ~/.opencodereview/config.json, or ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN/ANTHROPIC_MODEL must be set\n"
+}

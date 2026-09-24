@@ -17,12 +17,19 @@ diff    Build/Repair mode. --engine delegate (default, no OCR-side LLM): runs
         itself to the calling agent, which returns findings through `record`.
         --engine ocr: runs `ocr review --audience agent --format json` and
         persists findings directly; requires prior `ocr config provider` and
-        `ocr config model`. A run that fails (non-zero exit, status failed,
-        terminal_state other than completed) or reports files it could not
-        review exits 2; it is never "0 findings recorded".
+        `ocr config model`. ocr reports the run as complete, partial, failed
+        or skipped (`status`, and `manifest.terminal_state` since ocr 1.8.5).
+        complete: findings recorded (exit 1, or 0 when there are none).
+        partial: the findings that exist are recorded, every file ocr could
+        not review is printed with its reason, exit 2. failed, or a non-zero
+        ocr exit: nothing is recorded, exit 2; it is never "0 findings
+        recorded". skipped: nothing was selected for review, exit 0.
 scan    Audit mode: full-file review of code no diff covers, via `ocr scan
         --audience agent --format json`. Endpoint engine only; delegate mode
-        has no full-file scan.
+        has no full-file scan. scan has no run manifest: its `status` is
+        success, completed_with_warnings or completed_with_errors, and files
+        it could not scan are named in `warnings[]`; they get the same
+        verdicts as a review (completed_with_errors is partial).
 record  Persist delegate-mode findings as manifest gaps[] through
         admin_console_manifest.py `add --kind gap` — one all-or-nothing
         batch, so a refusal leaves the manifest unmodified. With a bundle
@@ -57,9 +64,10 @@ manifest), else that directory's parent. Each ocr call is bounded by
 
 Exit codes: 0 clean or nothing reviewable, 1 findings recorded, 2 usage/IO/
 validation failure (including a refused add, which leaves the manifest
-unmodified — gaps are written as one atomic batch — and an endpoint review
-that failed or left files unreviewed). Exit 3 is intentionally unused:
-capability claim conflicts do not apply to this script.
+unmodified — gaps are written as one atomic batch — an endpoint review that
+failed, and one that left files unreviewed, whose findings for the other
+files are recorded). Exit 3 is intentionally unused: capability claim
+conflicts do not apply to this script.
 
 ADMINWRIGHT_OCR_BIN overrides the ocr executable path (tests and exotic
 installs); otherwise the script uses `ocr` from PATH. A value that names no
@@ -435,12 +443,17 @@ def find_findings(node):
 
     Prefer a list under a known key (comments/findings/results) so a document
     that also echoes rule groups or file lists cannot win by appearing first;
-    otherwise return the first list that satisfies the shape contract.
+    otherwise return the first list that satisfies the shape contract. A
+    known key that is empty or null (a failed ocr run says `"comments": null`)
+    means "no findings": the search stops there rather than mistaking some
+    other list of path-bearing objects for review comments.
     """
     if isinstance(node, dict):
         for key in FINDINGS_KEYS:
             if is_findings_list(node.get(key)):
                 return node[key]
+        if any(key in node and node[key] in (None, []) for key in FINDINGS_KEYS):
+            return []
         for value in node.values():
             found = find_findings(value)
             if found is not None:
@@ -1008,7 +1021,47 @@ def cmd_scan(args):
     return persist_endpoint_result(manifest, scan, "scan")
 
 
-FAILED_STATUSES = ("failed", "error", "errored", "failure")
+# How ocr says a review or scan ended. Taken from the ocr source (the run
+# manifest in internal/session/manifest.go, the reply in
+# cmd/opencodereview/output.go, the exit code in review_cmd.go; 1.8.5 to
+# 1.12.9) and checked against real replies, kept in tests/fixtures/ocr:
+#
+# * A review carries a run manifest whose `terminal_state` is complete,
+#   partial, failed or skipped, and the top-level `status` repeats it. ocr
+#   exits non-zero only when the run itself failed or every selected file
+#   failed, so a partial review arrives with exit 0. skipped means nothing was
+#   selected: a clean workspace, or only excluded files changed.
+# * scan has no run manifest (nor had a review before ocr 1.8.5): `status` is
+#   success, completed_with_warnings or completed_with_errors, and a file that
+#   could not be reviewed is named in `warnings[]`.
+#
+# A state outside these lists is not guessed at; see endpoint_verdict.
+COMPLETE_STATES = ("complete", "completed", "success", "completed_with_warnings")
+PARTIAL_STATES = ("partial", "completed_with_errors")
+FAILED_STATES = ("failed", "failure", "error", "errored")
+SKIPPED_STATES = ("skipped",)
+# When fields disagree, the worst one decides.
+STATE_RANK = {"skipped": 0, "complete": 1, "partial": 2, "unknown": 3, "failed": 4}
+
+# Warning types that mean a file was not (fully) reviewed. They are read only
+# from a reply without a run manifest: with one, coverage.failed names those
+# files already (and ocr drops the per-file error warnings from the reply).
+COVERAGE_WARNINGS = (
+    "subtask_error", "scan_subtask_error", "token_threshold_exceeded", "token_budget_reached",
+)
+
+# A failure ocr classifies this way, or a message with one of these phrases
+# ("no valid LLM endpoint configured", "check your LLM configuration and API
+# key"), is a provider set-up problem; only then is the set-up hint printed.
+PROVIDER_CLASSES = ("provider", "configuration")
+PROVIDER_PHRASES = ("llm configuration", "llm endpoint", "llm completion error", "api key", "provider")
+PROVIDER_HINT = (
+    "hint: the LLM provider is missing, unreachable or refusing requests. The endpoint"
+    " engine needs `ocr config provider` and `ocr config model` (INTEGRATIONS.md, Setup);"
+    " check the gateway URL and key, or use the default delegate engine, which needs no"
+    " provider."
+)
+FAILED_LISTING_LIMIT = 20
 
 
 def result_nodes(document):
@@ -1031,54 +1084,105 @@ def result_nodes(document):
     return nodes
 
 
-def tool_message(document, stderr_text):
-    """What ocr itself said went wrong: an error field, else its stderr."""
+def has_run_manifest(document):
+    return isinstance(document, dict) and any(
+        isinstance(document.get(key), dict) for key in ("manifest", "run_manifest", "coverage")
+    )
+
+
+def run_failure(document):
+    """The manifest's run_failure ({classification, reason}), if ocr gave one."""
+    for node, _root in result_nodes(document):
+        failure = node.get("run_failure")
+        if isinstance(failure, dict):
+            return failure
+    return None
+
+
+def tool_messages(document, stderr_text):
+    """What ocr itself said: the reply's message or error, then its `Error:` lines.
+
+    stderr is read only for the lines ocr's CLI prints as `Error: ...`; the JSON
+    usage record a failed review also writes there is noise here. With no
+    message at all, the last few non-JSON stderr lines stand in.
+    """
+    messages = []
     for node, _root in result_nodes(document):
         for key in ("error", "error_message", "message", "last_error"):
             value = node.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
-        errors = node.get("errors")
-        if isinstance(errors, list) and errors:
-            return "; ".join(str(item)[:200] for item in errors[:5])
-    return (stderr_text or "").strip()
-
-
-def run_verdict(document, returncode):
-    """Why a review/scan reply is not a completed review; "" when it is one.
-
-    A non-zero exit, `status: failed`, or a `terminal_state` other than
-    "completed" each mean the run did not finish, whatever else the JSON holds.
-    Reading none of them let a review in which every file failed print
-    "0 finding(s) recorded" and exit 0.
-    """
-    reasons = []
-    if returncode != 0:
-        reasons.append("exit code " + str(returncode))
-    if isinstance(document, dict):
-        status = document.get("status")
-        if isinstance(status, str) and status.strip().lower() in FAILED_STATUSES:
-            reasons.append("status '" + status.strip() + "'")
-        for node, _root in result_nodes(document):
-            state = node.get("terminal_state")
-            if isinstance(state, str) and state.strip() and state.strip().lower() != "completed":
-                reasons.append("terminal_state '" + state.strip() + "'")
+                messages.append(value.strip())
                 break
-    return ", ".join(reasons)
+        else:
+            errors = node.get("errors")
+            if isinstance(errors, list) and errors:
+                messages.append("; ".join(str(item)[:200] for item in errors[:5]))
+        if messages:
+            break
+    failure = run_failure(document)
+    if failure:
+        messages.append(
+            "run failure (" + str(failure.get("classification") or "unknown") + ")"
+            + (": " + str(failure["reason"]) if failure.get("reason") else "")
+        )
+    lines = [line.strip() for line in (stderr_text or "").splitlines() if line.strip()]
+    said = [line[len("Error:"):].strip() for line in lines if line.startswith("Error:")]
+    if not said and not messages:
+        said = [line for line in lines if not line.startswith(("{", "}", "[", "]", '"'))][-5:]
+    for line in said:
+        if line and line not in messages:
+            messages.append(line)
+    return messages
+
+
+def state_category(state):
+    state = state.strip().lower()
+    for category, states in (
+        ("complete", COMPLETE_STATES), ("partial", PARTIAL_STATES),
+        ("failed", FAILED_STATES), ("skipped", SKIPPED_STATES),
+    ):
+        if state in states:
+            return category
+    return "unknown"
+
+
+def reported_states(document):
+    """[(field, state)] for every place the reply says how the run ended."""
+    states = []
+    if not isinstance(document, dict):
+        return states
+    status = document.get("status")
+    if isinstance(status, str) and status.strip():
+        states.append(("status", status.strip()))
+    for node, _root in result_nodes(document):
+        state = node.get("terminal_state")
+        if isinstance(state, str) and state.strip():
+            states.append(("terminal_state", state.strip()))
+    return states
 
 
 def describe_failure(entry):
+    """One file ocr could not review, as `path (classification: reason)`."""
     if isinstance(entry, dict):
         path = entry.get("path") or entry.get("file") or entry.get("name") or json.dumps(entry)[:120]
+        kind = entry.get("classification") or entry.get("type")
         reason = entry.get("reason") or entry.get("error") or entry.get("message")
-        return str(path) + (" (" + str(reason)[:160] + ")" if reason else "")
+        detail = ": ".join(str(part) for part in (kind, reason) if part)
+        return str(path) + (" (" + detail[:200] + ")" if detail else "")
     return str(entry)
 
 
 def failed_files(document):
-    """(files ocr says it could not review, count reported without names)."""
+    """Files ocr says it could not review: (descriptions, unnamed count, classes).
+
+    Read from the run manifest's coverage (`failed`; `failed_files` is accepted
+    too) when the reply has one, else from the warnings that mean a file went
+    unreviewed (scan, and reviews before ocr 1.8.5). `classes` holds the
+    failure classifications (provider, timeout, budget, ...) ocr attached.
+    """
     named = []
     unnamed = 0
+    classes = set()
     for node, is_root in result_nodes(document):
         for key in ("failed", "failed_files"):
             if is_root and key == "failed":
@@ -1089,13 +1193,170 @@ def failed_files(document):
                     text = describe_failure(entry)
                     if text not in named:
                         named.append(text)
+                    if isinstance(entry, dict) and entry.get("classification"):
+                        classes.add(str(entry["classification"]).strip().lower())
             elif isinstance(value, dict):
                 for name in value:
                     if str(name) not in named:
                         named.append(str(name))
             elif isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 unnamed = max(unnamed, value)
-    return named, unnamed
+    failure = run_failure(document)
+    if failure and failure.get("classification"):
+        classes.add(str(failure["classification"]).strip().lower())
+    if isinstance(document, dict) and not has_run_manifest(document):
+        warnings = document.get("warnings")
+        for warning in warnings if isinstance(warnings, list) else []:
+            if isinstance(warning, dict) and warning.get("type") in COVERAGE_WARNINGS:
+                text = describe_failure(warning)
+                if text not in named:
+                    named.append(text)
+                if warning.get("type") in ("subtask_error", "scan_subtask_error"):
+                    message = str(warning.get("message") or "").lower()
+                    if any(phrase in message for phrase in PROVIDER_PHRASES):
+                        classes.add("provider")
+    return named, unnamed, classes
+
+
+def warning_notes(document):
+    """ocr's other warnings, passed on as notes (the unreviewed-file ones are listed instead)."""
+    warnings = document.get("warnings") if isinstance(document, dict) else None
+    notes = []
+    for warning in warnings if isinstance(warnings, list) else []:
+        if not isinstance(warning, dict):
+            continue
+        kind = str(warning.get("type") or "warning")
+        if kind in COVERAGE_WARNINGS and not has_run_manifest(document):
+            continue
+        where = str(warning["file"]) + ": " if warning.get("file") else ""
+        notes.append("ocr warning [" + kind + "] " + where + str(warning.get("message") or "")[:200])
+    return notes
+
+
+def selected_count(document):
+    """How many files the run manifest says ocr selected, or None."""
+    for node, is_root in result_nodes(document):
+        selected = None if is_root else node.get("selected")
+        if isinstance(selected, list):
+            return len(selected)
+    return None
+
+
+class Verdict(object):
+    """What the bridge does with one ocr reply (see endpoint_verdict)."""
+
+    def __init__(self):
+        self.outcome = "complete"
+        self.state = ""  # the deciding field, e.g. "terminal_state 'partial'"
+        self.reasons = []  # why the run failed; empty unless outcome == "failed"
+        self.failed = []  # "path (classification: reason)" per unreviewed file
+        self.unnamed = 0  # unreviewed files ocr counted without naming them
+        self.classes = set()  # ocr's failure classifications
+        self.selected = None  # files ocr selected, when the manifest says
+        self.notes = []  # other ocr warnings
+
+
+def endpoint_verdict(document, returncode):
+    """Classify an ocr review/scan reply.
+
+    outcome:
+      complete     every selected file was reviewed (a reply that states no
+                   outcome at all counts too): record the findings.
+      partial      some files could not be reviewed: record the findings that
+                   exist, list the others, exit 2.
+      skipped      ocr selected nothing to review: exit 0.
+      unconfirmed  a state this bridge does not know, with exit 0: ocr's exit
+                   code says the coverage is usable, so the findings are
+                   recorded, but completeness cannot be confirmed: exit 2.
+      failed       a non-zero exit, a failed state, or no JSON at all: record
+                   nothing, exit 2.
+
+    The previous check accepted only "completed", a word ocr never uses, and
+    so failed every real review; the states are compared as sets now.
+    """
+    verdict = Verdict()
+    ranked = []
+    for field, state in reported_states(document):
+        category = state_category(state)
+        label = field + " '" + state + "'"
+        ranked.append((STATE_RANK[category], category, label))
+        if category == "failed":
+            verdict.reasons.append(label)
+    if returncode != 0:
+        verdict.reasons.insert(0, "exit code " + str(returncode))
+    elif document is None:
+        verdict.reasons.append("no parseable JSON on stdout")
+    verdict.failed, verdict.unnamed, verdict.classes = failed_files(document)
+    verdict.notes = warning_notes(document)
+    verdict.selected = selected_count(document)
+    _rank, worst, verdict.state = max(ranked) if ranked else (1, "complete", "")
+    if verdict.reasons:
+        verdict.outcome = "failed"
+    elif worst == "unknown":
+        verdict.outcome = "unconfirmed"
+    elif worst == "partial" or verdict.failed or verdict.unnamed:
+        verdict.outcome = "partial"
+    else:
+        verdict.outcome = worst
+    return verdict
+
+
+def provider_problem(verdict, messages):
+    """Whether a failure points at the provider set-up (and so earns the hint)."""
+    if verdict.classes.intersection(PROVIDER_CLASSES):
+        return True
+    text = " ".join(messages).lower()
+    return any(phrase in text for phrase in PROVIDER_PHRASES)
+
+
+def report_failed_run(mode, verdict, messages):
+    head = messages[0] if messages else "ocr " + mode + " produced no message"
+    stderr("ERROR: ocr " + mode + " did not complete (" + ", ".join(verdict.reasons) + "): " + head)
+    for line in messages[1:]:
+        stderr("  ocr: " + line)
+    if verdict.failed:
+        stderr("Files ocr could not review:")
+        for entry in verdict.failed[:FAILED_LISTING_LIMIT]:
+            stderr("  " + entry)
+        if len(verdict.failed) > FAILED_LISTING_LIMIT:
+            stderr("  ... and " + str(len(verdict.failed) - FAILED_LISTING_LIMIT) + " more")
+    stderr("Nothing was recorded.")
+    if provider_problem(verdict, messages):
+        stderr(PROVIDER_HINT)
+
+
+def report_partial(verdict, messages):
+    count = len(verdict.failed) if verdict.failed else verdict.unnamed
+    said = " (" + messages[0] + ")" if messages else ""
+    if count:
+        scope = " of " + str(verdict.selected) + " selected" if verdict.selected else ""
+        stderr(
+            "ERROR: ocr could not review " + str(count) + " file(s)" + scope
+            + "; coverage is incomplete" + said + "."
+        )
+    else:
+        stderr("ERROR: ocr reported " + verdict.state + "; coverage is incomplete" + said + ".")
+    for entry in verdict.failed:
+        stderr("  " + entry)
+    stderr(
+        "Findings for the files it did review were recorded above; re-run once the failures"
+        " are resolved (findings already recorded are not written twice)."
+    )
+    if "provider" in verdict.classes:
+        stderr(
+            "hint: the provider failed for these files while it served the others; a rate"
+            " limit or an upstream error is the usual cause, so a later re-run often succeeds."
+        )
+
+
+def report_unconfirmed(verdict):
+    stderr(
+        "ERROR: ocr reported " + verdict.state + ", a state this bridge does not know (it acts"
+        " on complete, partial, failed and skipped, and on scan's success,"
+        " completed_with_warnings and completed_with_errors). The findings above were"
+        " recorded, but coverage is not confirmed; compare `ocr --version` with the"
+        " version INTEGRATIONS.md was checked against."
+    )
 
 
 def duplicate_note(duplicates):
@@ -1106,12 +1367,12 @@ def duplicate_note(duplicates):
 def persist_endpoint_result(manifest, proc, mode):
     """Parse an ocr review/scan reply, keep it as evidence, persist findings.
 
-    A reply is only a review when the run completed: a failed run exits 2 with
-    the tool's own message instead of "0 finding(s) recorded". When the run
-    completed but some files could not be reviewed, the findings for the rest
-    are still recorded (real findings are not thrown away), the unreviewed
-    paths are listed, and the exit is 2 so nobody reads the gap list as
-    complete coverage.
+    What happens depends on how ocr says the run ended (endpoint_verdict). A
+    failed run exits 2 with ocr's own message instead of "0 finding(s)
+    recorded", and records nothing. A partial one records the findings that
+    exist (real findings are not thrown away), lists every file ocr could not
+    review with its reason, and exits 2 so nobody reads the gap list as
+    complete coverage. A skipped one had nothing to review.
     """
     document = None
     if proc.stdout.strip():
@@ -1119,35 +1380,32 @@ def persist_endpoint_result(manifest, proc, mode):
             document = json.loads(proc.stdout)
         except ValueError:
             document = None
-    problem = run_verdict(document, proc.returncode)
-    if document is None and not problem:
-        problem = "no parseable JSON on stdout"
-    if problem:
-        message = tool_message(document, proc.stderr) or "ocr " + mode + " produced no message"
-        stderr("ERROR: ocr " + mode + " did not complete (" + problem + "): " + message)
-        stderr("hint: endpoint engine needs `ocr config provider` and `ocr config model` first")
+    verdict = endpoint_verdict(document, proc.returncode)
+    messages = tool_messages(document, proc.stderr)
+    if verdict.outcome == "failed":
+        report_failed_run(mode, verdict, messages)
         return EXIT_USAGE
+    found = find_findings(document) or []
+    if verdict.outcome == "skipped" and not found:
+        print("OCR " + mode + ": nothing to review" + ("; ocr: " + messages[0] if messages else "."))
+        return EXIT_OK
     raw = manifest.parent / (
         "ocr-" + mode + "-" + time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()) + ".json"
     )
     write_json_atomic(raw, document)
-    found = find_findings(document)
-    findings = [normalize_finding(item) for item in (found or [])]
-    failed, unnamed = failed_files(document)
+    findings = [normalize_finding(item) for item in found]
     written, duplicates = persist_findings(manifest, findings, "endpoint", mode, raw)
     print(
         "OCR " + mode + ": " + str(written) + " finding(s) recorded as gaps"
         + duplicate_note(duplicates) + "; raw output kept at " + str(raw)
     )
-    if failed or unnamed:
-        count = len(failed) if failed else unnamed
-        stderr(
-            "ERROR: ocr could not review " + str(count) + " file(s); coverage is incomplete."
-            " Findings for the files it did review were recorded above; re-run once the"
-            " failures are resolved."
-        )
-        for entry in failed:
-            stderr("  " + entry)
+    for note in verdict.notes:
+        stderr("note: " + note)
+    if verdict.outcome == "partial":
+        report_partial(verdict, messages)
+        return EXIT_USAGE
+    if verdict.outcome == "unconfirmed":
+        report_unconfirmed(verdict)
         return EXIT_USAGE
     if written or duplicates:
         return EXIT_FINDINGS

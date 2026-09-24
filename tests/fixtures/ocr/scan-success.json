@@ -1,0 +1,21 @@
+{
+  "captured_with": "open-code-review v1.12.9 (bccbc15f) windows/amd64",
+  "scenario": "scan has no run manifest: status success, exit 0",
+  "argv": [
+    "ocr",
+    "scan",
+    "--audience",
+    "agent",
+    "--format",
+    "json",
+    "--path",
+    "src",
+    "--rule",
+    "<skill>/assets/adminwright-ocr-rules.json",
+    "--repo",
+    "<repo>"
+  ],
+  "returncode": 0,
+  "stdout": "{\n  \"status\": \"success\",\n  \"llm\": {\n    \"provider\": \"fakegw\",\n    \"model\": \"fake-model\"\n  },\n  \"summary\": {\n    \"files_reviewed\": 4,\n    \"comments\": 2,\n    \"total_tokens\": 275,\n    \"input_tokens\": 220,\n    \"output_tokens\": 55,\n    \"elapsed\": \"0s\"\n  },\n  \"tool_calls\": {\n    \"total\": 2,\n    \"by_tool\": {\n      \"code_comment\": 2\n    },\n    \"failure\": 0,\n    \"failure_by_tool\": {},\n    \"failure_details\": []\n  },\n  \"comments\": [\n    {\n      \"path\": \"src/a.py\",\n      \"content\": \"eval() on caller input executes arbitrary code; parse the expression instead\",\n      \"existing_code\": \"    return eval(expression)\",\n      \"start_line\": 2,\n      \"end_line\": 2,\n      \"category\": \"security\",\n      \"severity\": \"high\"\n    },\n    {\n      \"path\": \"src/c.py\",\n      \"content\": \"Division by zero when b is 0; reject or handle a zero divisor\",\n      \"existing_code\": \"    return a / b\",\n      \"start_line\": 2,\n      \"end_line\": 2,\n      \"category\": \"bug\",\n      \"severity\": \"medium\"\n    }\n  ],\n  \"project_summary\": \"### Top Issues\\n- none\",\n  \"session_id\": \"51c5ab68-b75e-442b-a2fd-0acfcf367c3b\"\n}\n",
+  "stderr": ""
+}

@@ -128,13 +128,23 @@ to review; bundles of other agents, or of runs without `--agent`, are never touc
 
 Endpoint engine (`--engine ocr`, needs provider config): runs
 `ocr review --audience agent --format json` itself, keeps the raw JSON as evidence, and
-persists findings directly. A run that did not complete — `ocr` exited non-zero, the
-reply says `status: failed`, or its `terminal_state` is not `completed` — exits 2 with
-`ocr`'s own message; it is never reported as "0 finding(s) recorded". If the run
-completed but reports files it could not review (`coverage.failed`), the findings for the
-files it did review are still recorded, the unreviewed paths are listed, and the exit is 2
-so the gap list is not mistaken for full coverage. Range and commit modes:
-`--from main --to feature`, or `--commit <hash>`.
+persists findings directly. What happens next depends on how `ocr` says the run ended: the
+reply's `status`, which repeats the run manifest's `terminal_state` (`ocr` 1.8.5 and later;
+replies recorded from the real CLI are in `tests/fixtures/ocr/`).
+
+| `ocr` reports | Meaning | The bridge |
+|---|---|---|
+| `complete` | every selected file was reviewed | records the findings; exit 1, or 0 when there are none |
+| `partial` (`ocr` itself exits 0) | some files failed, usually at the provider | records the findings that exist and prints every file in `coverage.failed` with its classification and reason; exit 2 |
+| `failed`, or `ocr` exits non-zero | the run failed, or every selected file did | records nothing and prints `ocr`'s own message and the failed files; exit 2. The provider set-up hint appears only when the failure is a provider or configuration one |
+| `skipped` | nothing was selected: no changes, or only excluded files changed | prints "nothing to review"; exit 0 |
+
+`scan` has no run manifest: its `status` is `success`, `completed_with_warnings` or
+`completed_with_errors`, a file it could not scan is named in `warnings[]`, and
+`completed_with_errors` is handled like `partial`. A state the bridge does not know (a newer
+`ocr`) keeps the findings but exits 2, because nothing confirms the coverage. A failed run is
+never reported as "0 finding(s) recorded". Range and commit modes: `--from main --to feature`,
+or `--commit <hash>`.
 
 **2. `record` — persist delegate findings as gaps.**
 
@@ -204,9 +214,9 @@ python <skill-dir>/scripts/code_review.py scan --manifest <project-root>/.admin-
 
 | Code | Meaning |
 |---|---|
-| 0 | Clean, or nothing reviewable, or `ocr` absent (nothing was blocked) |
+| 0 | Clean, or nothing reviewable (an endpoint review `ocr` reports as `skipped` included), or `ocr` absent (nothing was blocked) |
 | 1 | Findings recorded as gaps (or already recorded from an earlier run) — read them |
-| 2 | Usage/IO/validation failure: a refused `add` (gaps go in as one all-or-nothing batch — the manifest is left unmodified); a wrong `ADMINWRIGHT_OCR_BIN`, missing rule file or unresolvable Windows shim; a timeout; an endpoint review that failed. Also an endpoint review that could not review some files: its findings for the other files *were* recorded, and the unreviewed paths are printed |
+| 2 | Usage/IO/validation failure: a refused `add` (gaps go in as one all-or-nothing batch — the manifest is left unmodified); a wrong `ADMINWRIGHT_OCR_BIN`, missing rule file or unresolvable Windows shim; a timeout; an endpoint review or scan that failed (nothing recorded). Also one that ended `partial` (scan: `completed_with_errors`) or in a state the bridge does not know: its findings *were* recorded, and the files `ocr` could not review are printed with their reasons |
 | 3 | Intentionally unused — capability claim conflicts do not apply to this script |
 
 `--strict` flips "ocr absent" from exit 0 to exit 2, for callers that want the pass
@@ -267,13 +277,20 @@ bundle is yours alone.
   extensionless npm shell shim (`ocr` beside `ocr.cmd`), and no `ocr.cmd`/`ocr.exe`
   sibling was found. Point it at `ocr.cmd`, or unset it and let the script resolve `ocr`
   from PATH. The npm install does not create an `ocr.exe`.
-- **"endpoint engine needs `ocr config provider`"** — the endpoint review failed to start
-  or complete: you used `--engine ocr` or `scan` without configuring a provider (configure
-  it, or use the delegate default), or the provider rejected the request; the line above
-  the hint is `ocr`'s own message.
-- **"ocr could not review N file(s); coverage is incomplete"** — the endpoint run completed
-  but some files failed. Findings for the others were recorded; fix the cause (usually a
-  provider limit) and re-run — findings already recorded are not duplicated.
+- **"ocr diff did not complete (...)" / "ocr scan did not complete (...)"** — the run
+  failed and nothing was recorded; the rest of the line and any `ocr:` lines are `ocr`'s own
+  words. With **"hint: the LLM provider is missing, unreachable or refusing requests"** it
+  failed at the provider: `--engine ocr` or `scan` without a configured provider (configure
+  it, or use the delegate default), a wrong URL or key, or a gateway that is down. Without
+  the hint it is something else, such as an unknown `--from`/`--to`/`--commit` ref.
+- **"ocr could not review N file(s) of M selected; coverage is incomplete"** — the run
+  ended `partial`. Findings for the other files were recorded; each failed file is listed
+  with `ocr`'s classification (`provider`, `timeout`, `budget`, ...). A provider failure
+  while other files succeeded is usually a rate limit or an upstream error: re-run later —
+  findings already recorded are not duplicated.
+- **"ocr reported ..., a state this bridge does not know"** — a newer `ocr` uses a word the
+  bridge has not seen. Its findings were recorded; exit 2 because nothing confirms the
+  coverage. Check `ocr --version` against the versions above.
 - **"ocr did not finish within N seconds"** — `ocr` and its children were stopped. Narrow the
   review, or raise `--timeout` / `ADMINWRIGHT_OCR_TIMEOUT`.
 - **"the --rule file ... does not exist" / "the shipped rules ... are missing"** — the review

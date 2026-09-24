@@ -4,8 +4,11 @@
 
 Standard library only (unittest), so `python -m unittest discover tests` works
 anywhere the skill itself works. The `ocr` CLI is faked through the
-ADMINWRIGHT_OCR_BIN hook: no network, no LLM, no provider configuration. The
-real `ocr` package is never run (RealCliSmoke is opt-in). On Windows the fake is
+ADMINWRIGHT_OCR_BIN hook: no network, no LLM, no provider configuration. What
+the fake prints for a review or scan is either a shape written here or, in
+RealReplies, a reply recorded from the real CLI (tests/fixtures/ocr, made by
+capture.py there) and replayed byte for byte. The real `ocr` package is never
+run unless RealCliSmoke is opted into. On Windows the fake is
 laid out like an npm install (`ocr.cmd` shim plus a `node_modules/.../ocr.js`
 entry point) and ADMINWRIGHT_NODE_BIN points the resolved launcher at this
 Python, so the tests need neither node nor cmd.exe's cooperation.
@@ -33,6 +36,8 @@ from unittest import mock
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = SKILL_ROOT / "scripts" / "code_review.py"
 MANIFEST_SCRIPT = SKILL_ROOT / "scripts" / "admin_console_manifest.py"
+# Replies recorded from the real ocr CLI by tests/fixtures/ocr/capture.py.
+OCR_FIXTURES = SKILL_ROOT / "tests" / "fixtures" / "ocr"
 
 
 def load_bridge():
@@ -99,6 +104,14 @@ FAKE_OCR_SOURCE = (
     "if os.environ.get('FAKE_FAIL'):\n"
     "    sys.stderr.write('provider not configured\\n')\n"
     "    sys.exit(1)\n"
+    "if os.environ.get('FAKE_REPLAY') and args and args[0] in ('review', 'scan'):\n"
+    "    with open(os.environ['FAKE_REPLAY'], encoding='utf-8') as handle:\n"
+    "        recorded = json.load(handle)\n"
+    "    sys.stdout.buffer.write(recorded['stdout'].encode('utf-8'))\n"
+    "    sys.stderr.buffer.write(recorded['stderr'].encode('utf-8'))\n"
+    "    sys.stdout.flush()\n"
+    "    sys.stderr.flush()\n"
+    "    sys.exit(recorded['returncode'])\n"
     "if args[:2] == ['delegate', 'preview']:\n"
     "    print(os.environ.get('FAKE_PREVIEW', " + repr(FAKE_PREVIEW) + "))\n"
     "elif args[:2] == ['delegate', 'rule']:\n"
@@ -650,14 +663,31 @@ class EndpointVerdict(TempConsole):
         code, out, err = self.endpoint({"status": "failed", "message": "quota exceeded", "comments": [comment()]})
         self.assert_failed_run(code, out, err, "quota exceeded", "status 'failed'")
 
-    def test_terminal_state_other_than_completed(self):
+    def test_a_failed_terminal_state_records_nothing_even_with_exit_zero(self):
         for document in (
-            {"manifest": {"terminal_state": "aborted"}, "comments": [comment()]},
             {"terminal_state": "failed", "comments": [comment()]},
-            {"run_manifest": {"terminal_state": "in_progress"}, "comments": [comment()]},
+            {"manifest": {"terminal_state": "failed"}, "comments": [comment()]},
+            {"status": "complete", "run_manifest": {"terminal_state": "FAILED"}, "comments": [comment()]},
         ):
             code, out, err = self.endpoint(document)
             self.assert_failed_run(code, out, err, "terminal_state")
+
+    def test_an_unknown_state_keeps_the_findings_but_is_not_called_complete(self):
+        # Replaces "terminal_state other than completed fails": that rule turned
+        # ocr's real `complete` into a failure (R2). An unknown word with exit 0
+        # is usable coverage by ocr's own exit contract, so the findings are
+        # kept; exit 2 says completeness was not confirmed.
+        for index, document in enumerate((
+            {"manifest": {"terminal_state": "aborted"}, "comments": [comment(start_line=1)]},
+            {"run_manifest": {"terminal_state": "in_progress"}, "comments": [comment(start_line=2)]},
+            {"status": "finished_somehow", "comments": [comment(start_line=3)]},
+        ), 1):
+            code, out, err = self.endpoint(document)
+            self.assertEqual(code, 2, out + err)
+            self.assertIn("1 finding(s) recorded", out)
+            self.assertIn("does not know", err)
+            self.assertNotIn("Traceback", err)
+            self.assertEqual(len(self.gaps()), index)
 
     def test_a_completed_run_with_nothing_failed_is_recorded_normally(self):
         code, out, err = self.endpoint({
@@ -707,6 +737,155 @@ class EndpointVerdict(TempConsole):
         )
         self.assertEqual(code, 2)
         self.assertIn("exit code 4", err)
+
+
+def recorded_reply(name):
+    return json.loads((OCR_FIXTURES / (name + ".json")).read_text(encoding="utf-8"))
+
+
+class RealReplies(TempConsole):
+    """Audit R2 (6.14): the bridge against what ocr really prints.
+
+    Every reply here was recorded from the real CLI (open-code-review v1.12.9,
+    tests/fixtures/ocr/capture.py, against the stand-in endpoint in
+    fake_llm.py) and is replayed byte for byte, exit code included. The tests
+    above use shapes written from memory; one of them, "terminal_state":
+    "completed", is a word ocr never prints, and a bridge that failed every real
+    review passed them all.
+    """
+
+    def replay(self, name, path=None):
+        command = ["scan"] if name.startswith("scan-") else ["diff", "--engine", "ocr"]
+        return self.review(
+            command[0], "--manifest", self.manifest, *command[1:],
+            env={"FAKE_REPLAY": str(path or OCR_FIXTURES / (name + ".json"))},
+        )
+
+    def raw_files(self):
+        folder = self.root / ".admin-console"
+        return sorted(list(folder.glob("ocr-diff-*.json")) + list(folder.glob("ocr-scan-*.json")))
+
+    def lines_of(self, gaps):
+        return sorted((gap["severity"], gap["description"].split(" — ")[0]) for gap in gaps)
+
+    def test_the_fixtures_are_what_ocr_printed(self):
+        for name, returncode, state in (
+            ("review-complete", 0, "complete"), ("review-partial", 0, "partial"),
+            ("review-failed", 1, "failed"), ("review-skipped", 0, "skipped"),
+        ):
+            recorded = recorded_reply(name)
+            self.assertIn("open-code-review v", recorded["captured_with"], name)
+            self.assertEqual(recorded["returncode"], returncode, name)
+            body = json.loads(recorded["stdout"])
+            self.assertEqual((body["status"], body["manifest"]["terminal_state"]), (state, state), name)
+        for name, returncode, status in (("scan-success", 0, "success"), ("scan-partial", 0, "completed_with_errors")):
+            recorded = recorded_reply(name)
+            self.assertEqual(recorded["returncode"], returncode, name)
+            self.assertEqual(json.loads(recorded["stdout"])["status"], status, name)
+        for name in ("review-no-provider", "review-bad-ref", "scan-failed"):
+            recorded = recorded_reply(name)
+            self.assertEqual((recorded["returncode"], recorded["stdout"]), (1, ""), name)
+            self.assertIn("Error: ", recorded["stderr"], name)
+
+    def test_a_complete_review_records_its_findings(self):
+        code, out, err = self.replay("review-complete")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("2 finding(s) recorded as gaps", out)
+        self.assertNotIn("ERROR", err)
+        self.assertNotIn("hint:", err)
+        self.assertEqual(self.lines_of(self.gaps()), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+        self.assertEqual(len(self.raw_files()), 1)
+
+    def test_a_complete_review_that_found_nothing_exits_zero(self):
+        recorded = recorded_reply("review-complete")
+        body = json.loads(recorded["stdout"])
+        body["comments"] = []
+        recorded["stdout"] = json.dumps(body, indent=2)
+        path = self.tmp / "clean.json"
+        path.write_text(json.dumps(recorded), encoding="utf-8")
+        code, out, err = self.replay("review-complete", path)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("0 finding(s) recorded", out)
+        self.assertEqual(self.gaps(), [])
+
+    def test_a_partial_review_records_what_it_found_and_names_the_failed_file(self):
+        code, out, err = self.replay("review-partial")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("2 finding(s) recorded as gaps", out)
+        self.assertIn("could not review 1 file(s) of 4 selected", err)
+        self.assertIn("src/b.py (provider: provider or subtask request failed)", err)
+        # The provider answered for three files: "configure a provider" would mislead.
+        self.assertNotIn("ocr config provider", err)
+        self.assertEqual(self.lines_of(self.gaps()), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+        self.assertEqual(len(self.raw_files()), 1)
+
+    def test_a_failed_review_records_nothing_and_says_why(self):
+        code, out, err = self.replay("review-failed")
+        self.assertEqual(code, 2, out + err)
+        for needle in ("exit code 1", "status 'failed'", "terminal_state 'failed'",
+                       "check your LLM configuration and API key"):
+            self.assertIn(needle, err)
+        for path in ("src/a.py", "src/b.py", "src/c.py", "src/d.py"):
+            self.assertIn(path + " (provider:", err)
+        self.assertIn("ocr config provider", err)  # every file failed at the provider
+        self.assertNotIn('"session_id"', err, "ocr's stderr usage record is noise here")
+        self.assertNotIn("finding(s) recorded", out)
+        self.assertEqual(self.gaps(), [])
+        self.assertEqual(self.raw_files(), [])
+
+    def test_a_skipped_review_had_nothing_to_review(self):
+        code, out, err = self.replay("review-skipped")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("nothing to review", out)
+        self.assertIn("Review skipped: no items were selected.", out)
+        self.assertNotIn("ERROR", err)
+        self.assertEqual(self.gaps(), [])
+        self.assertEqual(self.raw_files(), [])
+
+    def test_no_provider_configured_gets_the_set_up_hint(self):
+        code, out, err = self.replay("review-no-provider")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("no valid LLM endpoint configured", err)
+        self.assertIn("ocr config provider", err)
+        self.assertEqual(self.gaps(), [])
+
+    def test_a_bad_ref_is_not_blamed_on_the_provider(self):
+        code, out, err = self.replay("review-bad-ref")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn('--from value "no-such-ref" is not a valid commit ref', err)
+        self.assertNotIn("hint:", err)
+        self.assertNotIn("ocr config provider", err)
+
+    def test_a_successful_scan_records_its_findings(self):
+        code, out, err = self.replay("scan-success")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("OCR scan: 2 finding(s) recorded", out)
+        self.assertEqual(self.lines_of(self.gaps()), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+        for gap in self.gaps():
+            self.assertIn("scan mode", gap["rationale"])
+
+    def test_a_scan_completed_with_errors_is_partial(self):
+        code, out, err = self.replay("scan-partial")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("OCR scan: 2 finding(s) recorded", out)
+        self.assertIn("could not review 1 file(s)", err)
+        self.assertIn("src/b.py (scan_subtask_error: LLM completion error", err)
+        self.assertEqual(len(self.gaps()), 2)
+
+    def test_a_failed_scan_records_nothing(self):
+        code, out, err = self.replay("scan-failed")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("scan failed: all 4 file scan(s) failed", err)
+        self.assertIn("ocr config provider", err)
+        self.assertEqual(self.gaps(), [])
+        self.assertEqual(self.raw_files(), [])
+
+    def test_a_rerun_of_a_partial_review_does_not_duplicate(self):
+        self.assertEqual(self.replay("review-partial")[0], 2)
+        code, out, err = self.replay("review-complete")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("(2 already recorded)", out)
+        self.assertEqual(len(self.gaps()), 2)
 
 
 class BundleLifecycle(TempConsole):

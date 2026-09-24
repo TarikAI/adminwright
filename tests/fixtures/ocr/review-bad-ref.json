@@ -1,0 +1,23 @@
+{
+  "captured_with": "open-code-review v1.12.9 (bccbc15f) windows/amd64",
+  "scenario": "an unknown --from ref: an input error, not a provider one, exit 1",
+  "argv": [
+    "ocr",
+    "review",
+    "--audience",
+    "agent",
+    "--format",
+    "json",
+    "--rule",
+    "<skill>/assets/adminwright-ocr-rules.json",
+    "--from",
+    "no-such-ref",
+    "--to",
+    "main",
+    "--repo",
+    "<repo>"
+  ],
+  "returncode": 1,
+  "stdout": "",
+  "stderr": "Error: --from value \"no-such-ref\" is not a valid commit ref: fatal: Needed a single revision\n"
+}
