@@ -200,8 +200,7 @@ class TestInstall(InstallBase):
         for path in target.glob("*.md"):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("${CLAUDE_PLUGIN_ROOT}", text, path.name)
-            self.assertIn("python " + ia.PLACEHOLDER + "/scripts/admin_console_manifest.py", text,
-                          path.name)
+            self.assertEqual(named_skill_dir(text), ia.PLACEHOLDER, path.name)
             self.assertNotIn(SKILL_ROOT.resolve().as_posix().lower(), text.lower(), path.name)
         self.assertEqual(machine_path(self.project), SKILL_ROOT.resolve().as_posix())
 
@@ -563,9 +562,10 @@ class TestPointerPaths(InstallBase):
         self.pointer(skill=skill)
         for directory in (".adminwright/agents", ".codex/agents"):
             for path in (self.project / directory).iterdir():
-                text = path.read_text(encoding="utf-8").replace("\\", "/").lower()
-                self.assertIn("python vendor/adminwright/scripts/admin_console_manifest.py", text,
-                              path.name)
+                raw = path.read_text(encoding="utf-8")
+                self.assertEqual(named_skill_dir(raw), "vendor/adminwright", path.name)
+                self.assertNotIn(ia.TOKEN, raw, path.name)
+                text = raw.replace("\\", "/").lower()
                 for absolute in self.absolutes(self.project):
                     self.assertNotIn(absolute, text, path.name)
 
@@ -631,7 +631,7 @@ class TestPointerPaths(InstallBase):
         for path in (self.project / ".codex" / "agents").iterdir():
             copy = path.read_text(encoding="utf-8")
             self.assertNotIn("tools/aw-a", copy, path.name)
-            self.assertIn(ia.PLACEHOLDER + "/scripts/admin_console_manifest.py", copy, path.name)
+            self.assertEqual(named_skill_dir(copy), ia.PLACEHOLDER, path.name)
 
     def test_an_old_marked_block_with_absolute_paths_is_replaced_in_place(self):
         # What the installer wrote before 6.18 was finished: the machine path in an
@@ -872,6 +872,14 @@ def locate_section(text):
     return text[start:end if end != -1 else len(text)]
 
 
+def named_skill_dir(text):
+    """The skill directory an installed agent's "Locate the skill" section names
+    (what the installer wrote where the source says ${CLAUDE_PLUGIN_ROOT})."""
+    match = re.search(r"`([^`\n]+)` is the adminwright skill directory", locate_section(text))
+    assert match, "the Locate the skill section names no directory"
+    return match.group(1)
+
+
 def installed_agent_files(project, harness):
     """Every agent prompt the install wrote for `harness`: its native files and
     the neutral copies."""
@@ -908,8 +916,7 @@ class TestMachinePaths(InstallBase):
                 self.assertEqual(leaks(project, machine_needles(skill, project)), [])
                 for path in installed_agent_files(project, harness):
                     text = path.read_text(encoding="utf-8")
-                    self.assertIn(ia.PLACEHOLDER + "/scripts/admin_console_manifest.py", text,
-                                  str(path))
+                    self.assertEqual(named_skill_dir(text), ia.PLACEHOLDER, str(path))
                     self.assertNotIn(ia.TOKEN, text, str(path))
 
     def test_the_machine_path_file_is_written_and_git_ignored(self):
@@ -943,20 +950,23 @@ class TestMachinePaths(InstallBase):
                 files = installed_agent_files(project, harness)
                 self.assertEqual(len(files) % len(ia.AGENT_ORDER), 0, files)
                 for path in files:
-                    section = locate_section(path.read_text(encoding="utf-8"))
-                    named = re.search(r"python (\S+)/scripts/admin_console_manifest\.py", section)
-                    self.assertIsNotNone(named, str(path))
-                    self.assertEqual(named.group(1), ia.PLACEHOLDER, str(path))
-                    self.assertFalse((project / named.group(1) / "scripts").exists())
+                    text = path.read_text(encoding="utf-8")
+                    section = locate_section(text)
+                    named = named_skill_dir(text)
+                    self.assertEqual(named, ia.PLACEHOLDER, str(path))
+                    self.assertFalse((project / named / "scripts").exists())
                     order = [section.find(".adminwright/skill-dir"),
                              section.find("dispatch prompt"),
                              section.find(".claude/skills/adminwright"),
-                             section.find("~/.claude/plugins/cache/"),
-                             section.find("~/.claude/plugins/marketplaces/"),
-                             section.find("filesystem search")]
+                             section.find("~/.claude/plugins/marketplaces/tarikai"),
+                             section.find("search for `admin_console_manifest.py`")]
                     self.assertNotIn(-1, order, str(path) + ": a lookup step is missing")
                     self.assertEqual(order, sorted(order),
                                      str(path) + ": the per-machine file must come first")
+                    # Claude Code deletes a versioned cache directory ~14 days after
+                    # an update; the lookup must not send an agent there.
+                    self.assertNotIn("plugins/cache", section, str(path))
+                    self.assertIn("STATUS: BLOCKED", section, str(path))
                 resolved = Path(machine_path(project))
                 script = resolved / "scripts" / "admin_console_manifest.py"
                 self.assertTrue(script.is_file())
@@ -994,8 +1004,8 @@ class TestMachinePaths(InstallBase):
             self.assertNotIn("tools/aw-a", text, str(path))
         for harness in sorted(ia.HARNESSES):
             for path in installed_agent_files(self.project, harness):
-                self.assertIn("python vendor/aw-b/scripts/admin_console_manifest.py",
-                              path.read_text(encoding="utf-8"), str(path))
+                self.assertEqual(named_skill_dir(path.read_text(encoding="utf-8")),
+                                 "vendor/aw-b", str(path))
         self.assertFalse(self.project.joinpath(*MACHINE_FILE).exists(),
                          "a skill inside the project needs no per-machine file")
         self.assertFalse((self.project / ".gitignore").exists())

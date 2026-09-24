@@ -82,7 +82,7 @@ rerun changes nothing.
 No file the installer writes for the project to commit holds a machine's absolute path.
 When the skill lives inside the project, every copy and the pointer block name it relative
 to the project root. When it lives outside (a plugin cache, `~/.claude/skills/`, a clone
-elsewhere), the copies say `<skill-dir>` where the source says `${CLAUDE_PLUGIN_ROOT}`, and
+elsewhere), the copies say `<skill>` where the source says `${CLAUDE_PLUGIN_ROOT}`, and
 the installer writes this machine's path to `.adminwright/skill-dir` and adds
 `/.adminwright/skill-dir` to the project's `.gitignore`. Each agent's "Locate the skill"
 section reads that file first, and falls back to its search list whenever the path it names

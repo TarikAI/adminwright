@@ -39,7 +39,7 @@ apart from the skill path. Native files are rebuilt from each source's `name`,
 No file the installer writes for a project to commit carries a machine's absolute
 path. A skill inside the project is named relative to the project root. A skill
 outside it (a plugin cache, ~/.claude/skills, a clone elsewhere) is named by the
-placeholder <skill-dir>, and this machine's absolute path goes to
+placeholder <skill>, and this machine's absolute path goes to
 .adminwright/skill-dir, which the installer adds to the project's .gitignore.
 Every agent's "Locate the skill" section reads that file before its search list.
 
@@ -66,11 +66,12 @@ from pathlib import Path
 
 TOKEN = "${CLAUDE_PLUGIN_ROOT}"
 # What installed copies say where the source says TOKEN, when the skill lives
-# outside the project: the placeholder SKILL.md already uses for the skill
-# directory. It is deliberately not a ${...} variable: outside a Claude Code
-# plugin no harness expands TOKEN, and Gemini CLI reads ${name} in a subagent
-# body as a template input and refuses to start a subagent it has no input for.
-PLACEHOLDER = "<skill-dir>"
+# outside the project: the placeholder every agent's "Locate the skill" section
+# defines and uses for the skill directory. It is deliberately not a ${...}
+# variable: outside a Claude Code plugin no harness expands TOKEN, and Gemini CLI
+# reads ${name} in a subagent body as a template input and refuses to start a
+# subagent it has no input for.
+PLACEHOLDER = "<skill>"
 # This machine's absolute skill path, for agents whose copies name PLACEHOLDER.
 # It differs per machine, so the installer git-ignores it.
 MACHINE_PATH_FILE = ".adminwright/skill-dir"
