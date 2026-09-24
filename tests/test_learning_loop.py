@@ -711,6 +711,66 @@ class TestStoreSync(unittest.TestCase):
         self.assertNotIn("unrelated-secret.txt", tracked)
         self.assertNotIn("salt", tracked.split())
 
+    def test_a_file_already_staged_is_never_committed_or_pushed(self):
+        # B syncs first, so A's sync must also JOIN histories: `-s ours` refuses
+        # an index that differs from HEAD, so the stray file must be unstaged,
+        # not merely left out of the commit.
+        self.append(self.b, ["p2:y1"])
+        self.sync(self.b)
+        secret = self.a / "passport-scan.txt"
+        secret.write_text("do not push me", encoding="utf-8")
+        self.git("-C", str(self.a), "add", "passport-scan.txt")
+        self.append(self.a, ["p1:x1"])
+        code, out, err = run("store", "sync", "--store", self.a, "--date", "2026-09-23")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("passport-scan.txt", err)
+        self.assertIn("not committed or pushed", err)
+        tracked = self.git("ls-tree", "-r", "--name-only", "main", cwd=self.remote).split()
+        self.assertEqual(sorted(tracked), [".gitignore", "README.md", "observations.jsonl"])
+        self.assertEqual(self.remote_ids(), {"p1:x1", "p2:y1"})
+        self.assertTrue(secret.exists(), "unstaging must not touch the file")
+        self.assertEqual(self.git("-C", str(self.a), "diff", "--cached", "--name-only").strip(), "")
+
+    def test_sync_warns_when_history_tracks_other_files(self):
+        stray = self.a / "notes.txt"
+        stray.write_text("committed by an old add -A sync", encoding="utf-8")
+        self.git("-C", str(self.a), "add", "notes.txt")
+        self.git("-C", str(self.a), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                 "commit", "-q", "-m", "old sync")
+        self.append(self.a, ["p1:x1"])
+        code, out, err = run("store", "sync", "--store", self.a, "--date", "2026-09-23")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("tracks files that are not store files: notes.txt", err)
+        self.assertIn("rm --cached", err)
+        code, out, err = run("store", "status", "--store", self.a)
+        self.assertIn("notes.txt", err)
+
+    def test_an_inherited_git_dir_cannot_redirect_the_store(self):
+        # A harvest-and-sync from a project's git hook inherits GIT_DIR (and in
+        # pre-commit, GIT_INDEX_FILE) pointing at the PROJECT's repository.
+        decoy = self.tmp / "project"
+        git_repository(decoy)
+        before = self.git("-C", str(decoy), "rev-list", "--all").split()
+        self.append(self.a, ["p1:x1"])
+        code, out, err = run("store", "sync", "--store", self.a, "--date", "2026-09-23",
+                             env={"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy)})
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.git("-C", str(decoy), "rev-list", "--all").split(), before,
+                         "the project's repository must be untouched")
+        self.assertEqual(self.remote_ids(), {"p1:x1"})
+
+    def test_remote_is_only_read_by_init(self):
+        other = self.tmp / "other.git"
+        code, out, err = run("store", "sync", "--store", self.a, "--remote", other,
+                             "--date", "2026-09-23")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("--remote is used only by `store init`", err)
+        self.assertIn(str(self.remote), err, "name the remote that was actually used")
+        self.assertFalse(other.exists())
+        code, out, err = run("store", "status", "--store", self.a, "--remote", other)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("--remote is used only by `store init`", err)
+
     def test_sync_takes_the_store_lock(self):
         self.append(self.a, ["p1:x1"])
         lock = self.a / ".lock"

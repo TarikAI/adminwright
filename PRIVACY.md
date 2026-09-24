@@ -13,9 +13,11 @@ Every command of `scripts/admin_console_manifest.py` (`init`, `migrate`, `valida
 files on your machine only. The validator is Python standard library with no network access.
 
 `store sync` is the one exception among them, and only when you configure it: it runs `git`
-against a remote **you** choose and pushes `observations.jsonl`, the store's `README.md` and
-`.gitignore`. Point it at a private repository, because observations quote your engineering
-notes. The store's salt, lock and outbox are never pushed.
+against a remote **you** choose (`store init --remote`) and pushes `observations.jsonl`, the
+store's `README.md` and `.gitignore`. Point it at a private repository, because observations
+quote your engineering notes. The store's salt, lock and outbox are never pushed, and nothing
+else is committed: a file staged in the store by hand is unstaged with a warning, and if an
+older sync committed other files, every sync warns and says how to stop tracking them.
 
 ## Optional integrations
 

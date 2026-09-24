@@ -4113,11 +4113,17 @@ def global_store_dir(override=None):
 
 
 def run_git(store, *args, check=True):
-    """Run git inside the store. Only the store subcommand needs git."""
+    """Run git inside the store. Only the store subcommand needs git.
+
+    Without the inherited GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE: run from a
+    project's git hook, those point at the PROJECT's repository, and `-C store`
+    would then commit the store into it.
+    """
+    environment = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARIABLES}
     try:
         completed = subprocess.run(
             ["git", "-C", str(store)] + list(args),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            capture_output=True, text=True, encoding="utf-8", errors="replace", env=environment,
         )
     except FileNotFoundError:
         raise ManifestError(
@@ -5674,12 +5680,71 @@ STORE_README = (
 
 
 def commit_store(store, message):
-    run_git(store, "add", "--", *[name for name in STORE_FILES if (store / name).exists()])
-    if run_git(store, "status", "--porcelain", "--", *STORE_FILES, check=False).stdout.strip():
+    """Commit the store files and nothing else, whatever else is staged.
+
+    `commit --only -- <paths>` records exactly those paths from the working
+    tree; anything another tool (or an interrupted older sync's `add -A`) left
+    staged stays out of the commit, so it can never be pushed.
+    """
+    present = [name for name in STORE_FILES if (store / name).exists()]
+    if not present:
+        return False
+    run_git(store, "add", "--", *present)
+    if run_git(store, "status", "--porcelain", "--", *present, check=False).stdout.strip():
         run_git(store, "-c", "user.name=adminwright", "-c", "user.email=adminwright@localhost",
-                "commit", "-q", "-m", message)
+                "commit", "-q", "--only", "-m", message, "--", *present)
         return True
     return False
+
+
+def git_paths(store, *args):
+    """NUL-separated path output of a git command, as a list; empty when git refuses."""
+    done = run_git(store, *args, check=False)
+    if done.returncode != 0:
+        return []
+    return [path for path in done.stdout.split("\0") if path]
+
+
+def unstage_foreign_paths(store):
+    """Unstage anything that is not a store file, and say so.
+
+    `commit --only` already keeps such a path out of the commit, but it stays in
+    the index, and the `-s ours` merge refuses an index that differs from HEAD:
+    sync would then fail with "Merge with strategy ours failed". Unstaging
+    touches nothing on disk.
+    """
+    foreign = [path for path in git_paths(store, "diff", "--cached", "--name-only", "-z")
+               if path not in STORE_FILES]
+    if foreign:
+        run_git(store, "reset", "-q", "--", *foreign, check=False)
+        stderr(
+            "WARN: " + str(len(foreign)) + " file(s) that are not store files were staged in "
+            + str(store) + ": " + ", ".join(foreign[:10]) + (" ..." if len(foreign) > 10 else "")
+            + ". They were unstaged (the files are untouched) and are not committed or pushed."
+        )
+    return foreign
+
+
+def foreign_tracked_paths(store):
+    """Paths the store's HEAD tracks that are not store files (an older `add -A` sync)."""
+    return [path for path in git_paths(store, "ls-tree", "-r", "--name-only", "-z", "HEAD")
+            if path not in STORE_FILES]
+
+
+def warn_foreign_tracked(store):
+    foreign = foreign_tracked_paths(store)
+    if foreign:
+        listed = " ".join(json.dumps(path) for path in foreign[:10])
+        stderr(
+            "WARN: the store's history tracks files that are not store files: "
+            + ", ".join(foreign[:10]) + (" ..." if len(foreign) > 10 else "")
+            + ". An earlier sync committed them, and every push sends them to the remote. "
+            "To stop tracking them (the files stay on disk): git -C \"" + str(store)
+            + "\" rm --cached -q -- " + listed + ", then git -C \"" + str(store)
+            + "\" commit -m \"untrack\" -- " + listed + ", then store sync. They stay in the "
+            "remote's history until you rewrite it."
+        )
+    return foreign
 
 
 def sync_store(store, args):
@@ -5693,6 +5758,7 @@ def sync_store(store, args):
     # The whole sync runs under the store lock: append_observations takes it, so
     # a harvest can no longer write between our read and our rewrite.
     with FileLock(store / ".lock"):
+        unstage_foreign_paths(store)
         # Normalise first, so what we commit is already the canonical union.
         write_observations(local_path, merge_observation_files(local_path))
         print(
@@ -5701,6 +5767,7 @@ def sync_store(store, args):
             else "Nothing new to commit."
         )
         if not has_remote:
+            warn_foreign_tracked(store)
             print("No remote configured; nothing to push.")
             return 0
         fetched = run_git(store, "fetch", "-q", "origin", check=False)
@@ -5740,6 +5807,7 @@ def sync_store(store, args):
                     + (joined.stderr or joined.stdout).strip()
                     + "\nThe local store is unchanged. Resolve by hand in " + str(store)
                 )
+        warn_foreign_tracked(store)
         pushed = run_git(store, "push", "-q", "origin", "HEAD:" + args.branch, check=False)
         if pushed.returncode != 0:
             raise ManifestError("push failed:\n" + (pushed.stderr or pushed.stdout).strip())
@@ -5750,6 +5818,19 @@ def sync_store(store, args):
 def cmd_store(args):
     store = global_store_dir(args.store)
     action = args.action
+    if args.remote and action != "init":
+        # `store sync --remote <url>` looked like it synced with <url>; it pushed
+        # to whatever `store init` had configured, and said nothing.
+        configured = "none configured"
+        if (store / ".git").exists():
+            existing = run_git(store, "remote", "get-url", "origin", check=False)
+            if existing.returncode == 0 and existing.stdout.strip():
+                configured = existing.stdout.strip()
+        stderr(
+            "WARN: --remote is used only by `store init`; `store " + action + "` ignores it and "
+            "uses the configured remote (" + configured + "). To change the remote, run "
+            "`store init --remote <url>`."
+        )
 
     if action == "status":
         records = read_observations(store)
@@ -5767,6 +5848,7 @@ def cmd_store(args):
             head = run_git(store, "log", "-1", "--format=%h %ci", check=False)
             print("Git remote: " + url)
             print("Last commit: " + (head.stdout.strip() or "(none)"))
+            warn_foreign_tracked(store)
         else:
             print("Git: not initialised. Run `store init` to sync across devices.")
         return 0
@@ -6544,7 +6626,11 @@ def build_parser():
     )
     store_parser.add_argument("action", choices=("init", "sync", "status"))
     store_parser.add_argument("--store", help="defaults to $ADMINWRIGHT_HOME or ~/.adminwright")
-    store_parser.add_argument("--remote", help="git URL to sync with; use a PRIVATE repository")
+    store_parser.add_argument(
+        "--remote",
+        help="with init: the git URL to sync with (use a PRIVATE repository); sync and status "
+             "use the remote init configured and warn if this is given",
+    )
     store_parser.add_argument("--branch", default="main")
     store_parser.add_argument("--date", help="caller-supplied date; the script never reads the clock")
     store_parser.set_defaults(func=cmd_store)
