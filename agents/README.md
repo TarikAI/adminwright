@@ -47,9 +47,9 @@ single-agent degradation rules in
 
 ## Installing the agents into any harness
 
-The agent files use the token `${CLAUDE_PLUGIN_ROOT}` for the skill directory. Claude Code
-expands it in plugin installs. For every other harness, run the installer — it resolves the
-skill path, bakes it into the prompts, and writes them where that harness discovers agents:
+The agent files name the skill directory `${CLAUDE_PLUGIN_ROOT}`, which Claude Code fills in
+for plugin installs. For every other harness, run the installer — it writes the prompts where
+that harness discovers agents, naming the skill in a way each machine can resolve:
 
 ```text
 python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <project-root>
@@ -68,10 +68,21 @@ python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <pr
 
 Native files carry only the fields that harness documents (`tools` and `model` from the
 Claude Code files are not carried over); `.adminwright/agents/` is the harness-neutral copy
-of the source files. The pointer block names the skill relative to the project root when
-the skill lives inside the project, and as `${CLAUDE_PLUGIN_ROOT}` otherwise, with the
-absolute path only in an HTML comment. It is delimited by marker comments, so rerunning
-with `--append-pointer` after the skill moves replaces it in place.
+of the source files. The pointer block is delimited by marker comments, so rerunning with
+`--append-pointer` after the skill moves replaces it in place.
+
+No file the installer writes for the project to commit holds a machine's absolute path.
+When the skill lives inside the project, every copy and the pointer block name it relative
+to the project root. When it lives outside (a plugin cache, `~/.claude/skills/`, a clone
+elsewhere), the copies say `<skill-dir>` where the source says `${CLAUDE_PLUGIN_ROOT}`, and
+the installer writes this machine's path to `.adminwright/skill-dir` and adds
+`/.adminwright/skill-dir` to the project's `.gitignore`. Each agent's "Locate the skill"
+section reads that file first, and falls back to its search list whenever the path it names
+does not exist. A teammate who pulls the committed agents needs the skill in one of those
+standard places, or one run of the installer, which writes their own
+`.adminwright/skill-dir`. The placeholder is deliberately not a `${...}` variable: outside
+a Claude Code plugin no harness expands `${CLAUDE_PLUGIN_ROOT}`, and Gemini CLI reads
+`${name}` in a subagent body as a template input and refuses to start the subagent.
 
 In harnesses that spawn subagents, dispatch each file as one. In harnesses that cannot, the
 pointer block instructs the main agent to adopt the files one at a time, sequentially, with

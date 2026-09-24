@@ -97,6 +97,68 @@ def make_tricky_skill(dest):
     return dest
 
 
+def make_runnable_skill(dest):
+    """A skill directory an agent could actually run: SKILL.md, the real agents
+    and the real manifest script."""
+    make_skill(dest)
+    (dest / "scripts").mkdir()
+    shutil.copy2(str(SKILL_ROOT / "scripts" / "admin_console_manifest.py"),
+                 str(dest / "scripts" / "admin_console_manifest.py"))
+    return dest
+
+
+MACHINE_FILE = (".adminwright", "skill-dir")
+
+
+def machine_path(project):
+    """The first line of the project's per-machine skill path file."""
+    return project.joinpath(*MACHINE_FILE).read_text(encoding="utf-8").split("\n", 1)[0]
+
+
+def committed_files(project):
+    """Every file the installer left that a project would commit: all of them
+    except the git-ignored per-machine path file."""
+    ignored = project.joinpath(*MACHINE_FILE)
+    return sorted(p for p in project.rglob("*") if p.is_file() and p != ignored)
+
+
+def machine_needles(*paths):
+    """Spellings of absolute paths that must never reach a committed file:
+    each path resolved and as written, plus the home directory, compared
+    lowercase with forward slashes."""
+    needles = set()
+    for path in paths:
+        needles.add(Path(path).resolve().as_posix().lower())
+        needles.add(os.path.abspath(str(path)).replace("\\", "/").lower())
+    home = Path.home().resolve()
+    if len(home.parts) > 2:  # a real home directory, not "/" or a drive root
+        needles.add(home.as_posix().lower())
+    return needles
+
+
+def leaks(project, needles):
+    """(file, needle) for every committed file that holds a machine path."""
+    found = []
+    for path in committed_files(project):
+        text = path.read_text(encoding="utf-8", errors="replace").replace("\\", "/").lower()
+        found += [(path.relative_to(project).as_posix(), n) for n in needles if n in text]
+    return found
+
+
+def git_ignores(project, relative):
+    """True/False from `git check-ignore` in a fresh repository at `project`, or
+    None when git is not installed. Global excludes are switched off so only the
+    project's own .gitignore decides."""
+    git = shutil.which("git")
+    if git is None:
+        return None
+    base = [git, "-c", "core.excludesFile=", "-C", str(project)]
+    if not (project / ".git").exists():
+        subprocess.run(base + ["init", "-q"], check=True, capture_output=True)
+    proc = subprocess.run(base + ["check-ignore", "-q", relative], capture_output=True)
+    return proc.returncode == 0
+
+
 # Where each harness's own documentation says custom agents live, written out
 # here independently of ia.HARNESSES (checked 2026-09-23; see the URLs beside the
 # HARNESSES entries): (directory, file pattern, frontmatter/TOML keys required).
@@ -126,7 +188,10 @@ class TestInstall(InstallBase):
         for name in ia.AGENT_ORDER:
             self.assertTrue((SKILL_ROOT / "agents" / (name + ".md")).exists(), name)
 
-    def test_generic_install_replaces_token_everywhere(self):
+    def test_generic_install_names_the_skill_without_a_machine_path(self):
+        # The skill (this repository) lives outside the project, so the copies
+        # name the placeholder; the absolute path goes only to the per-machine
+        # file. Before 6.18 was finished every copy carried the absolute path.
         code, out, _err = run("--harness", "generic", "--project-root", self.project)
         self.assertEqual(code, 0, out)
         target = self.project / ".adminwright" / "agents"
@@ -135,7 +200,10 @@ class TestInstall(InstallBase):
         for path in target.glob("*.md"):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("${CLAUDE_PLUGIN_ROOT}", text, path.name)
-            self.assertIn(SKILL_ROOT.as_posix(), text, path.name)
+            self.assertIn("python " + ia.PLACEHOLDER + "/scripts/admin_console_manifest.py", text,
+                          path.name)
+            self.assertNotIn(SKILL_ROOT.resolve().as_posix().lower(), text.lower(), path.name)
+        self.assertEqual(machine_path(self.project), SKILL_ROOT.resolve().as_posix())
 
     def test_opencode_gets_subagent_mode(self):
         code, _out, _err = run("--harness", "opencode", "--project-root", self.project)
@@ -280,7 +348,8 @@ class TestNativeFiles(InstallBase):
 
     def test_claude_only_frontmatter_does_not_leak_and_text_round_trips(self):
         skill = make_tricky_skill(self.scratch())
-        expected_body = TRICKY_BODY.replace(ia.TOKEN, skill.resolve().as_posix())
+        # the skill is outside the project, so the copies name the placeholder
+        expected_body = TRICKY_BODY.replace(ia.TOKEN, ia.PLACEHOLDER)
         for harness in ("opencode", "gemini", "cursor", "antigravity"):
             with self.subTest(harness=harness):
                 project = Path(tempfile.mkdtemp(prefix="adminwright-leak-"))
@@ -309,7 +378,7 @@ class TestNativeFiles(InstallBase):
     def test_codex_toml_parses_and_round_trips(self):
         skill = make_tricky_skill(self.scratch())
         self.install("codex", skill)
-        expected_body = TRICKY_BODY.replace(ia.TOKEN, skill.resolve().as_posix())
+        expected_body = TRICKY_BODY.replace(ia.TOKEN, ia.PLACEHOLDER)
         for name in ia.AGENT_ORDER:
             data = tomllib.loads((self.project / ".codex" / "agents" / (name + ".toml"))
                                  .read_text(encoding="utf-8"))
@@ -344,7 +413,11 @@ class TestNativeFiles(InstallBase):
                 self.addCleanup(shutil.rmtree, str(project), ignore_errors=True)
                 code, out, err = run("--harness", harness, "--project-root", project)
                 self.assertEqual(code, 0, out + err)
-                self.assertFalse((project / ".adminwright").exists())
+                self.assertFalse((project / ".adminwright" / "agents").exists())
+                # the skill (this repository) is outside the project, so the one
+                # thing under .adminwright is this machine's skill path
+                self.assertEqual(sorted(p.name for p in (project / ".adminwright").iterdir()),
+                                 ["skill-dir"])
 
     def test_pi_and_generic_have_no_native_location_and_invent_none(self):
         # Pi documents no agents concept ("build your own with extensions"), so
@@ -358,7 +431,10 @@ class TestNativeFiles(InstallBase):
                                      "--append-pointer")
                 self.assertEqual(code, 0, out + err)
                 top = sorted(p.name for p in project.iterdir())
-                self.assertEqual(top, [".adminwright"] + (["AGENTS.md"] if harness == "pi" else []))
+                # .gitignore ignores the per-machine skill path (the skill is
+                # outside the project); nothing else beyond the neutral copy
+                self.assertEqual(top, [".adminwright", ".gitignore"]
+                                 + (["AGENTS.md"] if harness == "pi" else []))
 
     def test_cursor_gets_agents_and_the_rule(self):
         self.install("cursor")
@@ -464,16 +540,17 @@ class TestPointerPaths(InstallBase):
                 for absolute in self.absolutes(self.project):
                     self.assertNotIn(absolute, text, path.name)
 
-    def test_absolute_path_appears_only_in_a_comment_when_the_skill_is_outside(self):
+    def test_no_absolute_path_reaches_the_pointer_when_the_skill_is_outside(self):
+        # AGENTS.md is committed; the machine path used to sit in an HTML comment
+        # there. The block now sends the reader to the git-ignored file instead.
         self.pointer(skill=SKILL_ROOT)
         text = (self.project / "AGENTS.md").read_text(encoding="utf-8")
-        absolute = SKILL_ROOT.resolve().as_posix()
-        self.assertIn(ia.TOKEN, text)
-        self.assertIn(absolute, text)
-        comments = re.findall(r"<!--(.*?)-->", text, flags=re.DOTALL)
-        holders = [c for c in comments if absolute in c]
-        self.assertEqual(len(holders), 1, "the absolute path must be inside exactly one comment")
-        self.assertNotIn(absolute, re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL))
+        flat = text.replace("\\", "/").lower()
+        for needle in machine_needles(SKILL_ROOT):
+            self.assertNotIn(needle, flat)
+        self.assertIn("`.adminwright/skill-dir`", text)
+        self.assertNotIn(ia.TOKEN, text)
+        self.assertEqual(machine_path(self.project), SKILL_ROOT.resolve().as_posix())
 
     def test_the_project_root_is_never_written_into_the_pointer(self):
         self.pointer(skill=SKILL_ROOT)
@@ -481,12 +558,15 @@ class TestPointerPaths(InstallBase):
         for absolute in self.absolutes(self.project):
             self.assertNotIn(absolute, text)
 
-    def test_a_hostile_path_cannot_close_the_comment_early(self):
-        block = ia.pointer_block(".adminwright/agents", ia.TOKEN, "codex", "/tmp/a-->b")
-        # start marker + the hint's own close + end marker; an unescaped `-->` in
-        # the path would make it four and end the comment early
-        self.assertEqual(block.count("-->"), 3)
-        self.assertIn("/tmp/a--%3Eb", block)
+    def test_a_hostile_skill_path_never_reaches_a_committed_file(self):
+        # The path used to be escaped into an HTML comment; now it is not written
+        # at all, whatever characters it holds. Only the per-machine file has it.
+        skill = make_skill(self.scratch() / "aw --`$x` dir")  # `<` `>` are invalid on Windows
+        self.pointer(skill=skill)
+        for path in committed_files(self.project):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("--`$x`", text, str(path))
+        self.assertEqual(machine_path(self.project), skill.resolve().as_posix())
 
     def test_reinstall_after_the_skill_moved_rewrites_the_pointer(self):
         agents_md = self.project / "AGENTS.md"
@@ -511,17 +591,38 @@ class TestPointerPaths(InstallBase):
         self.assertIn("vendor/aw-b", copy)
         self.assertNotIn("tools/aw-a", copy)
 
-    def test_reinstall_from_inside_to_outside_swaps_relative_for_variable(self):
+    def test_reinstall_from_inside_to_outside_swaps_relative_for_the_machine_file(self):
         inside = make_skill(self.project / "tools" / "aw-a")
         self.pointer(skill=inside)
         self.pointer(skill=SKILL_ROOT)
         text = (self.project / "AGENTS.md").read_text(encoding="utf-8")
         self.assertNotIn("tools/aw-a", text)
-        self.assertIn(ia.TOKEN, text)
+        self.assertIn("`.adminwright/skill-dir`", text)
         self.assertEqual(text.count(ia.MARKER_START), 1)
+        for path in (self.project / ".codex" / "agents").iterdir():
+            copy = path.read_text(encoding="utf-8")
+            self.assertNotIn("tools/aw-a", copy, path.name)
+            self.assertIn(ia.PLACEHOLDER + "/scripts/admin_console_manifest.py", copy, path.name)
 
     def test_an_old_marked_block_with_absolute_paths_is_replaced_in_place(self):
-        old = ia.pointer_block("/old/project/.adminwright/agents", "/old/machine/adminwright", "codex")
+        # What the installer wrote before 6.18 was finished: the machine path in an
+        # HTML comment inside the block.
+        old = "\n".join([
+            ia.MARKER_START,
+            "## Adminwright agent passes",
+            "",
+            "<!-- adminwright skill directory on the machine that ran the installer (not "
+            "portable): /old/machine/adminwright -->",
+            "",
+            "This project builds or audits its admin console under the adminwright skill,",
+            "whose directory is `${CLAUDE_PLUGIN_ROOT}` (start from its `SKILL.md`). The role",
+            "prompts in `/old/project/.adminwright/agents/` define six passes.",
+            "This harness also discovers the same prompts natively in `.codex/agents/`.",
+            "",
+            "Codex note: run the passes sequentially in one session, adopting one role file at",
+            "a time.",
+            ia.MARKER_END,
+        ]) + "\n"
         agents_md = self.project / "AGENTS.md"
         agents_md.write_text("# Rules\n\nAbove.\n\n" + old + "\n## Tail\n\nBelow.\n", encoding="utf-8")
         out = self.pointer(skill=SKILL_ROOT)
@@ -594,6 +695,181 @@ class TestPointerPaths(InstallBase):
         self.assertIn("UTF-8", err)
         self.assertNotIn("Traceback", err)
         self.assertEqual(agents_md.read_bytes(), b"caf\xe9 rules\n")
+
+
+def locate_section(text):
+    """The "Locate the skill" section of one installed agent file (Markdown, or
+    the developer_instructions of a Codex TOML file)."""
+    start = text.index("## Locate the skill")
+    end = text.find("\n## ", start + 1)
+    return text[start:end if end != -1 else len(text)]
+
+
+def installed_agent_files(project, harness):
+    """Every agent prompt the install wrote for `harness`: its native files and
+    the neutral copies."""
+    files = []
+    spec = ia.HARNESSES[harness]
+    if spec.native_dir:
+        files += [p for p in (project / spec.native_dir).rglob("*") if p.is_file()]
+    if spec.neutral_copy:
+        files += sorted((project / ".adminwright" / "agents").glob("*.md"))
+    return files
+
+
+class TestMachinePaths(InstallBase):
+    """No file a project commits holds a machine's path; the path lives in the
+    git-ignored .adminwright/skill-dir instead, and the agents find it (6.18)."""
+
+    def install(self, harness, skill, project=None, pointer=True):
+        args = ["--harness", harness, "--project-root", project or self.project,
+                "--skill-dir", skill]
+        code, out, err = run(*(args + (["--append-pointer"] if pointer else [])))
+        self.assertEqual(code, 0, out + err)
+        return out, err
+
+    def test_no_committed_file_holds_a_machine_path_for_any_harness(self):
+        # Before the fix every native and neutral copy carried the absolute
+        # skill path 6-12 times, in files teams commit (.claude/agents etc.).
+        skill = make_skill(self.scratch() / "adminwright")
+        for harness in sorted(ia.HARNESSES):
+            with self.subTest(harness=harness):
+                project = Path(tempfile.mkdtemp(prefix="adminwright-commit-"))
+                self.addCleanup(shutil.rmtree, str(project), ignore_errors=True)
+                self.install(harness, skill, project)
+                self.assertTrue(committed_files(project))
+                self.assertEqual(leaks(project, machine_needles(skill, project)), [])
+                for path in installed_agent_files(project, harness):
+                    text = path.read_text(encoding="utf-8")
+                    self.assertIn(ia.PLACEHOLDER + "/scripts/admin_console_manifest.py", text,
+                                  str(path))
+                    self.assertNotIn(ia.TOKEN, text, str(path))
+
+    def test_the_machine_path_file_is_written_and_git_ignored(self):
+        skill = make_skill(self.scratch() / "adminwright")
+        for harness in sorted(ia.HARNESSES):
+            with self.subTest(harness=harness):
+                project = Path(tempfile.mkdtemp(prefix="adminwright-ignored-"))
+                self.addCleanup(shutil.rmtree, str(project), ignore_errors=True)
+                out, _err = self.install(harness, skill, project)
+                self.assertEqual(machine_path(project), skill.resolve().as_posix())
+                gitignore = (project / ".gitignore").read_text(encoding="utf-8")
+                self.assertIn("\n" + ia.GITIGNORE_ENTRY + "\n", "\n" + gitignore)
+                self.assertIn(".adminwright/skill-dir", out, "the install must say where the path went")
+                self.assertIn(".gitignore", out)
+                ignored = git_ignores(project, ".adminwright/skill-dir")
+                if ignored is not None:
+                    self.assertTrue(ignored, "git must ignore the per-machine path file")
+                    self.assertFalse(git_ignores(project, ".adminwright/agents/adminwright-qa.md"),
+                                     "only the per-machine file is ignored, not the agents")
+
+    def test_the_installed_locate_section_resolves_through_the_machine_file(self):
+        # Every copy names the placeholder, which never exists as a path, so an
+        # agent following its "Locate the skill" section must reach step 1: the
+        # per-machine file. That file must name a skill whose script runs.
+        skill = make_runnable_skill(self.scratch() / "adminwright")
+        for harness in sorted(ia.HARNESSES):
+            with self.subTest(harness=harness):
+                project = Path(tempfile.mkdtemp(prefix="adminwright-locate-"))
+                self.addCleanup(shutil.rmtree, str(project), ignore_errors=True)
+                self.install(harness, skill, project)
+                files = installed_agent_files(project, harness)
+                self.assertEqual(len(files) % len(ia.AGENT_ORDER), 0, files)
+                for path in files:
+                    section = locate_section(path.read_text(encoding="utf-8"))
+                    named = re.search(r"python (\S+)/scripts/admin_console_manifest\.py", section)
+                    self.assertIsNotNone(named, str(path))
+                    self.assertEqual(named.group(1), ia.PLACEHOLDER, str(path))
+                    self.assertFalse((project / named.group(1) / "scripts").exists())
+                    order = [section.find(".adminwright/skill-dir"),
+                             section.find("dispatch prompt"),
+                             section.find(".claude/skills/adminwright"),
+                             section.find("~/.claude/plugins/cache/"),
+                             section.find("~/.claude/plugins/marketplaces/"),
+                             section.find("filesystem search")]
+                    self.assertNotIn(-1, order, str(path) + ": a lookup step is missing")
+                    self.assertEqual(order, sorted(order),
+                                     str(path) + ": the per-machine file must come first")
+                resolved = Path(machine_path(project))
+                script = resolved / "scripts" / "admin_console_manifest.py"
+                self.assertTrue(script.is_file())
+                proc = subprocess.run([sys.executable, str(script), "--version"],
+                                      capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_moving_the_skill_outside_the_project_rewrites_only_the_machine_file(self):
+        first = make_skill(self.scratch() / "aw-a")
+        for harness in sorted(ia.HARNESSES):
+            self.install(harness, first)
+        before = {p: p.read_bytes() for p in committed_files(self.project)}
+        second = self.scratch() / "aw-b"
+        shutil.move(str(first), str(second))
+        for harness in sorted(ia.HARNESSES):
+            self.install(harness, second)
+        after = {p: p.read_bytes() for p in committed_files(self.project)}
+        self.assertEqual(after, before, "committed files must not change when the skill moves")
+        self.assertEqual(machine_path(self.project), second.resolve().as_posix())
+        self.assertEqual(leaks(self.project, machine_needles(first, second, self.project)), [])
+
+    def test_moving_the_skill_inside_the_project_rewrites_every_copy(self):
+        first = make_skill(self.project / "tools" / "aw-a")
+        for harness in sorted(ia.HARNESSES):
+            self.install(harness, first)
+        (self.project / "vendor").mkdir()
+        second = self.project / "vendor" / "aw-b"
+        shutil.move(str(first), str(second))
+        for harness in sorted(ia.HARNESSES):
+            self.install(harness, second)
+        for path in committed_files(self.project):
+            if "vendor" in path.relative_to(self.project).parts:
+                continue  # the skill itself
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("tools/aw-a", text, str(path))
+        for harness in sorted(ia.HARNESSES):
+            for path in installed_agent_files(self.project, harness):
+                self.assertIn("python vendor/aw-b/scripts/admin_console_manifest.py",
+                              path.read_text(encoding="utf-8"), str(path))
+        self.assertFalse(self.project.joinpath(*MACHINE_FILE).exists(),
+                         "a skill inside the project needs no per-machine file")
+        self.assertFalse((self.project / ".gitignore").exists())
+
+    def test_an_inside_install_refreshes_a_machine_file_an_outside_one_left(self):
+        outside = make_skill(self.scratch() / "adminwright")
+        self.install("codex", outside)
+        inside = make_skill(self.project / "vendor" / "adminwright")
+        self.install("codex", inside)
+        self.assertEqual(machine_path(self.project), inside.resolve().as_posix(),
+                         "the per-machine file must never point at a stale location")
+
+    def test_an_existing_gitignore_gains_the_entry_once_and_keeps_its_rules(self):
+        skill = make_skill(self.scratch() / "adminwright")
+        gitignore = self.project / ".gitignore"
+        gitignore.write_bytes(b"node_modules/\n!keep.log")  # no trailing newline
+        self.install("gemini", skill)
+        self.install("codex", skill)
+        data = gitignore.read_bytes()
+        self.assertTrue(data.startswith(b"node_modules/\n!keep.log\n"), data)
+        self.assertEqual(data.count(ia.GITIGNORE_ENTRY.encode("utf-8")), 1)
+        self.assertTrue(data.endswith((ia.GITIGNORE_ENTRY + "\n").encode("utf-8")))
+
+    def test_a_crlf_gitignore_stays_crlf(self):
+        skill = make_skill(self.scratch() / "adminwright")
+        gitignore = self.project / ".gitignore"
+        gitignore.write_bytes(b"dist/\r\n")
+        self.install("pi", skill)
+        data = gitignore.read_bytes()
+        self.assertEqual(data.count(b"\n"), data.count(b"\r\n"), "mixed line endings")
+        self.assertIn(ia.GITIGNORE_ENTRY.encode("utf-8") + b"\r\n", data)
+
+    def test_a_non_utf8_gitignore_is_left_alone_with_a_warning(self):
+        skill = make_skill(self.scratch() / "adminwright")
+        gitignore = self.project / ".gitignore"
+        gitignore.write_bytes(b"caf\xe9/\n")
+        _out, err = self.install("cursor", skill)
+        self.assertEqual(gitignore.read_bytes(), b"caf\xe9/\n")
+        self.assertIn("WARNING", err)
+        self.assertIn(ia.GITIGNORE_ENTRY, err)
+        self.assertTrue(self.project.joinpath(*MACHINE_FILE).is_file())
 
 
 class TestLineEndingsAndConsole(InstallBase):

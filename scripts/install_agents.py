@@ -3,10 +3,9 @@
 """Install the adminwright agents into any harness.
 
 The agent files in <skill-dir>/agents/ are written once, harness-neutral, with the
-token ${CLAUDE_PLUGIN_ROOT} standing for the skill directory. Claude Code expands
-that token in plugin installs; every other harness receives copies with the token
-already replaced, written in the shape and at the location that harness discovers
-agents today. Standard library only.
+token ${CLAUDE_PLUGIN_ROOT} standing for the skill directory. Claude Code fills it
+in for plugin installs; every other harness receives copies written in the shape
+and at the location that harness discovers agents today. Standard library only.
 
 Usage:
 
@@ -32,16 +31,17 @@ copy and the pointer block; no location is invented for it.
                   (Pi has no built-in subagents)
     generic       .adminwright/agents/ + pointer block printed only
 
-.adminwright/agents/ is the harness-neutral fallback: the source files, verbatim,
-with the skill path resolved. Native files are rebuilt from each source's `name`,
+.adminwright/agents/ is the harness-neutral fallback: the source files, verbatim
+apart from the skill path. Native files are rebuilt from each source's `name`,
 `description` and body only, so Claude-specific frontmatter (`tools`, `model`)
 never reaches a harness that would misread it.
 
-Paths written into files a project may commit are never machine-absolute where
-that can be avoided: the skill is named relative to the project root when it lives
-inside the project, and as ${CLAUDE_PLUGIN_ROOT} otherwise, with the absolute path
-only inside an HTML comment. The agent copies are executable prompts, so a skill
-outside the project still gets its resolved absolute path there.
+No file the installer writes for a project to commit carries a machine's absolute
+path. A skill inside the project is named relative to the project root. A skill
+outside it (a plugin cache, ~/.claude/skills, a clone elsewhere) is named by the
+placeholder <skill-dir>, and this machine's absolute path goes to
+.adminwright/skill-dir, which the installer adds to the project's .gitignore.
+Every agent's "Locate the skill" section reads that file before its search list.
 
 For harnesses without native subagent support, the pointer block instructs the
 main agent to run the passes sequentially with distinct agent ids, per the
@@ -62,6 +62,18 @@ from collections import namedtuple
 from pathlib import Path
 
 TOKEN = "${CLAUDE_PLUGIN_ROOT}"
+# What installed copies say where the source says TOKEN, when the skill lives
+# outside the project: the placeholder SKILL.md already uses for the skill
+# directory. It is deliberately not a ${...} variable: outside a Claude Code
+# plugin no harness expands TOKEN, and Gemini CLI reads ${name} in a subagent
+# body as a template input and refuses to start a subagent it has no input for.
+PLACEHOLDER = "<skill-dir>"
+# This machine's absolute skill path, for agents whose copies name PLACEHOLDER.
+# It differs per machine, so the installer git-ignores it.
+MACHINE_PATH_FILE = ".adminwright/skill-dir"
+GITIGNORE_ENTRY = "/" + MACHINE_PATH_FILE
+GITIGNORE_COMMENT = "# adminwright: this machine's skill path, written by install_agents.py"
+
 MARKER_START = "<!-- adminwright-agents:start -->"
 MARKER_END = "<!-- adminwright-agents:end -->"
 
@@ -211,16 +223,16 @@ def relative_inside(path, root):
 
 
 def skill_reference(skill_dir, project_root):
-    """How committed text names the skill: (display, absolute hint or None).
+    """How committed files name the skill: (text, project-relative path or None).
 
-    Inside the project: a project-relative path, nothing machine-specific.
-    Outside it: the ${CLAUDE_PLUGIN_ROOT} variable, and the absolute path is
-    returned separately so it can live in an HTML comment only.
+    Inside the project: the project-relative path, which is right on every
+    machine. Outside it: PLACEHOLDER, never the absolute path; that goes to the
+    git-ignored MACHINE_PATH_FILE instead.
     """
     rel = relative_inside(skill_dir, project_root)
     if rel is not None:
-        return rel, None
-    return TOKEN, portable(skill_dir)
+        return rel, rel
+    return PLACEHOLDER, None
 
 
 # --- source agent files ---------------------------------------------------------
@@ -267,7 +279,7 @@ def frontmatter_fields(block):
 
 
 def load_agent(path, skill_text):
-    """Read one source agent file, resolve the skill token, split it into parts."""
+    """Read one source agent file, name the skill, split it into parts."""
     text = path.read_text(encoding="utf-8")  # universal newlines: always "\n" here
     if text.startswith("\ufeff"):
         text = text[1:]
@@ -346,6 +358,84 @@ def write_text(path, text):
         handle.write(text)
 
 
+# --- this machine's skill path --------------------------------------------------
+
+def record_machine_path(project_root, skill_dir):
+    """Write this machine's absolute skill path to MACHINE_PATH_FILE.
+
+    One line, forward slashes, so an agent (or a shell) can read it as is.
+    Returns True when the file changed.
+    """
+    path = project_root / MACHINE_PATH_FILE
+    text = portable(skill_dir) + "\n"
+    if path.is_file():
+        try:
+            if path.read_text(encoding="utf-8") == text:
+                return False
+        except UnicodeDecodeError:
+            pass
+    write_text(path, text)
+    return True
+
+
+def ignore_machine_path(project_root):
+    """Make the project's .gitignore ignore MACHINE_PATH_FILE.
+
+    Returns "created", "added", "present", or "unreadable" for a .gitignore that
+    is not UTF-8, which is left untouched for the caller to warn about. A file
+    that is CRLF throughout stays CRLF; everything already in it is kept.
+    """
+    path = project_root / ".gitignore"
+    if not path.exists():
+        write_text(path, GITIGNORE_COMMENT + "\n" + GITIGNORE_ENTRY + "\n")
+        return "created"
+    try:
+        existing, newline = read_instruction_file(path)
+    except InstallError:
+        return "unreadable"
+    entries = {line.strip() for line in existing.split("\n")}
+    if GITIGNORE_ENTRY in entries or MACHINE_PATH_FILE in entries:
+        return "present"
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    if existing.strip():
+        existing += "\n"
+    merged = existing + GITIGNORE_COMMENT + "\n" + GITIGNORE_ENTRY + "\n"
+    with open(str(path), "w", encoding="utf-8", newline="") as handle:
+        handle.write(merged.replace("\n", newline) if newline != "\n" else merged)
+    return "added"
+
+
+def report_machine_path(project_root, skill_dir, needed):
+    """Keep MACHINE_PATH_FILE current and git-ignored.
+
+    Written whenever the committed files name PLACEHOLDER (`needed`); refreshed,
+    never left stale, when an earlier install wrote it and the skill now lives
+    inside the project.
+    """
+    path = project_root / MACHINE_PATH_FILE
+    if not needed and not path.exists():
+        return
+    if record_machine_path(project_root, skill_dir):
+        if needed:
+            print("Wrote this machine's skill path to " + str(path) + "; the agent files name "
+                  "the skill " + PLACEHOLDER + " and read the path from there")
+        else:
+            print("Refreshed this machine's skill path in " + str(path))
+    status = ignore_machine_path(project_root)
+    gitignore = project_root / ".gitignore"
+    if status == "created":
+        print("Created " + str(gitignore) + " ignoring " + GITIGNORE_ENTRY
+              + " (a machine's path must not be committed)")
+    elif status == "added":
+        print("Added " + GITIGNORE_ENTRY + " to " + str(gitignore)
+              + " (a machine's path must not be committed)")
+    elif status == "unreadable":
+        print("WARNING: " + str(gitignore) + " is not valid UTF-8, so it was not modified; add "
+              + GITIGNORE_ENTRY + " to it by hand so this machine's path is never committed",
+              file=sys.stderr)
+
+
 # --- pointer block --------------------------------------------------------------
 
 # Extra dispatch guidance per harness, appended inside the pointer block. Each
@@ -381,30 +471,27 @@ HARNESS_NOTES = {
 }
 
 
-def pointer_block(agent_dir, skill_dir, harness=None, absolute_hint=None, native_dir=None):
+def pointer_block(agent_dir, skill_rel, harness=None, native_dir=None):
     """The marker-delimited block that points a harness at the skill and agents.
 
-    `skill_dir` is how the block names the skill (a project-relative path, or the
-    ${CLAUDE_PLUGIN_ROOT} variable). `absolute_hint`, when given, is the skill's
-    absolute path on the installing machine; it appears only in an HTML comment.
+    `skill_rel` is the skill's path relative to the project root, or None when
+    the skill lives outside the project; the block then sends the reader to the
+    git-ignored MACHINE_PATH_FILE, so it never holds a machine's path.
     """
     lines = [MARKER_START, "## Adminwright agent passes", ""]
-    if absolute_hint is None:
+    if skill_rel is not None:
         lines += [
             "This project builds or audits its admin console under the adminwright skill at",
-            "`" + skill_dir + "` (start from its `SKILL.md`). Paths in this block are relative",
+            "`" + skill_rel + "` (start from its `SKILL.md`). Paths in this block are relative",
             "to the project root. The role prompts in",
         ]
     else:
         lines += [
-            "<!-- adminwright skill directory on the machine that ran the installer (not portable): "
-            + absolute_hint.replace(">", "%3E") + " -->",
-            "",
-            "This project builds or audits its admin console under the adminwright skill,",
-            "whose directory is `" + skill_dir + "` (start from its `SKILL.md`). Where that",
-            "variable is not set, use the path in the comment above or the lookup order in each",
-            "role file's \"Locate the skill\" section. Other paths in this block are relative to",
-            "the project root. The role prompts in",
+            "This project builds or audits its admin console under the adminwright skill (start",
+            "from its `SKILL.md`). Its directory differs per machine, so it is not written here:",
+            "read it from the first line of `" + MACHINE_PATH_FILE + "`, which the installer",
+            "writes and git-ignores, or resolve it with the \"Locate the skill\" section of any",
+            "role file. Paths in this block are relative to the project root. The role prompts in",
         ]
     lines += [
         "`" + agent_dir + "/` define six passes. If this harness can spawn subagents, dispatch",
@@ -559,12 +646,8 @@ def run_install(args):
         return fail("agent files missing: " + ", ".join(missing))
 
     spec = HARNESSES[args.harness]
-    skill_text, absolute_hint = skill_reference(skill_dir, project_root)
-    # The agent copies are executable prompts: outside the project they keep the
-    # resolved absolute path, because an unresolved variable would leave an agent
-    # unable to find the script. Inside the project they are project-relative.
-    copy_skill_text = skill_text if absolute_hint is None else portable(skill_dir)
-    agents = [load_agent(source, copy_skill_text) for source in sources]
+    skill_text, skill_rel = skill_reference(skill_dir, project_root)
+    agents = [load_agent(source, skill_text) for source in sources]
 
     if spec.native_format:
         native_dir = project_root / spec.native_dir
@@ -587,9 +670,10 @@ def run_install(args):
             for agent in agents:
                 print("  " + agent.stem + ".md")
 
+    report_machine_path(project_root, skill_dir, skill_rel is None)
+
     if spec.instruction_file or args.harness == "generic":
-        block = pointer_block(NEUTRAL_DIR, skill_text, args.harness, absolute_hint,
-                              spec.native_dir)
+        block = pointer_block(NEUTRAL_DIR, skill_rel, args.harness, spec.native_dir)
     if spec.instruction_file:
         instruction_name = spec.instruction_file
         instruction_path = project_root / instruction_name
