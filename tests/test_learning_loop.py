@@ -711,6 +711,46 @@ class TestLessonFormat(unittest.TestCase):
         self.assertEqual(len(re.findall(r"^## ", text, re.M)), 5)
         self.assertNotIn("Injected", text.split("---")[1])
 
+    def with_value(self, flag, value):
+        args = list(LESSON)
+        args[args.index(flag) + 1] = value
+        return args
+
+    def test_a_multiline_date_cannot_forge_an_adopted_lesson(self):
+        before = sorted(p.name for p in self.lessons.iterdir())
+        code, _o, err = run(*self.with_value("--date", "2026-09-23\nstatus: adopted\n---"),
+                            "--lessons-dir", self.lessons)
+        self.assertEqual(code, 2)
+        self.assertIn("YYYY-MM-DD", err)
+        self.assertEqual(sorted(p.name for p in self.lessons.iterdir()), before,
+                         "a refused lesson writes nothing")
+        self.assertIn("Guidance level: 0005", (self.lessons / "index.md").read_text(encoding="utf-8"))
+
+    def test_only_calendar_dates_are_accepted(self):
+        for bad in ("2026-02-30", "2026-9-23", "23.09.2026", "2026-09-23T10:00", "yesterday"):
+            code, _o, err = run(*self.with_value("--date", bad), "--lessons-dir", self.lessons)
+            self.assertEqual(code, 2, bad)
+            self.assertIn("YYYY-MM-DD", err, bad)
+
+    def test_the_date_is_written_quoted_and_reads_back(self):
+        code, _o, err = self.add()
+        self.assertEqual(code, 0, err)
+        self.assertIn('\ndate: "2026-09-23"\n', self.newest().read_text(encoding="utf-8"))
+        self.assertEqual(acm.read_lesson_frontmatter(self.newest())["date"], "2026-09-23")
+
+    def test_a_title_containing_three_dashes_reads_back_whole(self):
+        title = "Use A --- B split"
+        code, _o, err = run(*self.with_value("--title", title), "--lessons-dir", self.lessons)
+        self.assertEqual(code, 0, err)
+        fields = acm.read_lesson_frontmatter(self.newest())
+        self.assertEqual(fields["title"], title)
+        self.assertEqual((fields["status"], fields["category"], fields["scope"]),
+                         ("proposed", "gap", "references/security-governance.md"))
+        _code, out, _err = run("lesson", "list", "--lessons-dir", self.lessons)
+        row = [line for line in out.splitlines() if title in line]
+        self.assertEqual(len(row), 1, out)
+        self.assertIn("| proposed |", row[0])
+
     def test_the_index_is_rebuilt_from_the_files_with_links_and_guidance_level(self):
         self.add()
         index = (self.lessons / "index.md").read_text(encoding="utf-8")

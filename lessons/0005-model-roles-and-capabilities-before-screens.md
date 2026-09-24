@@ -1,7 +1,7 @@
 ---
 id: "0005"
 title: "Model roles and capabilities before screens"
-date: 2026-08-20
+date: "2026-08-20"
 category: gap
 scope: "SKILL.md"
 status: adopted

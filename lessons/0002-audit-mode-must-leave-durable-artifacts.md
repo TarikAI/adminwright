@@ -1,7 +1,7 @@
 ---
 id: "0002"
 title: "Audit mode must leave durable artifacts"
-date: 2026-08-08
+date: "2026-08-08"
 category: gap
 scope: "SKILL.md"
 status: adopted

@@ -1,12 +1,12 @@
 ---
 id: "0001"
-title: Authorize every target row in a bulk action
-date: 2026-03-02
+title: "Authorize every target row in a bulk action"
+date: "2026-03-02"
 category: incorrect-guidance
-scope: references/security-governance.md
+scope: "references/security-governance.md"
 status: adopted
 confidence: repeated
-platforms: [b2b-saas-multi-tenant, marketplace, next.js+postgres+prisma, laravel+mysql+queues]
+platforms: ["b2b-saas-multi-tenant", "marketplace", "next.js+postgres+prisma", "laravel+mysql+queues"]
 ---
 
 ## Trigger

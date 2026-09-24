@@ -1,7 +1,7 @@
 ---
 id: "0003"
 title: "Init must warn on unrecognised archetypes"
-date: 2026-08-08
+date: "2026-08-08"
 category: tooling
 scope: "scripts/admin_console_manifest.py"
 status: adopted

@@ -1,7 +1,7 @@
 ---
 id: "0004"
 title: "Emit must surface manifest health"
-date: 2026-08-09
+date: "2026-08-09"
 category: tooling
 scope: "scripts/admin_console_manifest.py"
 status: adopted

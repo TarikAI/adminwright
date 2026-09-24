@@ -4300,22 +4300,29 @@ def parse_frontmatter_value(raw):
 
 
 def read_lesson_frontmatter(path):
-    fields = {}
+    """The fields between a first line '---' and the next line that is exactly '---'.
+
+    Line by line, never by splitting the text on '---': a title such as
+    "Use A --- B split" is valid quoted YAML, and splitting on it cut the
+    frontmatter short, dropping the lesson's status from the index and from the
+    guidance level.
+    """
     try:
         text = decode_text_bytes(path.read_bytes(), path)
     except (OSError, ManifestError):
-        return fields
-    if not text.startswith("---"):
-        return fields
-    body = text.split("---", 2)
-    if len(body) < 3:
-        return fields
-    for line in body[1].splitlines():
+        return {}
+    lines = text.splitlines()
+    if not lines or lines[0].rstrip() != "---":
+        return {}
+    fields = {}
+    for line in lines[1:]:
+        if line.rstrip() == "---":
+            return fields
         if ":" not in line:
             continue
         key, _sep, value = line.partition(":")
         fields[key.strip()] = parse_frontmatter_value(value)
-    return fields
+    return {}  # never closed: not frontmatter
 
 
 def lesson_files(lessons_dir):
@@ -5903,7 +5910,7 @@ def build_lesson_text(lesson_id, args, date):
         "---",
         "id: " + yaml_quote(lesson_id),
         "title: " + yaml_quote(args.title),
-        "date: " + date,
+        "date: " + yaml_quote(date),
         "category: " + args.category,
         "scope: " + yaml_quote(args.scope),
         "status: " + args.status,
@@ -5927,13 +5934,34 @@ def build_lesson_text(lesson_id, args, date):
     return "\n".join(lines)
 
 
+def lesson_date(raw):
+    """A caller-supplied YYYY-MM-DD, checked against the calendar (the clock is never read).
+
+    Written unvalidated, `--date $'2026-09-23\\nstatus: adopted\\n---'` closed the
+    frontmatter early and opened the lesson as adopted, past the refusal below.
+    """
+    import datetime
+
+    value = raw.strip() if isinstance(raw, str) else ""
+    if value == "":
+        return None
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        try:
+            datetime.date(int(value[:4]), int(value[5:7]), int(value[8:]))
+            return value
+        except ValueError:
+            pass
+    raise ManifestError("--date must be a calendar date written YYYY-MM-DD, e.g. 2026-09-23; got "
+                        + json.dumps(value))
+
+
 def cmd_lesson_add(args):
     if args.status == "adopted":
         raise ManifestError(
             "a lesson is opened as 'proposed'; adoption is a separate reviewed edit "
             "(lessons/README.md, section 7), never part of opening it"
         )
-    date = text_of(args.date) or "unknown"
+    date = lesson_date(args.date) or "unknown"
     if date == "unknown":
         stderr("WARN: no --date supplied; recorded as 'unknown'")
     outbox = False

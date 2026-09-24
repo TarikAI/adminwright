@@ -37,26 +37,29 @@ collapsed to hyphens.
 
 ## Frontmatter
 
-Written by `lesson add`:
+Written by `lesson add`, every free-text value double-quoted so no argument can end the
+frontmatter or add a field:
 
 ```yaml
 ---
 id: "0001"
-title: Authorize every target row in a bulk action
-date: 2026-03-02
+title: "Authorize every target row in a bulk action"
+date: "2026-03-02"
 category: incorrect-guidance
-scope: references/security-governance.md
+scope: "references/security-governance.md"
 status: proposed
 confidence: observed-once
 platforms: []
 ---
 ```
 
+The frontmatter runs from the first line `---` to the next line that is exactly `---`.
+
 | Field | Values | Rule |
 |---|---|---|
 | `id` | `"NNNN"` | quoted, matches the file name |
 | `title` | one line | the rule in imperative form, not the symptom |
-| `date` | `YYYY-MM-DD` | the date the lesson was opened, never edited afterwards |
+| `date` | `"YYYY-MM-DD"` | the date the lesson was opened, never edited afterwards; `lesson add` refuses anything that is not a calendar date in that form |
 | `category` | `gap` \| `friction` \| `incorrect-guidance` \| `new-pattern` \| `tooling` | same vocabulary as `feedback[].category` in the manifest; may be re-classified at review, with a `Review notes` line |
 | `scope` | a reference path, skill-root-relative, e.g. `references/architecture.md` | exactly one file, and it must exist. A rule that needs two files is two lessons or one badly placed rule |
 | `status` | `proposed` \| `adopted` \| `rejected` \| `superseded` | see section 7 |
