@@ -539,7 +539,7 @@ class TestScreenEvidenceTokens(TempProject):
 
     def test_unrelated_test_file_is_flagged(self):
         _code, out, _err = self.screen_with_test(
-            "test('something entirely unrelated', () => { expect(1).toBe(1); });")
+            "test('something entirely unrelated', () => { expect(report()).toHaveLength(3); });")
         self.assertIn("evidence-token-match", out)
 
     def test_test_mentioning_the_route_is_accepted(self):

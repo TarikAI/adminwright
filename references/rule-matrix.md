@@ -21,7 +21,8 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `capability-route-unknown`* | error | error | error |
 | `capability-screen-link`* | error | error | error |
 | `capability-unreviewed`* | warn | warn | error |
-| `contested-needs-gap`* | warn | warn | error |
+| `contest-self-cleared` | warn | warn | error |
+| `contested-needs-gap` | warn | error | error |
 | `crosscutting-evidence` | warn | error | error |
 | `crosscutting-flag` | error | error | error |
 | `crosscutting-section-missing` | error | error | error |
@@ -32,6 +33,7 @@ finding prints its rule id in brackets, so a line of `validate` output can be lo
 | `declared-static-incomplete` | error | error | error |
 | `declared-static-self-approved` | off | warn | error |
 | `declared-static-unused` | warn | warn | warn |
+| `domain-term-unbacked` | error | error | error |
 | `entity-query-missing`* | warn | error | error |
 | `enum-invalid` | error | error | error |
 | `evidence-file-empty` | warn | error | error |

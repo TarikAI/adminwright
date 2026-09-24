@@ -40,8 +40,23 @@ class TestRemove(RemoveRenameCase):
     def test_removing_something_still_referenced_is_refused(self):
         code, _o, err = self.cli("remove", "--kind", "role", "--id", "ops")
         self.assertEqual(code, 2)
-        self.assertIn("unknown-role-reference", err)
+        self.assertIn("still depends on role 'ops'", err)
+        self.assertIn("screens[users].roles", err)
         self.assertEqual(len(self.read()["roles"]), 1)
+
+    def test_references_no_rule_checks_still_block_a_removal(self):
+        # A research source and a gap's capability field are checked by no rule, and a
+        # lifecycle transition is only a warning before release: all dangled silently.
+        data = self.read()
+        data["platform"]["researchSources"][0]["appliedTo"] = ["user.list"]
+        data["gaps"] = [{"id": "gap.one", "severity": "low", "description": "d", "status": "open",
+                         "rationale": "", "evidence": [], "capability": "user.list"}]
+        data["screens"][0]["capabilities"] = []
+        self.write(data)
+        code, _o, err = self.cli("remove", "--kind", "capability", "--id", "user.list")
+        self.assertEqual(code, 2)
+        self.assertIn("researchSources", err)
+        self.assertIn("gaps[gap.one].capability", err)
 
     def test_allow_invalid_removes_and_lists_what_dangles(self):
         code, _o, err = self.cli("remove", "--kind", "role", "--id", "ops", "--allow-invalid")
@@ -52,7 +67,7 @@ class TestRemove(RemoveRenameCase):
     def test_a_capability_is_found_across_entities(self):
         code, _o, err = self.cli("remove", "--kind", "capability", "--id", "user.list")
         self.assertEqual(code, 2, "the screen still lists it")
-        self.assertIn("unknown-capability-reference", err)
+        self.assertIn("screens[users].capabilities", err)
 
     def test_an_unknown_id_is_a_usage_error(self):
         code, _o, err = self.cli("remove", "--kind", "screen", "--id", "nope")

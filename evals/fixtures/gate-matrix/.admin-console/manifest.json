@@ -41,7 +41,10 @@
       "entityCounts": "",
       "peakConcurrentOperators": "",
       "retentionHorizon": ""
-    }
+    },
+    "domainTerms": [
+      "mock"
+    ]
   },
   "roles": [
     {
@@ -256,7 +259,8 @@
           "owner": "impl",
           "implementedBy": "impl",
           "reviewStatus": "reviewed",
-          "reviewedBy": "qa"
+          "reviewedBy": "qa",
+          "contestedBy": "qa"
         },
         {
           "id": "gamma.orphan",

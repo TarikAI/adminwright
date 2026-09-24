@@ -470,6 +470,7 @@ def build_matrix():
         "operationalObjectives": ["Exercise every gate"], "tenancy": "single-tenant",
         "regulatedData": ["billing"], "sourceSystems": ["postgres"],
         "archetypes": ["logistics-mobility"],        # archetype-coverage: models none of its domains
+        "domainTerms": ["mock"],                     # domain-term-unbacked: no entity is a Mock
     })
     m["roles"] = [
         {"id": "ops", "name": "Ops", "responsibilities": ["Run it"], "scopes": ["all"],
@@ -513,6 +514,7 @@ def build_matrix():
          "lifecycleStates": ["open"], "lifecycleTransitions": [],
          "capabilities": [
              capability(id="gamma.view", outcome="View gamma", roles=["ops"],
+                        contestedBy="qa",                   # contest-self-cleared: qa contested, qa cleared
                         entityStates={"from": ["open"], "to": []},
                         uiRoutes=["/admin/nowhere"],        # capability-route-unknown, capability-screen-link
                         serverOperations=["GammaRepo.find"],

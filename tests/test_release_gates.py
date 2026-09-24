@@ -316,7 +316,12 @@ class TestRouteSmokeTests(ReleaseGateCase):
             "  });\n"
             "}\n",
         )
-        self.cap["tests"] = ["tests/smoke.spec.ts"]
+        second = json.loads(json.dumps(self.cap))
+        second.update({"id": "user.export", "serverOperations": ["UserExport.run"]})
+        self.data["entities"][0]["capabilities"].append(second)
+        self.data["screens"][0]["capabilities"].append("user.export")
+        for capability in self.data["entities"][0]["capabilities"]:
+            capability["tests"] = ["tests/smoke.spec.ts"]
         self.data["screens"][0]["tests"] = ["tests/smoke.spec.ts"]
         self.data["crossCutting"]["authorization"]["policyTests"] = ["tests/smoke.spec.ts"]
         self.save()
@@ -324,6 +329,39 @@ class TestRouteSmokeTests(ReleaseGateCase):
         self.assertEqual(code, 1, out)
         self.assertIn("evidence-token-match", out)
         self.assertIn("test-file-shared", out)
+
+    def test_one_spec_for_a_capability_its_screen_and_policy_is_fine(self):
+        # A spec that names its capability may prove the capability, its screen and
+        # the authorization policy at once; only an unnamed shared spec is suspect.
+        self.write_file(
+            "tests/user.spec.ts",
+            "test('user.list on /admin/users', async () => {\n"
+            "  expect((await listUsers({tenantId: 't-1'})).length).toBe(3);\n"
+            "  expect(can('support', 'user.list', {})).toBe(false);\n"
+            "});\n",
+        )
+        self.data["crossCutting"]["authorization"]["policyTests"] = ["tests/user.spec.ts"]
+        self.assertNotIn("test-file-shared", self.rule_names("regulated"))
+
+    def test_a_named_matrix_spec_for_many_capabilities_is_fine(self):
+        self.write_file(
+            "tests/matrix.spec.ts",
+            "it.each([\n"
+            "  ['support', 'user.list', true], ['support', 'user.second', false],\n"
+            "  ['ops', 'user.list', true], ['ops', 'user.second', true],\n"
+            "])('%s may %s', (role, capability, allowed) => {\n"
+            "  expect(can(role, capability)).toBe(allowed);\n"
+            "});\n",
+        )
+        second = json.loads(json.dumps(self.cap))
+        second.update({"id": "user.second", "serverOperations": ["R.g"]})
+        self.data["entities"][0]["capabilities"].append(second)
+        self.data["screens"][0]["capabilities"].append("user.second")
+        for capability in self.data["entities"][0]["capabilities"]:
+            capability["tests"] = ["tests/matrix.spec.ts"]
+        names = self.rule_names("regulated")
+        self.assertNotIn("test-file-shared", names)
+        self.assertNotIn("test-asserts-nothing", names)
 
     def test_a_spec_cited_by_many_capabilities_needs_that_many_assertions(self):
         self.write_file(

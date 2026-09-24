@@ -348,7 +348,10 @@ RULES = {
     "test-file-shared": STRICT_ONLY,
     "implementer-unrecorded": LATE,
     "not-applicable-undecided": STRICT_ONLY,
-    "contested-needs-gap": LATE,
+    # The write guard refuses `contested` without its gap at standard and above,
+    # which is what the agents' contest protocol says happens.
+    "contested-needs-gap": QUALITY,
+    "contest-self-cleared": LATE,
     # round 2: monorepo and headless layouts
     "project-root-outside": E3,
     # round 2: not-applicable needs a decision about not-applicability
@@ -359,6 +362,7 @@ RULES = {
     "profile-below-regulated-data": E3,
     # round 2: evidence is the output of a run
     "evidence-not-output": QUALITY,
+    "domain-term-unbacked": E3,
 }
 
 # Rules that describe an UNFINISHED model rather than a malformed one.
@@ -392,7 +396,6 @@ COMPLETENESS_RULES = frozenset(
         "capability-unreviewed",
         "implementer-unrecorded",
         "not-applicable-undecided",
-        "contested-needs-gap",
     }
 )
 
@@ -597,6 +600,7 @@ SCANNED_CAPABILITY_FIELDS = (
     "authorizationPolicies",
     "auditEvents",
     "safeguards",
+    "entrypoints",
     "tests",
     "evidence",
 )
@@ -630,6 +634,7 @@ class Findings:
         self.manifest_dir = None
         self.manifest_file = None
         self.manifest_digest = ""
+        self.domain_terms = []
         self.static_allowed = frozenset()
 
     def severity_for(self, rule):
@@ -1320,19 +1325,46 @@ def non_evidence_reason(candidate, role):
 # Every alternative is anchored: an unanchored `assert` matched
 # `import { assert } from 'chai'`, a comment reading "add assertions later", and
 # `jwt.verify(...)`, so a file with no test in it satisfied the check.
+#
+# Case-sensitive on purpose: `shouldBe` (Kotest) and `Assert.Equal` (xUnit) are
+# idioms, `shoulder` and `assertive` are not. Bare `ok(` and `check(` are gone: a
+# log line 'tenant.suspend ok (12 ms)' counted as an assertion, and Kotlin's
+# stdlib `check(...)` made a production service pass as its own test.
 ASSERTION_PATTERN = re.compile(
-    r"\bassert\w*\s*[(!]"                       # assert(x), assertEqual(..), assert_eq!(..)
-    r"|\bassert\.\w+"                           # assert.equal, testify assert.Equal, xUnit
-    r"|^\s*assert\s+\S"                         # Python: assert x == y
-    r"|\bexpect\s*\("
-    r"|\.should\b|\bshould\s*\("
-    r"|\.to(?:be|equal|match|contain|have|throw)\w*"
+    r"\bassert\w*\s*[(!]"                       # assert(x), assertEqual(..), assert_eq!(..), $this->assertSame(
+    r"|\b[Aa]ssert\.\w+"                         # node:assert, chai assert.equal, testify, xUnit/NUnit Assert.X
+    r"|^\s*assert\s+\S"                         # Python, ExUnit: assert x == y
+    r"|\brefute\w*\b"                           # ExUnit refute
+    r"|\b[Ee]xpect\s*[({]"                       # jest/vitest/chai/RSpec expect(..) and expect { }, Gomega Expect(
+    r"|#(?:expect|require)\s*\("                 # swift-testing
+    r"|\bis_expected\b"                          # RSpec one-liner
+    r"|\.[Ss]hould\b|\bshould\s*\("               # chai should, FluentAssertions .Should(), Gomega
+    r"|\bshould[A-Z]\w*"                        # Kotest shouldBe / shouldThrow
+    r"|\bmust(?:Be|Equal)\w*"                   # ScalaTest mustBe
+    r"|\.(?:not\.)?to(?:Be|Equal|Match|Contain|Have|Throw|Include|StrictEqual)\w*\s*\("
+    r"|\.to\.(?:be|equal|eql|include|contain|have|match|throw|deep)\b"          # chai
+    r"|\.to\s+(?:eq|eql|equal|be|include|match|raise_error|change|have_\w+|contain_exactly|satisfy)\b"  # RSpec
+    r"|\.(?:To|NotTo|ToNot)\s*\("                # Gomega
     r"|(?<![\w.])verify\s*\("                   # Mockito verify(..), never jwt.verify
-    r"|\bxctassert\w*\s*\("
-    r"|\brequire\.(?:no)?error\s*\("
-    r"|(?<![\w.])ok\s*\("
-    r"|(?<![\w.])check\s*\(",
-    re.I | re.M,
+    r"|\bXCTAssert\w*\s*\("                     # XCTest
+    r"|\b(?:require|check)\.\w+\s*\("            # testify require., pytest-check check.
+    r"|\bt\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\s*\("                     # Go testing
+    r"|\bt\.(?:ok|notOk|equal|same|match|throws|deepEqual|strictEqual|notEqual|is|truthy|falsy)\s*\("  # tap, ava
+    r"|\bpytest\.raises\s*\(",
+    re.M,
+)
+
+# An assertion about constants proves nothing about the code: `expect(true).toBe(true)`
+# satisfied every test rule. These are removed before assertions are counted.
+_LITERAL = r"""(?:true|false|True|False|null|nil|None|undefined|-?\d+(?:\.\d+)?|'[^'\n]*'|"[^"\n]*")"""
+TAUTOLOGY_PATTERN = re.compile(
+    r"\b[Ee]xpect\s*\(\s*" + _LITERAL + r"\s*\)\s*(?:\.\s*not)?\s*\.\s*to\w*\s*\(\s*(?:" + _LITERAL + r")?\s*\)"
+    r"|\bassert\w*\s*\(\s*" + _LITERAL + r"\s*(?:,\s*" + _LITERAL + r"\s*)?\)"
+    r"|\b[Aa]ssert\.\w+\s*\(\s*" + _LITERAL + r"\s*(?:,\s*" + _LITERAL + r"\s*)?\)"
+    r"|\bassert(?:_eq|_ne)?!\s*\(\s*" + _LITERAL + r"\s*(?:,\s*" + _LITERAL + r"\s*)?\)"
+    r"|^\s*assert\s+" + _LITERAL + r"\s*(?:==\s*" + _LITERAL + r"\s*)?$"
+    r"|\bXCTAssert\w*\s*\(\s*" + _LITERAL + r"\s*(?:,\s*" + _LITERAL + r"\s*)?\)",
+    re.M,
 )
 
 # Comments are stripped before assertion matching so a TODO that mentions
@@ -1344,13 +1376,51 @@ _LINE_COMMENT = re.compile(
 
 # Something a test runner would actually run. A file named like a test passes on
 # its name alone; anything else has to contain a runner call.
+#
+# Names are recognised only with a source-code extension: `.test.<anything>` let
+# 'suspend.test.log' pass as a test on its name alone.
+_TEST_SOURCE_EXT = (
+    r"(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|py|rb|go|rs|kt|kts|java|cs|php|swift|scala|ex|exs"
+    r"|dart|vue|svelte|groovy)"
+)
 TEST_NAME_PATTERN = re.compile(
-    r"(?:\.(?:spec|test)\.[A-Za-z0-9]+$|_test\.(?:py|go|rb|exs?)$|(?:^|/)test_[^/]*\.py$"
-    r"|\.cs$|\.kt$|\.swift$|\.java$)"
+    r"(?:"
+    r"\.(?:spec|test|e2e|cy)\." + _TEST_SOURCE_EXT + r"$"          # user.spec.ts, users.cy.ts, x.e2e.ts
+    r"|_(?:test|spec)\.(?:py|go|rb|exs|dart|ts|js)$"               # user_test.go, user_spec.rb, x_test.exs
+    r"|(?:^|/)test_[^/]*\.py$"                                     # test_user.py
+    r"|(?:^|/)[^/]*(?:Test|Tests|Spec|Specs|IT|Suite)\.(?:php|java|kt|kts|cs|swift|scala|groovy)$"
+    r"|(?:^|/)__tests__/[^/]+\." + _TEST_SOURCE_EXT + r"$"
+    r")"
 )
 TEST_RUNNER_PATTERN = re.compile(
-    r"(?<![\w.])(?:test|it|describe|suite)\s*(?:\.\w+\s*)?\(|\bdef\s+test_|\bfunc\s+Test"
-    r"|#\[test\]|\[(?:Fact|Theory|Test|TestMethod)\]|@Test\b|@pytest\.|\bRSpec\.describe\b"
+    r"(?<![\w.])(?:test|it|describe|suite|context|specify)\s*(?:\.\w+\s*)*\("   # jest/vitest/mocha/node:test/Pest
+    r"|\bdef\s+test_\w*|\bclass\s+Test\w*|@pytest\."
+    r"|\bfunc\s+Test\w*\s*\(|\bfunc\s+test\w*\s*\("                           # Go, XCTest
+    r"|#\[(?:[\w:]+::)?test\b|#\[rstest\b|#\[test_case\b"                     # Rust incl. tokio::test
+    r"|\[\s*(?:Fact|Theory|Test|TestMethod|TestCase|DataTestMethod)\b"           # .NET
+    r"|@(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b"      # JUnit, swift-testing
+    r"|\bpublic\s+function\s+test\w*\s*\(|@test\b|#\[Test\]"                  # PHPUnit
+    r"|\bextends\s+(?:[\w\\]+\\)?TestCase\b|:\s*XCTestCase\b"
+    r"|\bextends\s+(?:Any)?(?:FunSpec|FlatSpec|WordSpec|FreeSpec|FunSuite|StringSpec|BehaviorSpec|DescribeSpec)\b"
+    r"|:\s*(?:FunSpec|StringSpec|BehaviorSpec|DescribeSpec|ShouldSpec|WordSpec)\s*\("
+    r"|\bRSpec\.describe\b"
+    r"|^\s*(?:describe|context|it|specify|feature|scenario)\s+['\"\w:]"          # RSpec bare describe
+    r"|^\s*test\s+['\"]",                                                       # ExUnit / minitest
+    re.M,
+)
+# JVM, .NET and Swift sources also call check()/require() and mention ids in
+# production code, so there a runner marker only counts inside a test source set.
+TEST_DIR_PATTERN = re.compile(
+    r"(?:^|/)(?:tests?|specs?|__tests__|src/test|e2e|cypress|playwright|[\w-]*Tests)(?:/|$)", re.I
+)
+STRICT_TEST_SUFFIXES = (".kt", ".kts", ".java", ".cs", ".swift", ".scala", ".groovy")
+# A table-driven test runs one assertion per row; counting textual assertions made an
+# honest 9-row authorization matrix look like 2 assertions for 3 capabilities.
+PARAMETRIZED_PATTERN = re.compile(
+    r"\b(?:it|test|describe)\.each\b|@pytest\.mark\.parametrize|@ParameterizedTest"
+    r"|\[\s*(?:Theory|TestCase|DataRow|InlineData)\b|\bt\.Run\s*\(|\bforAll\s*\("
+    r"|^\s*where:\s*$|\.each\s*\(\s*\[",
+    re.M,
 )
 
 # Evidence that says a thing happened without saying what. A real run leaves
@@ -1368,7 +1438,13 @@ def strip_comments(body):
 
 
 def assertion_count(body):
-    return len(ASSERTION_PATTERN.findall(strip_comments(body)))
+    """Lines that assert something about the code under test.
+
+    Counted per line, so `expect(x).toBe(y)` is one assertion (not one for `expect(`
+    and one for `.toBe(`), and constant-vs-constant assertions are removed first.
+    """
+    cleaned = TAUTOLOGY_PATTERN.sub(" ", strip_comments(body))
+    return sum(1 for line in cleaned.splitlines() if ASSERTION_PATTERN.search(line))
 
 
 def has_assertion(body):
@@ -1379,9 +1455,10 @@ def looks_like_test_file(candidate, body):
     name = str(candidate).replace("\\", "/")
     if TEST_NAME_PATTERN.search(name):
         return True
-    if name.endswith(".rs"):
-        return "#[test]" in body
-    return bool(TEST_RUNNER_PATTERN.search(strip_comments(body)))
+    runner = bool(TEST_RUNNER_PATTERN.search(strip_comments(body)))
+    if name.lower().endswith(STRICT_TEST_SUFFIXES):
+        return runner and bool(TEST_DIR_PATTERN.search(name))
+    return runner
 
 
 def is_uninformative(body):
@@ -1528,7 +1605,7 @@ def check_evidence_list(
                 )
                 continue
         else:
-            hit = scan_file_placeholder(body)
+            hit = scan_file_placeholder(body, findings.domain_terms)
             if hit and (entry_path + "#content") not in findings.static_allowed:
                 token, line = hit
                 findings.add(
@@ -1569,6 +1646,31 @@ def check_evidence_list(
     return resolved
 
 
+GENERIC_TOKEN_WORDS = frozenset(
+    "expect assert should verify check describe test tests spec specs mock run main handler "
+    "service controller index true false null".split()
+)
+
+
+def specific_token(value):
+    """A server operation or entrypoint specific enough to prove a test is about it.
+
+    `serverOperations: ["expect"]` made every test that calls expect() match every
+    capability. Only qualified names count: Service.method, a path, ns::fn, snake or
+    camel case, a multi-word command.
+    """
+    text = value.strip()
+    if len(text) < 6 or text.lower() in GENERIC_TOKEN_WORDS:
+        return False
+    return bool(re.search(r"[./:#_\\ ]|[a-z][A-Z]", text))
+
+
+def capability_named(capability, cid, body):
+    """Whether comment-free test text names this capability (its id or a specific operation)."""
+    tokens = capability_tokens(capability) if capability else {cid}
+    return any(token.lower() in body for token in tokens)
+
+
 def capability_tokens(capability):
     """Words a test for this capability must be able to mention.
 
@@ -1582,7 +1684,12 @@ def capability_tokens(capability):
         for separator in ("-", "_", " ", "/"):
             tokens.add(cid.replace(".", separator))
     for value in as_list(capability.get("serverOperations")):
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and specific_token(value):
+            tokens.add(value.strip())
+    # A non-UI entrypoint (a CLI command, an API path without placeholders) is as
+    # specific to its capability as its id.
+    for value in as_list(capability.get("entrypoints")):
+        if isinstance(value, str) and specific_token(value) and not re.search(r"[{<]|:\w", value):
             tokens.add(value.strip())
     long_tokens = {token for token in tokens if len(token) >= 4}
     # Falling back rather than returning an empty set: a short id like 'a.b'
@@ -1637,6 +1744,7 @@ FORBIDDEN_STATIC_FIELDS = frozenset(
     (
         "dataBinding", "sourceOfTruth", "serverOperations", "authorizationPolicies",
         "auditEvents", "tests", "evidence", "dataSources", "policyTests", "uiRoutes",
+        "entrypoints",
     )
 )
 
@@ -1743,28 +1851,104 @@ def flatten_strings(prefix, value):
                 yield pair
 
 
-def placeholder_match(text):
+def term_words(text):
+    """A string as the lower-case words a reader sees: 'MockExam' and 'mock-exam' -> [mock, exam]."""
+    return re.findall(r"[a-z0-9]+", split_identifiers(fold_confusables(text)).lower())
+
+
+def domain_terms(manifest):
+    """Declared domain nouns, as word lists, that name an entity of this manifest.
+
+    A task app's `Todo`, a lab system's `Sample` and an exam product's `Mock exam`
+    are the domain, not placeholders; with no way to say so, every field naming them
+    failed at every profile. A term must be backed by an entity (its id or name) so
+    that 'mock' cannot be declared into an exemption without modelling a Mock.
+    """
+    backed = []
+    entity_words = [
+        term_words(text_of(entity.get(key)))
+        for _eid, entity in iter_entities(manifest)
+        for key in ("id", "name")
+    ]
+    for raw in str_items(as_dict(manifest.get("platform")).get("domainTerms")):
+        words = term_words(raw)
+        if not words:
+            continue
+        size = len(words)
+        if any(
+            candidate[index:index + size] == words
+            for candidate in entity_words
+            for index in range(len(candidate) - size + 1)
+        ):
+            backed.append(words)
+    return backed
+
+
+def check_domain_terms(manifest, findings):
+    backed = [" ".join(words) for words in domain_terms(manifest)]
+    for index, raw in enumerate(as_list(as_dict(manifest.get("platform")).get("domainTerms"))):
+        if not isinstance(raw, str):
+            continue
+        if " ".join(term_words(raw)) not in backed:
+            findings.add(
+                "domain-term-unbacked",
+                "platform.domainTerms[" + str(index) + "]",
+                "'" + raw + "' names no entity of this manifest; a domain term exempts a "
+                "placeholder word only when an entity (its id or name) is that noun",
+            )
+
+
+def without_domain_terms(text, terms):
+    """`text` with declared domain nouns removed where they are part of a longer name.
+
+    'TodoRepository.findAll' loses 'Todo'; 'mockTodoData' keeps 'mock'. A value that
+    is nothing but the term ('TODO') is returned unchanged: on its own it is still
+    the marker it looks like.
+    """
+    if not terms:
+        return text
+    cleaned = text
+    for words in terms:
+        pattern = re.compile(
+            r"[\W_]*".join(re.escape(word) for word in words) + r"(?:e?s)?(?![a-z0-9])",
+            re.I,
+        )
+        cleaned = pattern.sub(" ", cleaned)
+    if cleaned != text and not re.search(r"[A-Za-z0-9]", cleaned):
+        return text
+    return cleaned
+
+
+def placeholder_match(text, terms=()):
     """Return the placeholder token found in a manifest string, or None."""
     folded = fold_confusables(text)
-    hit = PLACEHOLDER_PATTERN.search(split_identifiers(folded))
+    scannable = split_identifiers(folded)
+    if terms:
+        scannable = without_domain_terms(scannable, terms)
+    hit = PLACEHOLDER_PATTERN.search(scannable)
     if hit:
         return hit.group(0)
     for token in folded.split():
+        if terms:
+            token = without_domain_terms(split_identifiers(token), terms).replace(" ", "")
         hit = substring_hit(token)
         if hit:
             return hit.group(0)
     return None
 
 
-def scan_file_placeholder(body):
+def scan_file_placeholder(body, terms=()):
     """Return (token, line_number) for the first placeholder in an evidence file, else None.
 
     Word-boundary matching only, and framework idioms are skipped: a captured log
     that says `jest.mock('nodemailer')` or `1200 samples` is not a placeholder.
+    Declared domain nouns ('TodoRepository: 12 passed') are vocabulary here too.
     """
     for number, line in enumerate(body.splitlines(), 1):
-        cleaned = FRAMEWORK_CALLS.sub(" ", fold_confusables(line))
-        hit = FILE_PLACEHOLDER_PATTERN.search(split_identifiers(cleaned))
+        cleaned = split_identifiers(FRAMEWORK_CALLS.sub(" ", fold_confusables(line)))
+        if terms:
+            cleaned = without_domain_terms(cleaned, terms)
+        hit = FILE_PLACEHOLDER_PATTERN.search(cleaned)
         if hit:
             return hit.group(0), number
     return None
@@ -1790,27 +1974,32 @@ def run_placeholder_scan(manifest, findings, release):
                 continue
             folded = fold_confusables(text)
             scannable = split_identifiers(folded)
+            implementation = final_field(entry_path) in FORBIDDEN_STATIC_FIELDS
             match = HARDCODE_PATTERN.search(scannable)
             if match:
                 findings.add(
                     "unregistered-static",
                     entry_path,
-                    "hard-coded marker '"
-                    + match.group(0)
-                    + "' in '"
-                    + text
-                    + "'; register it in declaredStatic[] with a reason and approver or replace it",
+                    "hard-coded marker '" + match.group(0) + "' in '" + text + "'; "
+                    + (
+                        "this field says where data comes from or how it is proven, so replace it "
+                        "with the real source"
+                        if implementation
+                        else "register it in declaredStatic[] with a reason and approver or replace it"
+                    ),
                 )
-            token = placeholder_match(text)
+            token = placeholder_match(text, findings.domain_terms)
             if token:
                 findings.add(
                     "placeholder-scan",
                     entry_path,
-                    "placeholder token '"
-                    + token
-                    + "' in '"
-                    + text
-                    + "'; replace it with the real value or register it in declaredStatic[]",
+                    "placeholder token '" + token + "' in '" + text + "'; "
+                    + (
+                        "replace it with the real value. If '" + token + "' is a real domain "
+                        "noun (an entity called that), add it to platform.domainTerms"
+                        if implementation
+                        else "replace it with the real value or register it in declaredStatic[]"
+                    ),
                 )
     for target in sorted(allowed):
         base = target[: -len("#content")] if target.endswith("#content") else target
@@ -1841,23 +2030,26 @@ def check_unique_ids(manifest, key, findings):
     if not isinstance(items, list):
         findings.add("manifest-type", key, "must be an array")
         return
-    seen = set()
+    seen = Counter()
     for index, item in enumerate(items):
         path = key + "[" + str(index) + "]"
         if not isinstance(item, dict):
             findings.add("manifest-type", path, "must be an object")
             continue
         value = item.get("id")
-        check_id(value, path + ".id", findings)
+        # Paths name items by id, not position, so removing an earlier item does not
+        # make an existing finding look new to the write guard.
+        named = key + "[" + (value if isinstance(value, str) and value else "#" + str(index)) + "]"
+        check_id(value, named + ".id", findings)
         if isinstance(value, str):
-            if value in seen:
-                # The position is part of the message: identical findings are
+            seen[value] += 1
+            if seen[value] > 1:
+                # The occurrence number is part of the message: identical findings are
                 # de-duplicated, and a second duplicate of the same id must still
                 # count as new to the write guard.
                 findings.add(
-                    "id-duplicate", key, "duplicate id '" + value + "' at position " + str(index)
+                    "id-duplicate", key, "duplicate id '" + value + "' (occurrence " + str(seen[value]) + ")"
                 )
-            seen.add(value)
 
 
 def check_required(obj, keys, path, findings):
@@ -1964,7 +2156,8 @@ def check_schema_types(value, schema, root, path, findings, unknown_field=False)
                 check_schema_types(value[key], sub, root, child, findings, unknown_field)
         if unknown_field and properties:
             for key in value:
-                if key not in properties:
+                # `x-` keys are the documented way to carry project-specific data.
+                if key not in properties and not str(key).startswith("x-"):
                     findings.add(
                         "unknown-field",
                         (key if not path else path + "." + key),
@@ -2280,7 +2473,28 @@ def lifecycle_escaped(manifest, entity, state):
             (gap_entity and gap_entity == entity_id)
             or (gap_capability and gap_capability in capability_ids)
         )
-        if explicit or (entity_id and entity_id in text):
+        if explicit or entity_named(entity, text):
+            return True
+    return False
+
+
+def entity_named(entity, text):
+    """Whether prose names this entity as a word: by id, by id with its separators as
+    spaces ('api-key' as 'API key'), or by name. A bare substring made 'Subtenant
+    invoices' name the tenant entity."""
+    names = set()
+    entity_id = text_of(entity.get("id")).lower()
+    if entity_id:
+        names.add(entity_id)
+        names.add(re.sub(r"[-_.]+", " ", entity_id))
+    name = text_of(entity.get("name")).lower()
+    if name:
+        names.add(name)
+    for candidate in names:
+        pattern = r"(?<![a-z0-9])" + r"[\s_.-]+".join(
+            re.escape(part) for part in candidate.split()
+        ) + r"s?(?![a-z0-9])"
+        if re.search(pattern, text):
             return True
     return False
 
@@ -2316,6 +2530,7 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
         schema = load_schema()
         check_schema_types(manifest, schema, schema, "", findings, unknown_field=True)
         findings.static_allowed = frozenset(static_index(manifest, findings))
+        findings.domain_terms = domain_terms(manifest)
 
     version = manifest.get("manifestVersion")
     if version != MANIFEST_VERSION:
@@ -2339,6 +2554,7 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
 
     check_project_root(manifest, findings)
     validate_platform(manifest, findings, release)
+    check_domain_terms(manifest, findings)
     for key in COLLECTION_KEYS:
         if key in manifest:
             check_unique_ids(manifest, key, findings)
@@ -2618,7 +2834,19 @@ def validate_entities(manifest, findings, release, role_ids):
                 path + ".reviewStatus",
                 "'contested' must be paired with a gaps[] entry that names '" + cid
                 + "' (its `capability` field, or its id in the description), so the implementer "
-                "knows what to fix",
+                "knows what to fix; file the gap first, then contest",
+            )
+        contester = text_of(capability.get("contestedBy"))
+        if (
+            capability.get("reviewStatus") == "reviewed"
+            and contester
+            and contester.lower() == text_of(capability.get("reviewedBy")).lower()
+        ):
+            findings.add(
+                "contest-self-cleared",
+                path + ".reviewedBy",
+                "'" + contester + "' contested this capability and then marked it reviewed; "
+                "a contest is cleared by a different reviewer after the fix",
             )
         if (
             status == "not-applicable"
@@ -3138,7 +3366,9 @@ def validate_evidence(manifest, findings, project_root):
             continue
         matched = False
         for candidate in test_paths:
-            body = read_head(candidate).lower()
+            # Comments are not the test: a `// covers: tenant.suspend` header above a
+            # status-200 loop used to satisfy this for every capability it listed.
+            body = strip_comments(read_head(candidate)).lower()
             if any(token.lower() in body for token in tokens):
                 matched = True
                 break
@@ -3168,7 +3398,7 @@ def validate_evidence(manifest, findings, project_root):
         if not screen_tokens or not screen_tests:
             continue
         if not any(
-            token.lower() in read_head(candidate).lower()
+            token.lower() in strip_comments(read_head(candidate)).lower()
             for candidate in screen_tests
             for token in screen_tokens
         ):
@@ -3238,6 +3468,7 @@ def check_evidence_sharing(manifest, findings):
         # By content, not path: a copy or a hard link of one file is that file.
         by_path.setdefault(entry.get("digest") or entry["path"], []).append(entry)
     gate_records = {text_of(gate.get("id")): gate for _p, gate in iter_named(manifest, "qualityGates")}
+    caps = capability_index(manifest)
     test_roles = ("capability-test", "screen-test", "item-test", "policy-test")
     for _path, uses in sorted(by_path.items()):
         roles = {use["role"] for use in uses}
@@ -3276,16 +3507,29 @@ def check_evidence_sharing(manifest, findings):
             )
         cap_uses = [use for use in uses if use["role"] == "capability-test"]
         cap_owners = sorted({use["owner"] for use in cap_uses})
-        screen_owners = {use["owner"] for use in uses if use["role"] == "screen-test"}
-        if len(cap_owners) > 3 or (cap_owners and screen_owners and "policy-test" in roles):
+        unnamed = []
+        if len(cap_owners) > 1:
+            body = strip_comments(read_head(Path(uses[0]["path"]))).lower()
+            unnamed = [
+                cid for cid in cap_owners
+                if not capability_named(caps.get(cid, (None, None, None))[2], cid, body)
+            ]
+        # An authorization matrix or a per-entity spec legitimately proves several
+        # capabilities -- when it names each one. A route-smoke loop names none.
+        if unnamed:
             findings.add(
                 "test-file-shared",
                 cap_uses[0]["field"],
-                "'" + label + "' is the test for " + str(len(cap_owners)) + " capabilities"
-                + (", screens and authorization policy" if screen_owners and "policy-test" in roles else "")
-                + "; a route-smoke loop is not a test of each of them",
+                "'" + label + "' is the test for " + str(len(cap_owners)) + " capabilities but "
+                "never names " + ", ".join(unnamed) + "; a shared spec must mention each "
+                "capability it proves (its id or a server operation)",
             )
-        if cap_owners and findings.profile == "regulated":
+        # At regulated each capability a file proves needs its own assertion --
+        # unless the file is parametrised (it.each, @pytest.mark.parametrize,
+        # [Theory], a Go table loop), where one assertion runs once per row.
+        if len(cap_owners) > 1 and findings.profile == "regulated" and not PARAMETRIZED_PATTERN.search(
+            strip_comments(read_head(Path(uses[0]["path"])))
+        ):
             asserted = assertion_count(read_head(Path(uses[0]["path"])))
             if asserted < len(cap_owners):
                 findings.add(
@@ -3830,6 +4074,40 @@ def migrate_manifest(manifest):
     for key in COLLECTION_KEYS:
         ensure_key(manifest, key, [], "manifest", changes)
 
+    # What `init` gives a new manifest, so a migrated one can be repaired with add/set:
+    # the required gates (there is no `add --kind gate`), a stable platform id for the
+    # cross-project store, and the profile as an assumed decision.
+    gates = manifest.get("qualityGates")
+    if isinstance(gates, list):
+        present = {text_of(gate.get("id")) for gate in gates if isinstance(gate, dict)}
+        try:
+            template_gates = as_list(load_json(TEMPLATE_PATH).get("qualityGates"))
+        except ManifestError:
+            template_gates = []
+        for gate in template_gates:
+            if isinstance(gate, dict) and text_of(gate.get("id")) not in present:
+                gates.append(json.loads(json.dumps(gate)))
+                changes.append("qualityGates[" + text_of(gate.get("id")) + "]")
+    if not text_of(platform.get("id")) and text_of(platform.get("name")):
+        platform["id"] = slugify(text_of(platform.get("name")))[:32].rstrip("-") + "-migrated"
+        changes.append("platform.id")
+    decisions = manifest.get("decisions")
+    if isinstance(decisions, list) and not any(
+        isinstance(item, dict) and decision_kind(item) == "profile" for item in decisions
+    ):
+        profile = text_of(manifest.get("profile")) or DEFAULT_PROFILE
+        taken = {text_of(item.get("id")) for item in decisions if isinstance(item, dict)}
+        decisions.append({
+            "id": "dec.profile" if "dec.profile" not in taken else "dec.profile-migrated",
+            "kind": "profile",
+            "decision": "Run at the " + profile + " profile",
+            "reason": "recorded by migrate; not yet confirmed with the owner",
+            "evidence": [],
+            "status": "assumed",
+            "appliesTo": ["*"],
+        })
+        changes.append("decisions[dec.profile]")
+
     ordered = {}
     for key in TOP_LEVEL_KEYS:
         if key in manifest:
@@ -4019,7 +4297,31 @@ POWERSHELL_HINT = (
 )
 
 
+VALUE_POWERSHELL_HINT = (
+    "In PowerShell 5.1, double quotes inside single-quoted JSON are stripped before Python "
+    "sees them: write the value to a file and pass --value-file <path> (a UTF-8 or UTF-16 "
+    "byte-order mark is accepted)."
+)
+
+
 PATH_LIST_FIELDS = frozenset(("tests", "evidence", "policyTests"))
+
+
+def deep_merge(target, patch):
+    """Merge `patch` into `target` in place: objects merge key by key, anything else is replaced.
+
+    A whole-object `set` used to replace the object, so setting one flag of a
+    crossCutting section silently dropped the other flags and another agent's
+    evidence. Returns the keys that were added or changed.
+    """
+    changed = []
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            changed.extend(key + "." + inner for inner in deep_merge(target[key], value))
+        elif target.get(key) != value or key not in target:
+            target[key] = value
+            changed.append(key)
+    return changed
 
 
 def normalise_path_list(values):
@@ -4099,9 +4401,9 @@ def new_findings(before, after, project_root, manifest_dir, renamed=None):
 
     Findings are compared as a multiset, not a set: with a set, once one duplicate
     id existed the next duplicate produced an identical signature and slipped
-    through. `renamed=(old, new)` maps the before-findings of a renamed id onto
-    the new one, so renaming an item that already carries errors is not blamed for
-    them.
+    through. `renamed=(collection, old, new)` maps the before-findings of a renamed
+    id onto the new one, only within that collection's paths, so renaming an item
+    that already carries errors is not blamed for them.
     """
     profile = active_profile(after, None)[0]
     seen = validate_manifest(before, "plan", project_root, profile, manifest_dir)
@@ -4110,9 +4412,10 @@ def new_findings(before, after, project_root, manifest_dir, renamed=None):
     for item in seen.items:
         path, message = item["path"], item["message"]
         if renamed:
-            old, new = renamed
-            path = path.replace("[" + old + "]", "[" + new + "]")
-            message = message.replace("'" + old + "'", "'" + new + "'")
+            collection, old, new = renamed
+            path = path.replace(collection + "[" + old + "]", collection + "[" + new + "]")
+            if path.startswith(collection) or ("." + collection + "[") in path or path == collection:
+                message = message.replace("'" + old + "'", "'" + new + "'")
         known[(item["rule"], path, message)] += 1
     fresh = []
     for item in now.items:
@@ -4175,11 +4478,11 @@ def parse_path_expression(expression):
     for segment in segments:
         if not segment:
             raise ManifestError("Empty segment in --path '" + expression + "'")
-        match = re.match(r"^([A-Za-z0-9_]+)\[([^\]]+)\]$", segment)
+        match = re.match(r"^([A-Za-z0-9_-]+)\[([^\]]+)\]$", segment)
         if match:
             parsed.append((match.group(1), match.group(2)))
             continue
-        if not re.match(r"^[A-Za-z0-9_]+$", segment):
+        if not re.match(r"^[A-Za-z0-9_-]+$", segment):
             raise ManifestError("Unsupported segment '" + segment + "' in --path")
         parsed.append((segment, None))
     return parsed
@@ -4220,10 +4523,17 @@ def resolve_path_parent(manifest, segments):
     if selector is None:
         return current, key
     values = current.get(key)
+    if not isinstance(values, list):
+        raise ManifestError("--path selector on '" + key + "' requires an array")
     index = selector[1:] if selector.startswith("#") else selector
-    if not isinstance(values, list) or not index.isdigit() or int(index) >= len(values):
-        raise ManifestError("--path must end at a field or at an existing list element")
-    return values, int(index)
+    if index.isdigit() and int(index) < len(values):
+        return values, int(index)
+    # An id selector on the last segment names the whole item, the way it does
+    # everywhere else in a path: `qualityGates[build]`, not only `qualityGates[0]`.
+    for position, item in enumerate(values):
+        if isinstance(item, dict) and text_of(item.get("id")) == selector:
+            return values, position
+    raise ManifestError("--path selector '" + selector + "' matches no item in '" + key + "'")
 
 
 def coerce_value(raw, current):
@@ -4245,6 +4555,7 @@ def coerce_value(raw, current):
         except ValueError as exc:
             raise ManifestError(
                 "--value starts with '" + stripped[:1] + "', so it must be valid JSON: " + str(exc)
+                + ". " + VALUE_POWERSHELL_HINT
             )
     lowered = stripped.lower()
     if isinstance(current, bool):
@@ -4253,7 +4564,8 @@ def coerce_value(raw, current):
         raise ManifestError("field is boolean; --value must be true or false")
     if isinstance(current, dict):
         raise ManifestError(
-            "field is an object; pass it as JSON, e.g. --value '{\"from\": [\"a\"], \"to\": []}'"
+            "field is an object; pass it as JSON, e.g. --value '{\"from\": [\"a\"], \"to\": []}', "
+            "or put the JSON in a file and use --value-file. " + VALUE_POWERSHELL_HINT
         )
     if isinstance(current, int):
         try:
@@ -5340,26 +5652,76 @@ def sync_profile_decision(manifest, old, new):
     return "recorded the assumed decision " + new_id + ": '" + text + "'"
 
 
+def read_value_argument(args):
+    """--value as given, or --value-file's content (BOM and UTF-16 aware), or None for --delete."""
+    if getattr(args, "delete", False):
+        return None
+    if getattr(args, "value_file", None):
+        path = Path(args.value_file)
+        try:
+            text = decode_text_bytes(path.read_bytes(), path, allow_utf16=True)
+        except OSError as exc:
+            raise ManifestError("Cannot read --value-file: " + str(exc))
+        return text.strip()
+    return args.value
+
+
 def cmd_set(args):
     manifest_path = resolve_manifest_path(args.manifest)
     segments = parse_path_expression(args.path)
+    raw_value = read_value_argument(args)
+    notes = []
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
         before = json.loads(json.dumps(manifest))
         container, key = resolve_path_parent(manifest, segments)
-        previous = container[key] if isinstance(container, list) else container.get(key)
-        value = coerce_value(args.value, previous)
-        if key in PATH_LIST_FIELDS and isinstance(value, list):
-            value, changed = normalise_path_list(value)
-            if changed:
-                stderr("note: rewrote backslashes as '/' in " + str(changed) + " path(s) of " + args.path)
-        container[key] = value
+        if isinstance(container, list):
+            previous = container[key]
+        else:
+            previous = container.get(key)
+        if args.delete:
+            if isinstance(container, list):
+                container.pop(key)
+            elif key in container:
+                del container[key]
+            else:
+                raise ManifestError("--path names no existing field to delete: " + args.path)
+            value = None
+        else:
+            value = coerce_value(raw_value, previous)
+            if isinstance(value, (dict, list)):
+                normalise_paths(value if isinstance(value, dict) else {key if isinstance(key, str) else "x": value}, args.path)
+            if isinstance(key, str) and key in PATH_LIST_FIELDS and isinstance(value, list):
+                value, changed = normalise_path_list(value)
+                if changed:
+                    notes.append("rewrote backslashes as '/' in " + str(changed) + " path(s) of " + args.path)
+            if (
+                isinstance(container, list)
+                and isinstance(value, str)
+                and segments[-1][0] in PATH_LIST_FIELDS
+                and "\\" in value
+                and evidence_kind(value) == "path"
+            ):
+                value = value.replace("\\", "/")
+                notes.append("rewrote backslashes as '/' in " + args.path)
+            if isinstance(previous, dict) and isinstance(value, dict) and not args.replace:
+                merged = json.loads(json.dumps(previous))
+                deep_merge(merged, value)
+                value = merged
+            elif isinstance(previous, dict) and isinstance(value, dict):
+                dropped = sorted(k for k in previous if k not in value)
+                if dropped:
+                    notes.append("--replace dropped " + ", ".join(dropped) + " from " + args.path)
+            container[key] = value
         profile_note = None
         if segments == [("profile", None)] and isinstance(value, str) and value != previous:
             profile_note = sync_profile_decision(manifest, previous, value)
         renamed = None
-        if key == "id" and isinstance(previous, str) and previous and isinstance(value, str) and previous != value:
-            renamed = (previous, value)
+        if (
+            key == "id" and len(segments) >= 2 and isinstance(previous, str) and previous
+            and isinstance(value, str) and previous != value
+        ):
+            renamed = (segments[-2][0], previous, value)
         introduced, warned = new_findings(
             before, manifest, project_root_of(manifest_path, manifest), manifest_path,
             renamed=renamed,
@@ -5370,7 +5732,12 @@ def cmd_set(args):
                 stderr("  ERROR: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
             return 2
         commit_manifest(manifest_path, manifest)
-    print(args.path + ": " + json.dumps(previous) + " -> " + json.dumps(value))
+    if args.delete:
+        print(args.path + ": deleted (was " + json.dumps(previous) + ")")
+    else:
+        print(args.path + ": " + json.dumps(previous) + " -> " + json.dumps(value))
+    for note in notes:
+        stderr("note: " + note)
     if profile_note:
         stderr("note: " + profile_note)
         if (
@@ -5408,8 +5775,48 @@ def find_item(manifest, kind, item_id, entity_id=None):
     raise ManifestError(kind + " '" + item_id + "' is not in the manifest")
 
 
+def references_to(manifest, kind, item_id, lock_dir=None):
+    """Every place that still names `item_id`, as printable paths.
+
+    The write guard alone missed references that are only warnings before release
+    (a lifecycle transition), or that no rule checks (a gap's capability, a research
+    source, a declaredStatic path, separation of duties, a claim lock).
+    """
+    found = []
+    probe = json.loads(json.dumps(manifest))
+    rewrite_references(probe, kind, item_id, "\u0000removed\u0000")
+
+    def walk(left, right, path):
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in left:
+                walk(left[key], right.get(key), path + ("." if path else "") + str(key))
+        elif isinstance(left, list) and isinstance(right, list):
+            for index, (a, b) in enumerate(zip(left, right)):
+                label = text_of(a.get("id")) if isinstance(a, dict) and text_of(a.get("id")) else str(index)
+                walk(a, b, path + "[" + label + "]")
+        elif left != right:
+            found.append(path)
+
+    walk(manifest, probe, "")
+    # An agent's history of what it once held is a record, not a dependency.
+    found = [where for where in found if ".previouslyOwned[" not in where]
+    if kind == "agent":
+        record = find_agent(manifest, item_id)
+        if record is not None and as_list(record.get("ownsCapabilities")):
+            found.append("agents[" + item_id + "].ownsCapabilities")
+        if lock_dir is not None and lock_dir.is_dir():
+            for lock in sorted(lock_dir.glob("*.lock")):
+                try:
+                    holder = lock.read_text(encoding="utf-8").strip()
+                except OSError:
+                    continue
+                if holder == item_id:
+                    found.append("locks/" + lock.name)
+    return found
+
+
 def cmd_remove(args):
-    """Delete one item. The write guard refuses it if anything still points at it.
+    """Delete one item, refused while anything still points at it.
 
     SKILL.md forbids hand-editing the manifest, and there was no command that could
     delete an entry, so a wrong `add` could only be undone by breaking the rule.
@@ -5419,6 +5826,13 @@ def cmd_remove(args):
         manifest = load_json(manifest_path)
         before = json.loads(json.dumps(manifest))
         collection, index = find_item(manifest, args.kind, args.id, args.entity)
+        still = references_to(manifest, args.kind, args.id, manifest_path.parent / "locks")
+        if still and not args.allow_invalid:
+            stderr("Refusing to remove: something still depends on " + args.kind + " '" + args.id + "':")
+            for where in still:
+                stderr("  " + where)
+            stderr("Update or remove those first (or `rename` it instead), or pass --allow-invalid.")
+            return 2
         collection.pop(index)
         introduced, warned = new_findings(
             before, manifest, project_root_of(manifest_path, manifest), manifest_path
@@ -5482,6 +5896,11 @@ def rewrite_references(manifest, kind, old, new):
             changed += swap_scalar(gap, "capability", old, new)
         for source in as_list(as_dict(manifest.get("platform")).get("researchSources")):
             changed += swap_in_list(source, "appliedTo", old, new)
+        for _path, role in iter_named(manifest, "roles"):
+            changed += swap_in_list(role, "separationOfDuties", old, new)
+    if kind == "decision":
+        for source in as_list(as_dict(manifest.get("platform")).get("researchSources")):
+            changed += swap_in_list(source, "appliedTo", old, new)
     if kind == "screen":
         for _path, agent in iter_named(manifest, "agents"):
             changed += swap_in_list(agent, "ownsScreens", old, new)
@@ -5490,7 +5909,7 @@ def rewrite_references(manifest, kind, old, new):
             changed += swap_scalar(gap, "entity", old, new)
     if kind == "agent":
         for cap in capabilities:
-            for key in ("owner", "implementedBy", "reviewedBy"):
+            for key in ("owner", "implementedBy", "reviewedBy", "contestedBy"):
                 changed += swap_scalar(cap, key, old, new)
         for _path, entry in iter_named(manifest, "declaredStatic"):
             changed += swap_scalar(entry, "approvedBy", old, new)
@@ -5528,9 +5947,10 @@ def cmd_rename(args):
             raise ManifestError("capability id '" + new_id + "' is used by another entity")
         collection[index]["id"] = new_id
         changed = rewrite_references(manifest, args.kind, args.id, new_id)
+        collection_key = "capabilities" if args.kind == "capability" else KIND_TARGETS[args.kind]
         introduced, warned = new_findings(
             before, manifest, project_root_of(manifest_path, manifest), manifest_path,
-            renamed=(args.id, new_id),
+            renamed=(collection_key, args.id, new_id),
         )
         if introduced and not args.allow_invalid:
             stderr("Refusing to rename: the result would introduce validation errors.")
@@ -5538,11 +5958,24 @@ def cmd_rename(args):
                 stderr("  ERROR: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
             return 2
         commit_manifest(manifest_path, manifest)
-        if args.kind == "capability":
-            old_lock = manifest_path.parent / "locks" / lock_file_name(args.id)
-            if old_lock.exists():
+        lock_dir = manifest_path.parent / "locks"
+        if args.kind == "capability" and lock_dir.is_dir():
+            # The implementer's lock and every reviewer's lock move with the id.
+            prefix = lock_file_name(args.id)[: -len(".lock")]
+            for old_lock in sorted(lock_dir.glob("*.lock")):
+                stem = old_lock.name[: -len(".lock")]
+                if stem == prefix or stem.startswith(prefix + "."):
+                    renamed_lock = lock_dir / (lock_file_name(new_id)[: -len(".lock")] + stem[len(prefix):] + ".lock")
+                    try:
+                        old_lock.replace(renamed_lock)
+                    except OSError:
+                        pass
+        if args.kind == "agent" and lock_dir.is_dir():
+            # A lock names its holder; left alone, the renamed agent could never release it.
+            for lock in sorted(lock_dir.glob("*.lock")):
                 try:
-                    old_lock.replace(manifest_path.parent / "locks" / lock_file_name(new_id))
+                    if lock.read_text(encoding="utf-8").strip() == args.id:
+                        write_text_file(lock, new_id + "\n")
                 except OSError:
                     pass
     print(
@@ -5554,8 +5987,17 @@ def cmd_rename(args):
     return 0
 
 
-def lock_file_name(capability_id):
-    return re.sub(r"[^A-Za-z0-9._-]", "_", capability_id) + ".lock"
+def lock_file_name(capability_id, role=None):
+    """locks/<capability>.lock for the builder; locks/<capability>.<role>.lock for a reviewer.
+
+    Reviewers of different roles review one capability in parallel (ux and security
+    over the same finished domain, as the pass order documents), so each reviewer
+    role has its own lock; two reviewers of the same role still collide.
+    """
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", capability_id)
+    if role and role in REVIEWER_ROLES:
+        return base + "." + role + ".lock"
+    return base + ".lock"
 
 
 IMPLEMENTER_ROLES = ("implementer", "architect")
@@ -5569,7 +6011,19 @@ def find_agent(manifest, agent_id):
     return None
 
 
-def manifest_holder(manifest, capability, requester):
+def claims_conflict(requested_role, held_role):
+    """Whether a holder of `held_role` blocks a claim for `requested_role`.
+
+    Builders (implementer, architect) exclude everyone: nothing is reviewed while it
+    is being built. Reviewers of different roles review in parallel; two reviewers of
+    the same role do not.
+    """
+    if requested_role in REVIEWER_ROLES and held_role in REVIEWER_ROLES:
+        return requested_role == held_role
+    return True
+
+
+def manifest_holder(manifest, capability, requester, role=None):
     """Another ACTIVE agent that the manifest says holds this capability, or None.
 
     The lock files are untracked, so on a fresh clone -- or after `locks/` was
@@ -5582,7 +6036,8 @@ def manifest_holder(manifest, capability, requester):
         if agent_id == requester or text_of(agent.get("status")) != "active":
             continue
         if cid in as_list(agent.get("ownsCapabilities")):
-            return agent_id
+            if role is None or claims_conflict(role, text_of(agent.get("role"))):
+                return agent_id
     owner = text_of(capability.get("owner"))
     if owner and owner != requester:
         record = find_agent(manifest, owner)
@@ -5623,8 +6078,10 @@ def cmd_claim(args):
                 + ". Use a different agent id for the review."
             )
             return 2
+        holders = {}
         for cid in args.capability:
-            holder = manifest_holder(manifest, caps[cid][2], args.agent)
+            holder = manifest_holder(manifest, caps[cid][2], args.agent, args.role)
+            holders[cid] = holder
             if holder and not args.force_steal:
                 stderr(
                     "Capability '" + cid + "' is held by agent '" + holder + "' according to the "
@@ -5632,14 +6089,37 @@ def cmd_claim(args):
                     "--force-steal --reason '<why>'."
                 )
                 return 3
+        restore = []
         for cid in args.capability:
-            lock_path = lock_dir / lock_file_name(cid)
+            if args.role in REVIEWER_ROLES:
+                # A reviewer may not start while the builder still holds the capability.
+                builder_lock = lock_dir / lock_file_name(cid)
+                try:
+                    builder = builder_lock.read_text(encoding="utf-8").strip() if builder_lock.exists() else ""
+                except OSError:
+                    builder = ""
+                if builder and builder != args.agent and not args.force_steal:
+                    for path in acquired:
+                        try:
+                            path.unlink()
+                        except OSError:
+                            pass
+                    stderr(
+                        "Capability '" + cid + "' is still being built by agent '" + builder
+                        + "'. Review starts after its release-claim."
+                    )
+                    return 3
+            lock_path = lock_dir / lock_file_name(cid, args.role)
             owner = None
             try:
                 handle = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
                 os.write(handle, (args.agent + "\n").encode("utf-8"))
                 os.close(handle)
                 acquired.append(lock_path)
+                if args.force_steal and holders.get(cid):
+                    # No lock file (a fresh clone, locks/ cleaned) but the manifest
+                    # names a holder: the steal still takes it from that holder.
+                    stolen.append((cid, holders[cid]))
                 continue
             except FileExistsError:
                 try:
@@ -5652,8 +6132,9 @@ def cmd_claim(args):
             if owner == args.agent:
                 continue
             if args.force_steal:
+                restore.append((lock_path, owner))
                 write_text_file(lock_path, args.agent + "\n")
-                stolen.append((cid, owner))
+                stolen.append((cid, owner or holders.get(cid)))
                 continue
             for path in acquired:
                 try:
@@ -5735,6 +6216,12 @@ def cmd_claim(args):
                     path.unlink()
                 except OSError:
                     pass
+            for path, previous_owner in restore:
+                # A refused steal must leave the victim's lock as it found it.
+                try:
+                    write_text_file(path, (previous_owner or "") + "\n")
+                except OSError:
+                    pass
             stderr("Refusing to claim: the claim would introduce validation errors.")
             for item in introduced:
                 stderr("  ERROR: [" + item["rule"] + "] " + item["path"] + ": " + item["message"])
@@ -5758,8 +6245,9 @@ def cmd_release_claim(args):
         record = find_agent(manifest, args.agent)
         owned = as_list(record.get("ownsCapabilities")) if record else []
         targets = args.capability if args.capability else list(owned)
+        role = text_of(record.get("role")) if record else ""
         for cid in targets:
-            lock_path = lock_dir / lock_file_name(cid)
+            lock_path = lock_dir / lock_file_name(cid, role)
             owner = ""
             entry = caps.get(cid)
             held_in_manifest = cid in owned or (
@@ -6491,10 +6979,24 @@ def build_parser():
         help="field to set, e.g. 'entities[user].capabilities[user.suspend].status' or a path "
              "copied from `validate` output (manifest.roles[0].name, ...evidence[0])",
     )
-    set_parser.add_argument(
-        "--value", required=True,
+    value_source = set_parser.add_mutually_exclusive_group(required=True)
+    value_source.add_argument(
+        "--value",
         help="new value, typed by the field's current type. Lists take comma-separated text or "
-             "JSON; objects take JSON; strings are stored as written",
+             "JSON; objects take JSON and are MERGED into the existing object; strings are "
+             "stored as written",
+    )
+    value_source.add_argument(
+        "--value-file", metavar="PATH",
+        help="read the value from a file (PowerShell-safe; a UTF-8 or UTF-16 BOM is accepted)",
+    )
+    value_source.add_argument(
+        "--delete", action="store_true",
+        help="remove the field (or the list element) at --path, e.g. a stray x- key",
+    )
+    set_parser.add_argument(
+        "--replace", action="store_true",
+        help="replace an object wholesale instead of merging into it (dropped keys are listed)",
     )
     set_parser.add_argument(
         "--allow-invalid", action="store_true",
