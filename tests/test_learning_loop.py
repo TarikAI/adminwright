@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -252,19 +253,48 @@ class LearningCase(unittest.TestCase):
 class TestHarvestOrder(LearningCase):
     """4.3 -- feedback must not be marked promoted before the store write."""
 
+    def assert_refused_and_still_open(self, manifest, home):
+        code, out, err = run("harvest", "--manifest", manifest, "--date", "2026-09-23",
+                             env={"ADMINWRIGHT_HOME": str(home)})
+        self.assertEqual(code, 2, out + err)
+        self.assertNotIn("Traceback", err)
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        self.assertEqual([f["status"] for f in data["feedback"]], ["open"],
+                         "a failed store write must leave the feedback open")
+        self.assertEqual([f.get("promotedHash") for f in data["feedback"]], [None])
+
     def test_an_unwritable_store_leaves_the_feedback_open(self):
         manifest = self.project("Alpha", [("gap", "obs one", "change one")])
         blocker = self.tmp / "not-a-directory"
         blocker.write_text("a regular file", encoding="utf-8")
-        code, _out, err = run("harvest", "--manifest", manifest, "--date", "2026-09-23",
-                              env={"ADMINWRIGHT_HOME": str(blocker)})
-        self.assertEqual(code, 2)
-        self.assertNotIn("Traceback", err)
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        self.assertEqual([f["status"] for f in data["feedback"]], ["open"])
+        self.assert_refused_and_still_open(manifest, blocker)
         self.harvest(manifest)
         data = json.loads(manifest.read_text(encoding="utf-8"))
         self.assertEqual([f["status"] for f in data["feedback"]], ["promoted"])
+
+    def test_a_store_under_a_regular_file_fails_the_write_not_the_precheck(self):
+        # ADMINWRIGHT_HOME=<file> is refused before anything runs, so it cannot
+        # tell store-first from manifest-first. <file>/sub passes that check and
+        # fails at the store write itself -- which is the ordering under test.
+        manifest = self.project("Alpha", [("gap", "obs one", "change one")])
+        blocker = self.tmp / "not-a-directory"
+        blocker.write_text("a regular file", encoding="utf-8")
+        self.assert_refused_and_still_open(manifest, blocker / "sub")
+        self.harvest(manifest)
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        self.assertEqual([f["status"] for f in data["feedback"]], ["promoted"])
+
+    def test_a_read_only_observation_file_leaves_the_feedback_open(self):
+        manifest = self.project("Alpha", [("gap", "obs one", "change one")])
+        store = self.tmp / "read-only-store"
+        store.mkdir()
+        observations = store / "observations.jsonl"
+        observations.write_text("", encoding="utf-8")
+        os.chmod(str(observations), stat.S_IREAD)
+        self.addCleanup(os.chmod, str(observations), stat.S_IREAD | stat.S_IWRITE)
+        if os.access(str(observations), os.W_OK):
+            self.skipTest("this account can write a read-only file (root?)")
+        self.assert_refused_and_still_open(manifest, store)
 
 
 class TestPromotionBar(LearningCase):
