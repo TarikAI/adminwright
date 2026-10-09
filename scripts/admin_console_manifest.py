@@ -96,6 +96,11 @@ AGENT_ROLES = ("architect", "implementer", "ux-reviewer", "security", "qa")
 AGENT_STATUSES = ("active", "done", "handed-off")
 REVIEW_STATUSES = ("unreviewed", "reviewed", "contested")
 LESSON_STATUSES = ("proposed", "adopted", "rejected", "superseded")
+# lessons/README.md, section 8: the only reasons a lesson may be closed `rejected` with.
+LESSON_REJECT_REASONS = (
+    "already-covered", "stack-specific", "style-preference", "unverified-cause",
+    "agent-error", "not-reproduced", "out-of-scope", "provider-specific",
+)
 
 REQUIRED_GATES = (
     "build",
@@ -8034,11 +8039,354 @@ def cmd_lesson_list(args):
     return 0
 
 
+# `lesson adopt` and `lesson reject` close a proposed lesson. They rewrite the one lesson
+# file in place, so everything they do not change must come back byte for byte: the
+# file is handled as lines that keep their own terminators (CRLF, LF, or none on a last
+# line), never decoded to text and re-encoded.
+LESSON_SECTION_HEADING = re.compile(r"^## (?:Trigger|Rule|Evidence|Proposed edit|Review notes)\s*$")
+LESSON_DIRECTION_CONTROLS = frozenset("؜‎‏‪‫‬‭‮⁦⁧⁨⁩")
+LESSON_NOT_PROPOSED = {
+    "adopted": "an adopted lesson is never reverted; correct it with a new lesson that "
+               "supersedes it (lessons/README.md, section 7)",
+    "rejected": "a rejected lesson reopens only with new evidence from a distinct codebase, "
+                "as a manual edit with a Review notes line (lessons/README.md, section 7)",
+    "superseded": "a superseded lesson is closed; superseded-by names the survivor",
+}
+
+
+def lesson_id_argument(raw):
+    value = raw.strip() if isinstance(raw, str) else ""
+    if not re.fullmatch(r"[0-9]{1,4}", value):
+        raise ManifestError("lesson id must be 1 to 4 digits, e.g. 0006; got " + json.dumps(value[:40]))
+    return value.zfill(4)
+
+
+def lesson_text_argument(raw, flag, required):
+    """One line of text for a Review notes entry.
+
+    A review note is a single line, so a value that holds a line break would write the
+    next line itself: a heading, or a forged `status:`. `lesson_date` refuses a multi-line
+    date for the same reason, and so does this, instead of folding the break away: the
+    caller meant something other than what would be recorded. Direction overrides are
+    refused too; they make an audit line read differently from the bytes it holds.
+    """
+    text = raw if isinstance(raw, str) else ""
+    for char in text:
+        if unicodedata.category(char) in ("Cc", "Zl", "Zp") or char in LESSON_DIRECTION_CONTROLS:
+            raise ManifestError(
+                flag + " must be one line of plain text; it holds a line break, control or "
+                "text-direction character (U+%04X)" % ord(char)
+            )
+    text = " ".join(text.split())
+    if required and not text:
+        raise ManifestError(flag + " is required and cannot be blank")
+    return text
+
+
+def lesson_commit_argument(raw):
+    """A commit hash as typed (hex only, so it can never be read as a git option), or None."""
+    if raw is None:
+        return None
+    value = raw.strip() if isinstance(raw, str) else ""
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", value):
+        raise ManifestError("--commit must be a commit hash of 7 or more hex digits; got " + json.dumps(value[:80]))
+    return value.lower()
+
+
+def lesson_split_lines(text):
+    """Lines with their terminators kept: joining them gives the text back byte for byte."""
+    return re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+", text)
+
+
+def lesson_line_end(line):
+    return line[len(line.rstrip("\r\n")):]
+
+
+def read_lesson_document(path):
+    """(bom, lines, bodies, close) for a lesson file.
+
+    `lines` keep their terminators, `bodies` are the same lines without them, and `close`
+    is the index of the line that ends the frontmatter. The frontmatter is found by the
+    rule `read_lesson_frontmatter` uses, so the lesson edited here is the one `lesson
+    list` and the index show.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ManifestError("Cannot read " + str(path) + ": " + str(exc))
+    bom = codecs.BOM_UTF8 if data.startswith(codecs.BOM_UTF8) else b""
+    try:
+        text = data[len(bom):].decode("utf-8")
+    except UnicodeDecodeError:
+        raise ManifestError(path.name + " is not valid UTF-8; re-save it as UTF-8")
+    lines = lesson_split_lines(text)
+    bodies = [line.rstrip("\r\n") for line in lines]
+    if not bodies or bodies[0].rstrip() != "---":
+        raise ManifestError(path.name + " has no frontmatter: its first line must be ---")
+    close = next((i for i in range(1, len(bodies)) if bodies[i].rstrip() == "---"), None)
+    if close is None:
+        raise ManifestError(path.name + " frontmatter is never closed by a line that is exactly ---")
+    if "".join(lines[: close + 1]).splitlines() != bodies[: close + 1]:
+        raise ManifestError(
+            path.name + " frontmatter holds a line separator other than CR or LF (form feed, "
+            "U+2028 ...), which the index reads as a line break; remove it by hand"
+        )
+    return bom, lines, bodies, close
+
+
+def lesson_heading_index(bodies, close, title, name):
+    hits = [i for i in range(close + 1, len(bodies)) if bodies[i].rstrip() == "## " + title]
+    if len(hits) != 1:
+        raise ManifestError("%s needs exactly one '## %s' heading; it has %d" % (name, title, len(hits)))
+    return hits[0]
+
+
+def lesson_section_end(bodies, heading):
+    for index in range(heading + 1, len(bodies)):
+        if LESSON_SECTION_HEADING.match(bodies[index]):
+            return index
+    return len(bodies)
+
+
+def lesson_edit_target(scope, proposed):
+    """The one skill file the lesson's edit changes: the scope file, or the file an area scope's Proposed edit names."""
+    if (SKILL_ROOT / scope).is_file():
+        return scope
+    named = []
+    for token in re.findall(r"[A-Za-z0-9_][A-Za-z0-9_./-]*", proposed):
+        token = token.rstrip("./-")
+        if (token.startswith(scope + "/") and token not in named and skill_scope_problem(token) is None
+                and (SKILL_ROOT / token).is_file()):
+            named.append(token)
+    if not named:
+        raise ManifestError(
+            "scope %s is an area: '## Proposed edit' must name the one file under it that the "
+            "edit changes, e.g. %s/<file>" % (json.dumps(scope), scope)
+        )
+    if len(named) > 1:
+        raise ManifestError(
+            "'## Proposed edit' names %d files under scope %s (%s); one lesson changes one file"
+            % (len(named), json.dumps(scope), ", ".join(named))
+        )
+    return named[0]
+
+
+def lesson_edit_proof(target, commit):
+    """The commit (full hash) or "working tree" that holds the guidance edit to `target`, else a refusal.
+
+    Adoption records an edit; it does not make one. A lesson closed `adopted` with
+    nothing changed would put an id in `Guidance level` that no build is held to.
+    """
+    first = "make the guidance edit first (adoption records it, it does not make it)"
+    if commit:
+        found = skill_git("rev-parse", "--verify", "--quiet", commit + "^{commit}")
+        if found is None:
+            raise ManifestError("git did not answer, so --commit cannot be checked")
+        full = found.stdout.strip()
+        if found.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", full):
+            raise ManifestError("--commit %s names no commit in this checkout" % commit)
+        listing = skill_git("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--root", "-m",
+                            "--no-renames", full)
+        if listing is None or listing.returncode != 0:
+            raise ManifestError("git could not list the files commit %s changed" % full[:12])
+        changed = [name for name in listing.stdout.split("\0") if name]
+        if target not in changed:
+            raise ManifestError("commit %s does not change %s; %s" % (full[:12], target, first))
+        return full
+    state = skill_git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--", target)
+    if state is None or state.returncode != 0:
+        raise ManifestError("git did not answer, so the edit to %s cannot be checked" % target)
+    if not state.stdout.replace("\0", "").strip():
+        raise ManifestError(
+            "no edit to %s found; %s, then pass --commit <sha> or leave it uncommitted in the "
+            "working tree" % (target, first)
+        )
+    return "working tree"
+
+
+def plan_lesson_closure(lessons_dir, lesson_id, adopting, date, reviewer, commit, reason, note):
+    """Read and check one proposed lesson; return the closing edit without writing it.
+
+    Everything is read here, inside the caller's lock, so what was checked is what is
+    written. The edit is exactly: the `status:` line, a `rejected-reason:` line for a
+    rejection, and one new line under `## Review notes`.
+    """
+    matches = [p for p in lesson_files(lessons_dir) if p.name[:4] == lesson_id]
+    if not matches:
+        raise ManifestError("no lesson %s in %s" % (lesson_id, lessons_dir))
+    if len(matches) > 1:
+        raise ManifestError("lesson id %s is on more than one file (%s)"
+                            % (lesson_id, ", ".join(p.name for p in matches)))
+    path = matches[0]
+    bom, lines, bodies, close = read_lesson_document(path)
+    keyed = {}
+    for index in range(1, close):
+        key, sep, _value = bodies[index].partition(":")
+        if sep:
+            keyed.setdefault(key.strip(), []).append(index)
+    for key, where in keyed.items():
+        if len(where) > 1:
+            raise ManifestError("%s frontmatter repeats %s; leave one by hand" % (path.name, key))
+    fields = {key: parse_frontmatter_value(bodies[where[0]].partition(":")[2]) for key, where in keyed.items()}
+    if fields.get("id") != lesson_id:
+        raise ManifestError("%s frontmatter id %s does not match its file name"
+                            % (path.name, json.dumps(fields.get("id"))))
+    if "status" not in keyed:
+        raise ManifestError("%s has no status field" % path.name)
+    current = fields["status"]
+    if current != "proposed":
+        raise ManifestError("lesson %s is %s, not proposed; %s" % (
+            lesson_id, current, LESSON_NOT_PROPOSED.get(current, "only a proposed lesson can be closed")))
+    notes_at = lesson_heading_index(bodies, close, "Review notes", path.name)
+
+    if adopting:
+        platforms = fields.get("platforms")
+        if not (isinstance(platforms, list) and any(isinstance(item, str) and item.strip() for item in platforms)):
+            raise ManifestError(
+                "lesson %s has empty platforms; fill them from the manifest's platform.archetypes and "
+                "platform.stack before adopting (lessons/README.md, section 3)" % lesson_id
+            )
+        heading = lesson_heading_index(bodies, close, "Proposed edit", path.name)
+        proposed = "\n".join(bodies[heading + 1: lesson_section_end(bodies, heading)]).strip()
+        if not proposed:
+            raise ManifestError(
+                "lesson %s has an empty '## Proposed edit'; fill in the target file, the text replaced, "
+                "the replacement and the net line change before adopting" % lesson_id
+            )
+        scope = fields.get("scope")
+        scope = scope.strip() if isinstance(scope, str) else ""
+        problem = skill_scope_problem(scope)
+        if problem:
+            raise ManifestError("lesson %s scope %s %s; correct it before adopting" % (
+                lesson_id, json.dumps(scope), problem))
+        edited_in = lesson_edit_proof(lesson_edit_target(scope, proposed), commit)
+        entry = "- %s adopted by %s; edit in %s" % (date, reviewer, edited_in)
+        new_status = "adopted"
+    else:
+        entry = "- %s rejected (%s)%s" % (date, reason, (": " + note) if note else "")
+        new_status = "rejected"
+
+    new = list(lines)
+    # The new note goes after the section's last line of text (or, in an empty section,
+    # after one blank line), ending the way its neighbour ends. A file whose last line has
+    # no terminator keeps it that way, so the only byte that changes there is the one the
+    # appended line needs.
+    end = lesson_section_end(bodies, notes_at)
+    last = max((i for i in range(notes_at + 1, end) if bodies[i].strip()), default=None)
+    if last is not None:
+        position, block = last + 1, [entry]
+    elif notes_at + 1 < end and not bodies[notes_at + 1].strip():
+        position, block = notes_at + 2, [entry]
+    else:
+        position, block = notes_at + 1, ["", entry]
+    neighbour = position - 1
+    file_end = next((lesson_line_end(line) for line in lines if lesson_line_end(line)), "\n")
+    line_end = lesson_line_end(lines[neighbour]) or file_end
+    if not lesson_line_end(lines[neighbour]):
+        new[neighbour] = lines[neighbour] + line_end
+    block = [text + line_end for text in block]
+    if position == len(lines) and not lesson_line_end(lines[-1]):
+        block[-1] = block[-1][: -len(line_end)]
+    new[position:position] = block
+
+    status_at = keyed["status"][0]
+    new[status_at] = "status: " + new_status + lesson_line_end(lines[status_at])
+    if not adopting:
+        reason_line = "rejected-reason: " + reason
+        if "rejected-reason" in keyed:
+            # A lesson reopened after an earlier rejection can still carry the field.
+            at = keyed["rejected-reason"][0]
+            new[at] = reason_line + lesson_line_end(lines[at])
+        else:
+            new.insert(status_at + 1, reason_line + lesson_line_end(lines[status_at]))
+    return {"path": path, "bom": bom, "old": lines, "new": new, "from": current, "to": new_status}
+
+
+def close_lesson(args, kind):
+    adopting = kind == "adopt"
+    lesson_id = lesson_id_argument(args.id)
+    date = lesson_date(args.date) or "unknown"
+    reviewer = commit = reason = note = None
+    if adopting:
+        reviewer = lesson_text_argument(args.by, "--by", True)
+        commit = lesson_commit_argument(args.commit)
+    else:
+        reason = args.reason
+        note = lesson_text_argument(args.note, "--note", False)
+    if not skill_is_checkout():
+        raise ManifestError(
+            "lesson %s works only inside a git checkout of the skill; %s is a plugin cache or a copy "
+            "vendored into a project, and the next update overwrites an edit made there. Clone "
+            "github.com/TarikAI/adminwright and run it there" % (kind, SKILL_ROOT)
+        )
+    lessons_dir = SKILL_ROOT / "lessons"
+    if not lessons_dir.is_dir():
+        raise ManifestError("No lessons directory at " + str(lessons_dir))
+    level = None
+    index_path = lessons_dir / "index.md"
+    if args.dry_run:
+        plan = plan_lesson_closure(lessons_dir, lesson_id, adopting, date, reviewer, commit, reason, note)
+    else:
+        with FileLock(lessons_dir / ".lock"):
+            plan = plan_lesson_closure(lessons_dir, lesson_id, adopting, date, reviewer, commit, reason, note)
+            write_text_file(plan["path"], ("﻿" if plan["bom"] else "") + "".join(plan["new"]))
+            try:
+                level = rebuild_lesson_index(lessons_dir)
+            except OSError as exc:
+                raise ManifestError(
+                    "lesson %s was written but %s could not be rebuilt (%s); run `lesson index`"
+                    % (lesson_id, index_path, exc)
+                )
+    if date == "unknown":
+        stderr("WARN: no --date supplied; recorded as 'unknown'")
+    if adopting:
+        stderr(
+            "NOTE: a lesson records no author, so this cannot check that %s did not open lesson %s; "
+            "the reviewer must be someone other than the agent that opened it (lessons/README.md, "
+            "section 6)" % (json.dumps(reviewer), lesson_id)
+        )
+    if args.json:
+        print(json.dumps({
+            "ok": True, "id": lesson_id, "from": plan["from"], "to": plan["to"],
+            "file": str(plan["path"]), "index": None if args.dry_run else str(index_path),
+            "dryRun": bool(args.dry_run),
+        }, ensure_ascii=False))
+        return 0
+    if args.dry_run:
+        import difflib
+
+        print("DRY RUN: lesson %s would go %s -> %s; nothing was written" % (lesson_id, plan["from"], plan["to"]))
+        print(plan["path"])
+        old = [line.rstrip("\r\n") for line in plan["old"]]
+        new = [line.rstrip("\r\n") for line in plan["new"]]
+        for line in difflib.unified_diff(old, new, "before", "after", lineterm="", n=0):
+            if not line.startswith("@@"):
+                print("  " + line)
+        print("  " + str(index_path) + " would be rebuilt")
+        return 0
+    print("Lesson %s: %s -> %s" % (lesson_id, plan["from"], plan["to"]))
+    print("Wrote " + str(plan["path"]))
+    print("Updated " + str(index_path) + "; guidance level " + level)
+    return 0
+
+
+def cmd_lesson_close(args, kind):
+    """`lesson adopt` / `lesson reject`. With --json a refusal is also reported on stdout."""
+    try:
+        return close_lesson(args, kind)
+    except ManifestError as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "id": str(args.id), "error": str(exc)}, ensure_ascii=False))
+        raise
+
+
 def cmd_lesson(args):
     if args.lesson_command == "add":
         return cmd_lesson_add(args)
     if args.lesson_command == "index":
         return cmd_lesson_index(args)
+    if args.lesson_command in ("adopt", "reject"):
+        return cmd_lesson_close(args, args.lesson_command)
     return cmd_lesson_list(args)
 
 
@@ -8259,7 +8607,7 @@ def build_parser():
     )
     release_parser.set_defaults(func=cmd_release_claim)
 
-    lesson_parser = subparsers.add_parser("lesson", help="Record or list skill lessons")
+    lesson_parser = subparsers.add_parser("lesson", help="Record, close or list skill lessons")
     lesson_sub = lesson_parser.add_subparsers(dest="lesson_command", required=True)
     lesson_add = lesson_sub.add_parser("add", help="Write lessons/NNNN-<slug>.md")
     lesson_add.add_argument("--title", required=True)
@@ -8336,6 +8684,37 @@ def build_parser():
     lesson_list.add_argument("--status", choices=LESSON_STATUSES)
     lesson_list.add_argument("--lessons-dir")
     lesson_list.set_defaults(func=cmd_lesson)
+    lesson_adopt = lesson_sub.add_parser(
+        "adopt",
+        help="Close a proposed lesson as adopted, once its guidance edit has landed (git checkout only)",
+    )
+    lesson_adopt.add_argument("id", help="the lesson id, e.g. 0006")
+    lesson_adopt.add_argument(
+        "--by", required=True, metavar="REVIEWER",
+        help="who reviewed and adopted it; must not be the agent that opened the lesson",
+    )
+    lesson_adopt.add_argument(
+        "--commit", metavar="SHA",
+        help="the commit that holds the guidance edit; without it the edit must be uncommitted "
+             "in the working tree",
+    )
+    lesson_adopt.add_argument("--date", help="caller-supplied date; the script never reads the clock")
+    lesson_adopt.add_argument("--dry-run", action="store_true", help="check and show the change; write nothing")
+    lesson_adopt.add_argument("--json", action="store_true")
+    lesson_adopt.set_defaults(func=cmd_lesson)
+    lesson_reject = lesson_sub.add_parser(
+        "reject", help="Close a proposed lesson as rejected, with the reason (git checkout only)",
+    )
+    lesson_reject.add_argument("id", help="the lesson id, e.g. 0006")
+    lesson_reject.add_argument(
+        "--reason", required=True, choices=LESSON_REJECT_REASONS,
+        help="why it is refused (lessons/README.md, section 8)",
+    )
+    lesson_reject.add_argument("--note", help="one line of detail for the Review notes entry")
+    lesson_reject.add_argument("--date", help="caller-supplied date; the script never reads the clock")
+    lesson_reject.add_argument("--dry-run", action="store_true", help="check and show the change; write nothing")
+    lesson_reject.add_argument("--json", action="store_true")
+    lesson_reject.set_defaults(func=cmd_lesson)
     return parser
 
 

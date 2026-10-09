@@ -101,7 +101,8 @@ Commands, and exactly what each writes:
 | Weigh contributions | `promote --include-community` | nothing; adds contributed evidence to the bar calculation |
 | Read the queue | `lesson list --status proposed` | nothing |
 | Adopt | edit of the one file named in `scope`, or in `Proposed edit` for an area scope | the guidance change |
-| Close the lesson | edit of the lesson frontmatter to `status: adopted`, then `lesson index` | the lesson, and the index rebuilt from the files |
+| Close the lesson | `lesson adopt <id> --by <reviewer> [--commit <sha>] [--date <YYYY-MM-DD>]` | `status: adopted` and one `Review notes` line naming the reviewer and where the edit is, with the index rebuilt from the files; refused until the edit has landed |
+| Reject the lesson | `lesson reject <id> --reason <reason> [--note <text>] [--date <YYYY-MM-DD>]` | `status: rejected`, `rejected-reason` and one `Review notes` line, with the index rebuilt |
 | Close the project entry | `set --manifest <path> --path 'feedback[fb-003].status' --value promoted` | the manifest entry |
 
 Invocation form:
@@ -113,6 +114,10 @@ python <skill-dir>/scripts/admin_console_manifest.py <command> ...
 Use `py -3` or `python3` if `python` is not on PATH.
 
 `lesson add` never edits a reference file. Adoption is always a separate, reviewed edit.
+`lesson adopt` and `lesson reject` close a lesson and touch only its `status`, a
+`rejected-reason` and one `Review notes` line. `adopt` checks that the edit exists, in
+`--commit` or uncommitted in the working tree, and never makes it. Both work only in a git
+checkout of the skill; field rules are in [../lessons/README.md](../lessons/README.md).
 
 `feedback[]` lives in the project manifest and travels with the project. Lessons live in
 the skill and travel with the skill. Never carry project-specific detail into a lesson
@@ -189,7 +194,7 @@ you fetched, and record the fetch date. Behaviour observed only in the current s
 stack quirk, not a correction.
 
 Everything else stays `proposed`. A lesson still `proposed` after two further builds with no
-second sighting is closed `rejected`, reason `not-reproduced`. It stays on disk.
+second sighting is closed with `lesson reject <id> --reason not-reproduced`. It stays on disk.
 
 ## Never promote
 
@@ -197,9 +202,9 @@ second sighting is closed `rejected`, reason `not-reproduced`. It stays on disk.
 |---|---|---|
 | Single-project stack quirks and version-pinned workarounds | they expire, and they are wrong for the next project's stack | the project's agent contract file, generated from [../assets/agent-contract.template.md](../assets/agent-contract.template.md) |
 | Personal or team style preferences | the skill has no basis to judge them, and they conflict across teams | the project's agent contract file |
-| Restatements of guidance already present | consumes the line budget and buys nothing; a second phrasing of a rule weakens both | close `rejected`, reason `already-covered` |
+| Restatements of guidance already present | consumes the line budget and buys nothing; a second phrasing of a rule weakens both | `lesson reject <id> --reason already-covered` |
 | Claims you cannot tie to the outcome | post-hoc rationalization; a rule built on a guess is a rule that misfires | return to observation until causality is shown |
-| Findings from a single failed run whose real cause was agent error | writing a rule to prevent your own mistake teaches the next agent nothing and adds a gate that fires on correct work | close `rejected`, reason `agent-error` |
+| Findings from a single failed run whose real cause was agent error | writing a rule to prevent your own mistake teaches the next agent nothing and adds a gate that fires on correct work | `lesson reject <id> --reason agent-error` |
 | Anything naming a specific harness's tools or model | breaks provider neutrality; the skill must run on any harness | rewrite neutrally or reject |
 | Anything containing secrets, customer identifiers, or private data | lessons ship with the skill | strip to the shape, or reject |
 
@@ -224,8 +229,8 @@ Apply before every `lesson add`. All five must hold.
 5. **Can you point to an artifact that proves the cost?** A failing test, a `gaps[]` entry,
    an audit finding, a rework diff. No artifact, no promotion.
 
-Failing any question closes the lesson `rejected` with that reason. Keep the file; it is
-what stops the same idea returning every build.
+Failing any question closes the lesson with `lesson reject <id> --reason <that reason>`.
+Keep the file; it is what stops the same idea returning every build.
 
 ## The regression floor
 

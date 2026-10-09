@@ -79,7 +79,7 @@ Optional fields, written at review time, never by `lesson add`:
 | Field | When |
 |---|---|
 | `confirmed-by` | confidence is `confirmed`; who confirmed and where |
-| `rejected-reason` | status is `rejected`; one value from section 8 |
+| `rejected-reason` | status is `rejected`; one value from section 8, written by `lesson reject` |
 | `superseded-by` | status is `superseded`; the surviving lesson id |
 | `supersedes` | this lesson absorbed others; their ids |
 
@@ -121,7 +121,8 @@ arguments and creates the last two empty.
    `Proposed edit` names). One lesson, one file, one edit.
 7. Set `status: adopted`, append a dated review note, and run `lesson index` in the same
    edit: it rebuilds the row in [index.md](index.md) and the `Guidance level` from the files.
-   Never edit the index by hand.
+   Never edit the index by hand. `lesson adopt` does all of this once the edit exists
+   (section 7).
 8. Close the originating manifest entry with
    `set --manifest <path> --path 'feedback[fb-003].status' --value promoted`.
 
@@ -141,6 +142,25 @@ separate declared pass with the reference file re-read rather than recalled.
 No other transition is valid. An `adopted` lesson is never reverted to `proposed`; correct
 it with a new lesson that supersedes it, so the history of the guidance stays readable.
 
+The two transitions that close a `proposed` lesson have commands. Each works only in a git
+checkout of the skill (a plugin cache or a vendored copy is overwritten on update), under the
+lessons lock; it changes only the lines listed below, keeps the file's line endings, and
+rebuilds [index.md](index.md). `--dry-run` shows the change and writes nothing; `--json`
+prints `{ok, id, from, to, file, index, dryRun}`. A refusal exits 2 with a one-line reason,
+and with `--json` also reports it on stdout as `{ok: false, id, error}`.
+
+| Command | Refuses unless | Writes |
+|---|---|---|
+| `lesson adopt <id> --by <reviewer> [--commit <sha>] [--date YYYY-MM-DD]` | status is `proposed`; `platforms` is non-empty; `Proposed edit` is non-empty; `scope` exists in the skill, and for an area scope `Proposed edit` names the one file under it that changes; the edit has landed: `--commit` changed that file, or, without it, the file has uncommitted changes | `status: adopted`, and under `## Review notes` the line `- <date> adopted by <reviewer>; edit in <commit or "working tree">` |
+| `lesson reject <id> --reason <reason> [--note <text>] [--date YYYY-MM-DD]` | status is `proposed` | `status: rejected`, the line `rejected-reason: <reason>` after it, and under `## Review notes` the line `- <date> rejected (<reason>)`, followed by `: <note>` when a note is given |
+
+Values are one line of plain text: a line break or control character in `--by`, `--note` or
+`--date`, or a `--commit` that is not a hash, is refused, never folded or passed to git. The
+promotion route, the regression check, and "was it the skill or was it me?" stay with the
+reviewer: the commands cannot judge them. A lesson records no author, so `adopt` cannot
+check that the reviewer did not open it; it prints a reminder, and the rule in section 6
+stands. `superseded` and the move from `rejected` back to `proposed` are manual edits.
+
 ## Rejection
 
 Rejected lessons are kept. Record the reason from this vocabulary:
@@ -155,6 +175,9 @@ Rejected lessons are kept. Record the reason from this vocabulary:
 | `not-reproduced` | no second sighting after two further builds |
 | `out-of-scope` | not about building or auditing an admin control plane |
 | `provider-specific` | names a harness's tools or model and cannot be rewritten neutrally |
+
+`lesson reject <id> --reason <reason>` accepts exactly these values and records the reason as
+described in section 7.
 
 Before opening a lesson, read the `rejected` entries. If the idea matches one, either add new
 evidence to that lesson or drop it. Never open a second file for the same idea.

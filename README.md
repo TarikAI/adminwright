@@ -186,7 +186,7 @@ review-scope   check from git what a reviewer pass changed    (1 = outside its w
 harvest   move this project's feedback into the cross-project store
 promote   list what clears the promotion bar; --export to share, --include-community to weigh
 store     init | sync | status for the cross-device observation store
-lesson    record and list durable lessons
+lesson    record, adopt, reject and list durable lessons
 ```
 
 `emit` is the quiet workhorse: the manifest already holds role × capability × scope, so the

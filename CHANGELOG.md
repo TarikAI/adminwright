@@ -15,6 +15,17 @@ therefore says which rule set judged it, even on an install that updated in betw
 
 ### Added
 
+- **`lesson adopt` and `lesson reject`**: close a `proposed` lesson without hand-editing its
+  frontmatter. `adopt <id> --by <reviewer> [--commit <sha>]` refuses unless `platforms` and
+  `Proposed edit` are filled, `scope` exists (an area scope needs `Proposed edit` to name one
+  file under it) and the edit has landed (the commit changed that file, or it has uncommitted
+  changes); it writes `status: adopted` and a `Review notes` line. `reject <id> --reason <one
+  of the eight>` writes `status: rejected`, `rejected-reason` and a `Review notes` line. Both
+  work only in a git checkout of the skill, take the lessons lock, rebuild `lessons/index.md`,
+  keep the file's line endings and every other byte, accept `--dry-run` and `--json`, and
+  refuse (exit 2, one-line reason) a line break in `--by`, `--note` or `--date`. No format
+  change: adoption is recorded in `Review notes` only. `lessons/README.md` section 7 and
+  `references/skill-evolution.md` describe them.
 - **Behavioural evals** (`evals/behavior/`, run with `claude plugin eval`), in two sets:
   - Six smoke cases need no tool grant and run anywhere. They check that the skill loads
     for a back-office or superadmin request and not for a marketing chart or a customer
