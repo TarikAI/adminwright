@@ -68,7 +68,7 @@ jobs:
           claude plugin eval "${args[@]}"
       - name: Keep the results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: behavior-eval-results
           path: |
