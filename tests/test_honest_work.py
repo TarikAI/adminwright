@@ -124,6 +124,98 @@ class TestEvidenceContent(TempProject):
         self.assertNotIn("declared-static-unused", out)
 
 
+class TestSampleAndRandomAreVocabulary(TempProject):
+    """'sample' and 'random' name real things in audio, ML, lab and statistics work.
+
+    An audio console's real table `public.cry_samples` was refused in `sourceOfTruth`,
+    which cannot be declared static, so the only way through was renaming the domain.
+    The words still fail where they mark fabricated data: modifying the noun after them
+    ("sample data", "SAMPLE_USERS") or calling a number generator ("Math.random()").
+    """
+
+    profile = "regulated"
+
+    def setUp(self):
+        super().setUp()
+        self.data = self.build_honest_manifest()
+
+    def refused(self, token):
+        code, out, _err = self.validate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("placeholder token '" + token + "'", out)
+
+    def test_head_nouns_and_technical_compounds_are_not_placeholders(self):
+        for text in (
+            "postgres:public.cry_samples", "See misclassified cry samples",
+            "audio_clips.sample_rate", "cry_sample_id", "CrySampleRepository.findForReview",
+            "a random sample of refunds for review", "random forest classifier",
+            "chosen at random", "random seed 42", "crypto.randomUUID()",
+            "crypto.getRandomValues(buffer)",
+        ):
+            self.assertIsNone(acm.placeholder_match(text), text)
+
+    def test_fabricated_data_is_still_a_placeholder(self):
+        for text in (
+            "sample data from fixtures", "getSampleData", "SAMPLE_USERS", "sample-orders.json",
+            "randomMetrics()", "random values per tenant", "randomly generated users",
+            "Math.random() series", "np.random.rand(30)", "random.randint(1, 9)",
+        ):
+            self.assertIsNotNone(acm.placeholder_match(text), text)
+        self.assertEqual(acm.placeholder_match("sample data from fixtures"), "sample data")
+        self.assertEqual(acm.placeholder_match("Math.random() series"), "random")
+
+    def test_a_real_samples_table_passes_release_at_every_profile(self):
+        self.data["entities"][0]["sourceOfTruth"] = "postgres:public.cry_samples"
+        self.write(self.data)
+        for profile in ("internal", "standard", "regulated"):
+            code, out, err = self.validate(profile=profile)
+            self.assertEqual(code, 0, profile + "\n" + out + err)
+
+    def test_a_cited_test_with_mocks_and_samples_passes(self):
+        (self.root / "tests" / "user.spec.ts").write_text(
+            "jest.mock('../audio/recorder');\n"
+            "test('user.list via /admin/users', async () => {\n"
+            "  const fixture = { samples: [0.1, 0.2] };\n"
+            "  expect((await listUsers({tenantId: 't-1'})).length).toBe(3);\n"
+            "  expect(fixture.samples).toHaveLength(2);\n"
+            "});\n", encoding="utf-8")
+        code, out, err = self.validate()
+        self.assertEqual(code, 0, out + err)
+
+    def test_a_sample_data_binding_still_fails(self):
+        self.capability_of(self.data)["dataBinding"] = "sample data from fixtures"
+        self.write(self.data)
+        self.refused("sample data")
+
+    def test_a_random_number_binding_still_fails(self):
+        self.capability_of(self.data)["dataBinding"] = "Math.random() series"
+        self.write(self.data)
+        self.refused("random")
+
+    def test_the_strict_words_are_unchanged(self):
+        for where, value, token in (
+            ("binding", "mockRepository", "mock"),
+            ("source", "fake table", "fake"),
+            ("screen", "MOCK_ROWS", "MOCK"),
+        ):
+            data = json.loads(json.dumps(self.data))
+            if where == "binding":
+                self.capability_of(data)["dataBinding"] = value
+            elif where == "source":
+                data["entities"][0]["sourceOfTruth"] = value
+            else:
+                data["screens"][0]["dataSources"] = [value]
+            self.write(data)
+            self.refused(token)
+
+    def test_a_defect_described_in_source_of_truth_still_fails(self):
+        # A regex cannot tell an insecure-but-real generator from a fabricated series.
+        # sourceOfTruth names where the data lives; the defect belongs in gaps[].
+        self.data["entities"][0]["sourceOfTruth"] = "token generated with Math.random() (defect)"
+        self.write(self.data)
+        self.refused("random")
+
+
 class TestSetCommand(TempProject):
     """2.3 -- `set` had no tests, and the write guard could not resolve evidence."""
 

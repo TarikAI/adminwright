@@ -266,6 +266,16 @@ therefore says which rule set judged it, even on an install that updated in betw
   extension, audit, repair) and each agent prompt costs to load.
 ### Changed
 
+- **`placeholder-scan`: `sample` and `random` are vocabulary unless they name fabricated data**
+  (lesson 0006). Manifest implementation fields no longer fail on the bare words: a real table
+  `public.cry_samples` in `sourceOfTruth` was refused, and since a `sourceOfTruth` cannot be
+  declared static there was no way through but renaming the domain. They still fail as a
+  modifier of the next word (`sample data`, `SAMPLE_USERS`, `randomMetrics`) unless that word
+  is a sampling term or a code noun (`sample_rate`, `random seed`, `CrySampleRepository`), and
+  as a number-generator call (`Math.random()`, `random.randint`); `getRandomValues`,
+  `randomUUID` and `randomBytes` are not stand-in data. The strict words, the substring pass,
+  `declaredStatic[]` and the whole-word scan of evidence files are unchanged. A loosening, so
+  not breaking. `references/test-data.md` states the new rule in place of the old one.
 - **SKILL.md** is about 4,600 estimated tokens, down from 6,300. Claude Code re-attaches
   only the first 5,000 tokens of a skill after compaction, and the cut fell inside Phase 8, so
   long builds lost the agent roster and the completion report. A test now pins the ceiling.

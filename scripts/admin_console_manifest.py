@@ -167,15 +167,34 @@ _PLACEHOLDER_WORDS = (
     r"|placeholder(?:s)?|lorem|demo-only|todo(?:s)?|tbd|fixme|coming-soon|wip|xxx+"
     r"|not[\s_-]?implemented"
 )
-# Manifest fields are scanned for every word above plus 'sample' and 'random'.
-# Evidence FILES are scanned without those two: "1200 samples" and "random seed"
-# are ordinary words in a real run log, and dropping them costs nothing in a
-# field that names an implementation.
-PLACEHOLDER_PATTERN = re.compile(
-    r"\b(?:" + _PLACEHOLDER_WORDS + r"|sample(?:s)?|random(?:ly)?)\b", re.I
-)
-FILE_PLACEHOLDER_PATTERN = re.compile(r"\b(?:" + _PLACEHOLDER_WORDS + r")\b", re.I)
+PLACEHOLDER_PATTERN = re.compile(r"\b(?:" + _PLACEHOLDER_WORDS + r")\b", re.I)
 WHOLE_PLACEHOLDER_PATTERN = re.compile(r"^(?:" + _PLACEHOLDER_WORDS + r")$", re.I)
+# 'sample' and 'random' name real things in audio, ML, lab and statistics work:
+# "public.cry_samples", "sample_rate", "a random sample of refunds". Banned as bare
+# words, they refused a real table in sourceOfTruth, a field that cannot be declared
+# static. In a manifest field they mark fabricated data only where they modify the
+# word after them ("sample data", "SAMPLE_USERS", "randomMetrics") or call a number
+# generator ("Math.random()"). Evidence files are not scanned for them at all.
+SOFT_MODIFIER = re.compile(r"\b(sample|random(?:ly|i[sz]ed)?)(?=[\s-]+([a-z]+))", re.I)
+# Words after the modifier that describe sampling, chance or a piece of code, not
+# invented data. Anything else is a hit, so an unforeseen 'sample orders' still fails.
+SOFT_COMPOUNDS = frozenset(
+    (
+        "rate rates size sizes count counts id ids interval period frequency width depth "
+        "format length sample samples sampling sampled seed seeds forest variable variables "
+        "access walk effect effects selection selected chosen assignment assigned "
+        "repository repositories repo service table tables store model models schema column "
+        "columns key keys query queries queue worker job jobs handler controller api endpoint "
+        "bucket index view"
+    ).split()
+)
+SOFT_FUNCTION_WORDS = frozenset(
+    "a an the of from for in on at to by with via per and or is are was were be as into "
+    "than across over between within without not only".split()
+)
+RANDOM_CALL = re.compile(r"\.random\b|\brandom(?:\(|\.[a-z_])", re.I)
+# Secure generators produce real secrets and ids, not stand-in data.
+SECURE_RANDOM_CALLS = re.compile(r"getRandomValues|randomUUID|randomBytes", re.I)
 # Framework idioms that contain a banned word and mean nothing by it.
 FRAMEWORK_CALLS = re.compile(
     r"jest\.mock\(|vi\.mock\(|sinon\.stub\(|unittest\.mock|getByPlaceholderText"
@@ -2217,12 +2236,35 @@ def placeholder_match(text, terms=(), prose=False):
     hit = PLACEHOLDER_PATTERN.search(scannable)
     if hit:
         return hit.group(0)
+    hit = fabrication_match(folded, terms)
+    if hit:
+        return hit
     for token in folded.split():
         if terms:
             token = without_domain_terms(split_identifiers(token), terms).replace(" ", "")
         hit = substring_hit(token)
         if hit:
             return hit.group(0)
+    return None
+
+
+def fabrication_match(folded, terms=()):
+    """'sample' or 'random' used the way fabricated data is named, else None.
+
+    `folded` is the text before identifier splitting, so 'Math.random()' keeps its
+    dot. 'cry_samples' and 'chosen at random' pass; 'sampleData' and 'randomMetrics'
+    do not. Declared domain terms are removed first, as in placeholder_match.
+    """
+    folded = SECURE_RANDOM_CALLS.sub(" ", folded)
+    if RANDOM_CALL.search(folded):
+        return "random"
+    scannable = split_identifiers(folded)
+    if terms:
+        scannable = without_domain_terms(scannable, terms)
+    for hit in SOFT_MODIFIER.finditer(scannable):
+        following = hit.group(2).lower()
+        if following not in SOFT_COMPOUNDS and following not in SOFT_FUNCTION_WORDS:
+            return hit.group(1) + " " + hit.group(2)
     return None
 
 
@@ -2237,7 +2279,7 @@ def scan_file_placeholder(body, terms=()):
         cleaned = split_identifiers(FRAMEWORK_CALLS.sub(" ", mask_prose_todo(fold_confusables(line))))
         if terms:
             cleaned = without_domain_terms(cleaned, terms)
-        hit = FILE_PLACEHOLDER_PATTERN.search(cleaned)
+        hit = PLACEHOLDER_PATTERN.search(cleaned)
         if hit:
             return hit.group(0), number
     return None

@@ -17,3 +17,4 @@ procedure are in [README.md](README.md). The promotion bar is in
 | [0003](0003-init-must-warn-on-unrecognised-archetypes.md) | Init must warn on unrecognised archetypes | tooling | scripts/admin_console_manifest.py | adopted | observed-once | nextjs-fintech | 2026-08-08 |
 | [0004](0004-emit-must-surface-manifest-health.md) | Emit must surface manifest health | tooling | scripts/admin_console_manifest.py | adopted | observed-once | nextjs-ai-saas | 2026-08-09 |
 | [0005](0005-model-roles-and-capabilities-before-screens.md) | Model roles and capabilities before screens | gap | SKILL.md | adopted | repeated | nextjs-ai-saas; nextjs-fintech | 2026-08-20 |
+| [0006](0006-flag-sample-and-random-only-where-they-mark-fabricated-data.md) | Flag sample and random only where they mark fabricated data | incorrect-guidance | scripts/admin_console_manifest.py | proposed | repeated | expo-supabase-audio-ml; fastify-microservices-marketplace | 2026-11-02 |
