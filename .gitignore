@@ -11,6 +11,8 @@ evals/behavior/results/
 # Adminwright working state
 .admin-console/locks/
 .admin-console/.lock
+# `lesson add`, `adopt` and `reject` lock the skill's own lessons folder
+lessons/.lock
 
 # The cross-project observation store lives in the user's home directory,
 # never in a repository. Ignored here in case anyone points it at a checkout.

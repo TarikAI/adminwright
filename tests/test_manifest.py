@@ -608,6 +608,17 @@ class TestMalformedInput(TempProject):
         target.write_text('{"a":' + "[" * 60000 + "]" * 60000 + "}", encoding="utf-8")
         self.assert_clean_usage_error(target)
 
+    def test_deeply_nested_json_is_refused_on_every_python(self):
+        # Shallow enough that no interpreter's parser runs out of recursion, so the
+        # refusal comes from the depth limit, not from the parser.
+        target = self.tmp / "deep.json"
+        target.write_text('{"a":' + "[" * 150 + "]" * 150 + "}", encoding="utf-8")
+        self.assert_clean_usage_error(target)
+        code, _out, err = self.cli("add", "--kind", "gap", "--json", "@" + str(target))
+        self.assertEqual(code, 2, err)
+        self.assertIn("nested too deeply", err)
+        self.assertNotIn("Traceback", err)
+
     def test_truncated_json(self):
         target = self.tmp / "truncated.json"
         target.write_text('{"manifestVersion": "2.0",', encoding="utf-8")

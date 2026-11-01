@@ -458,6 +458,16 @@ therefore says which rule set judged it, even on an install that updated in betw
   lock file, states that the harvester is a pass, and uses one pass order (security before qa).
 ### Fixed
 
+- **CI on `main` was red** since `lesson adopt`/`reject` landed: `tests/test_lesson_close.py`
+  called `Path.write_text(newline=)`, which Python 3.9 lacks, and compared the command's
+  resolved paths with unresolved temp paths (`/private/var` on macOS, `RUNNER~1` on Windows).
+  The same 3.9 call is gone from `tests/_core_schema_pg.py` and `assets/brand/build_brand.py`.
+- **Deeply nested JSON** was a usage error on most interpreters but, on Python 3.14 for Linux
+  and macOS, parsed and validated (exit 1), because that parser no longer runs out of recursion.
+  JSON nested past 100 levels is now refused (exit 2) on every version, for manifests and for
+  `--json`, where it used to end in a traceback.
+- `lessons/.lock`, which `lesson add`, `adopt` and `reject` leave in the skill checkout, is
+  git-ignored.
 - **The write lock**: waiters reading the lock file made the holder's delete fail on Windows,
   and 15 of 16 parallel writers timed out after 30 s. 24 parallel `add`s now all land in about
   2 s.

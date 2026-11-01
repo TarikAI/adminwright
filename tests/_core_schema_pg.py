@@ -95,7 +95,8 @@ class PgCase(unittest.TestCase):
 
     def sql_file(self, name, text):
         path = self.tmp / name
-        path.write_text(text, encoding="utf-8", newline="\n")
+        with open(str(path), "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
         return str(path)
 
     def new_database(self, apply_schema=True):

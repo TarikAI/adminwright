@@ -272,8 +272,10 @@ class TestOutsideACheckout(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="adminwright-close-"))
         self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
         self.base = make_copy(self.tmp / "skill", with_git=False)
-        (self.base / "lessons" / "0006-rotate-keys-before-export.md").write_text(
-            lesson_text(), encoding="utf-8", newline="\n")
+        # Path.write_text takes newline= only from Python 3.10; CI runs 3.9.
+        with open(str(self.base / "lessons" / "0006-rotate-keys-before-export.md"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(lesson_text())
 
     def test_both_commands_refuse_and_write_nothing(self):
         before = {p.name: p.read_bytes() for p in (self.base / "lessons").iterdir()}
@@ -711,8 +713,10 @@ class TestDryRunAndJson(CloseCase):
         result = json.loads(out)
         self.assertEqual(result["ok"], True)
         self.assertEqual((result["id"], result["from"], result["to"]), ("0006", "proposed", "adopted"))
-        self.assertEqual(Path(result["file"]), self.lesson_path())
-        self.assertEqual(Path(result["index"]), self.lessons / "index.md")
+        # The command reports resolved paths: macOS temp dirs live under /private/var
+        # and Windows runners hand out 8.3 short names (RUNNER~1), so compare resolved.
+        self.assertEqual(Path(result["file"]).resolve(), self.lesson_path().resolve())
+        self.assertEqual(Path(result["index"]).resolve(), (self.lessons / "index.md").resolve())
         self.assertFalse(result["dryRun"])
 
     def test_json_for_reject_and_for_a_dry_run(self):
@@ -724,7 +728,7 @@ class TestDryRunAndJson(CloseCase):
         self.assertIsNone(result["index"], "a dry run rebuilds nothing")
         code, out, err = self.run_lesson("reject", "0006", "--reason", "agent-error", "--json",
                                          "--date", "2026-10-09")
-        self.assertEqual(json.loads(out)["index"], str(self.lessons / "index.md"))
+        self.assertEqual(Path(json.loads(out)["index"]).resolve(), (self.lessons / "index.md").resolve())
 
     def test_json_stdout_carries_nothing_but_the_object(self):
         self.edit_scope()

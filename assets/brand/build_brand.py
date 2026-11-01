@@ -82,7 +82,8 @@ def main():
         for theme_name, colors in THEMES.items():
             svg = TEMPLATE.format(SANS=SANS, MONO=MONO, **layout, **colors)
             path = OUT / f"{layout_name}-{theme_name}.svg"
-            path.write_text(svg, encoding="utf-8", newline="\n")
+            with open(str(path), "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(svg)
             written.append(path.name)
     print("wrote: " + ", ".join(written))
 

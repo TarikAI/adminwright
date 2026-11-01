@@ -910,6 +910,26 @@ def decode_text_bytes(data, source, allow_utf16=False):
         )
 
 
+# A manifest is a handful of levels deep. Python 3.14's parser no longer runs out of
+# recursion on 60 000 nested arrays, so the same file was a usage error on one
+# interpreter and a validation run on another, and any recursive walk could still
+# meet it. Anything deeper than this is refused on every version.
+MAX_JSON_DEPTH = 100
+
+
+def loads_bounded(text):
+    """json.loads, raising RecursionError for nesting past MAX_JSON_DEPTH on every Python."""
+    value = json.loads(text)
+    pending = [(value, 1)] if isinstance(value, (dict, list)) else []
+    while pending:
+        item, depth = pending.pop()
+        if depth > MAX_JSON_DEPTH:
+            raise RecursionError("JSON nested more than " + str(MAX_JSON_DEPTH) + " levels")
+        children = item.values() if isinstance(item, dict) else item
+        pending.extend((child, depth + 1) for child in children if isinstance(child, (dict, list)))
+    return value
+
+
 def load_json(path):
     try:
         raw = decode_text_bytes(path.read_bytes(), path)
@@ -918,7 +938,7 @@ def load_json(path):
     except OSError as exc:
         raise ManifestError("Cannot read " + str(path) + ": " + str(exc))
     try:
-        value = json.loads(raw)
+        value = loads_bounded(raw)
     except json.JSONDecodeError as exc:
         raise ManifestError("Invalid JSON in " + str(path) + ": " + str(exc))
     except RecursionError:
@@ -4705,9 +4725,11 @@ def parse_json_value(raw):
     elif raw.strip() == "-":
         text = decode_text_bytes(sys.stdin.buffer.read(), "standard input", allow_utf16=True)
     try:
-        return json.loads(text)
+        return loads_bounded(text)
     except json.JSONDecodeError as exc:
         raise ManifestError("--json is not valid JSON: " + str(exc) + ". " + POWERSHELL_HINT)
+    except RecursionError:
+        raise ManifestError("--json is nested too deeply to parse safely.")
 
 
 def parse_json_argument(raw):
