@@ -4,7 +4,7 @@ title: "Flag sample and random only where they mark fabricated data"
 date: "2026-11-02"
 category: incorrect-guidance
 scope: "scripts/admin_console_manifest.py"
-status: proposed
+status: adopted
 confidence: repeated
 platforms: ["expo-supabase-audio-ml", "fastify-microservices-marketplace"]
 ---
@@ -63,3 +63,5 @@ Not changed:
   Name the entity and add it to `platform.domainTerms`.
 
 ## Review notes
+
+- 2026-11-02 adopted by Claude (single-agent adoption pass, at maintainer TarikAI's request); edit in 53619bdd2ca9c6a7610e26032aa6d82ed69fd051

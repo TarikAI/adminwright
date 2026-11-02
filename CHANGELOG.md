@@ -472,6 +472,13 @@ therefore says which rule set judged it, even on an install that updated in betw
   called `Path.write_text(newline=)`, which Python 3.9 lacks, and compared the command's
   resolved paths with unresolved temp paths (`/private/var` on macOS, `RUNNER~1` on Windows).
   The same 3.9 call is gone from `tests/_core_schema_pg.py` and `assets/brand/build_brand.py`.
+- **The lesson tests broke whenever a real lesson was added**: `test_lesson_close` and
+  `test_learning_loop` copied the real `lessons/` folder and wrote their own fixture as `0006`,
+  the next free id when they were written. Adding lesson 0006 failed 59 tests. Their copy of
+  the skill now carries lessons 0001-0005 only (`tests/cli_helpers.py`, `copy_skill_files`).
+  And the check that every shipped review note is dated and signed rejected the line
+  `lesson adopt` itself writes (`adopted by <reviewer>; edit in <commit>`), so the first real
+  adoption failed the suite; it now accepts the documented `adopt` and `reject` lines.
 - **Deeply nested JSON** was a usage error on most interpreters but, on Python 3.14 for Linux
   and macOS, parsed and validated (exit 1), because that parser no longer runs out of recursion.
   JSON nested past 100 levels is now refused (exit 2) on every version, for manifests and for

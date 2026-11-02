@@ -56,6 +56,34 @@ def run(*args, **kwargs):
     return proc.returncode, proc.stdout, proc.stderr
 
 
+# The lesson tests write their own lesson as 0006, the next free id when they were
+# written, and expect guidance level 0005. Copying every real lesson made each new
+# one in the repository collide with that fixture, so a copy carries 0001-0005 only.
+FIXTURE_LESSON_CEILING = 5
+
+
+def _later_lessons(_directory, names):
+    return {
+        name for name in names
+        if name[:4].isdigit() and name[4:5] == "-" and int(name[:4]) > FIXTURE_LESSON_CEILING
+    }
+
+
+def copy_lessons(target):
+    """The skill's lessons up to FIXTURE_LESSON_CEILING, with an index rebuilt to match."""
+    shutil.copytree(str(SKILL_ROOT / "lessons"), str(target), ignore=_later_lessons)
+    acm.rebuild_lesson_index(Path(target))
+
+
+def copy_skill_files(base):
+    """Copy the parts of the skill a lesson command reads into `base`."""
+    for name in ("scripts", "assets", "references"):
+        shutil.copytree(str(SKILL_ROOT / name), str(base / name),
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    copy_lessons(base / "lessons")
+    shutil.copyfile(str(SKILL_ROOT / "SKILL.md"), str(base / "SKILL.md"))
+
+
 class TempProject(unittest.TestCase):
     """Base class giving each test an isolated project directory."""
 

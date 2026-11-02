@@ -20,7 +20,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cli_helpers import SCRIPT, SKILL_ROOT, TempProject, acm, run
+from cli_helpers import (SCRIPT, SKILL_ROOT, TempProject, acm, copy_lessons, copy_skill_files,
+                         run)
 
 HAVE_GIT = shutil.which("git") is not None
 
@@ -55,10 +56,7 @@ def make_skill_copy(parent, with_git=False, cache_path=False, vendored=False):
     if vendored:
         base = base / ".claude" / "skills" / "adminwright"
     base.mkdir(parents=True)
-    for name in ("scripts", "assets", "lessons", "references"):
-        shutil.copytree(str(SKILL_ROOT / name), str(base / name),
-                        ignore=shutil.ignore_patterns("__pycache__"))
-    shutil.copyfile(str(SKILL_ROOT / "SKILL.md"), str(base / "SKILL.md"))
+    copy_skill_files(base)
     if with_git:
         git_repository(base, commit=False)
     return base
@@ -921,7 +919,7 @@ class TestLessonFormat(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="adminwright-lessons-"))
         self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
         self.lessons = self.tmp / "lessons"
-        shutil.copytree(str(SKILL_ROOT / "lessons"), str(self.lessons))
+        copy_lessons(self.lessons)
 
     def add(self, *extra, **kwargs):
         args = list(LESSON) + list(extra)
@@ -1064,9 +1062,14 @@ class TestLessonFormat(unittest.TestCase):
             body = path.read_text(encoding="utf-8").split("\n## Review notes\n", 1)[1]
             notes = [line for line in body.splitlines() if line.startswith("- ")]
             for note in notes:
-                signed = re.match(r"^- \d{4}-\d{2}-\d{2} ([^:]+):", note)
+                # `lesson adopt` and `lesson reject` write their own documented lines
+                # (lessons/README.md section 7); a reject line names a reason, not a signer.
+                signed = re.match(
+                    r"^- \d{4}-\d{2}-\d{2} (?:adopted by ([^;]+); edit in \S+$|rejected \([a-z-]+\))",
+                    note,
+                ) or re.match(r"^- \d{4}-\d{2}-\d{2} ([^:]+):", note)
                 self.assertTrue(signed, path.name + ": every note is dated and signed: " + note[:60])
-                if signed.group(1).startswith("maintainer"):
+                if (signed.group(1) or "").startswith("maintainer"):
                     self.assertNotIn("backfill", note.lower(), path.name + ": " + note[:80])
         readme = (SKILL_ROOT / "lessons" / "README.md").read_text(encoding="utf-8")
         step = [line for line in readme.splitlines() if line.startswith("7. Set `status: adopted`")]

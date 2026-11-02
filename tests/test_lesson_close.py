@@ -20,7 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cli_helpers import SKILL_ROOT, acm
+from cli_helpers import SKILL_ROOT, acm, copy_skill_files
 
 HAVE_GIT = shutil.which("git") is not None
 
@@ -47,10 +47,7 @@ def make_copy(parent, with_git):
     """A copy of the skill; its own git checkout, one clean commit deep, only with with_git."""
     base = Path(parent)
     base.mkdir(parents=True)
-    for name in ("scripts", "assets", "lessons", "references"):
-        shutil.copytree(str(SKILL_ROOT / name), str(base / name),
-                        ignore=shutil.ignore_patterns("__pycache__"))
-    shutil.copyfile(str(SKILL_ROOT / "SKILL.md"), str(base / "SKILL.md"))
+    copy_skill_files(base)
     if with_git:
         git(base, "init", "-q")
         git(base, "config", "core.autocrlf", "false")
