@@ -468,6 +468,13 @@ therefore says which rule set judged it, even on an install that updated in betw
   lock file, states that the harvester is a pass, and uses one pass order (security before qa).
 ### Fixed
 
+- **Auto-update instructions that did nothing in the Claude desktop app.** The README sent
+  users to `/plugin` to enable auto-update, but the desktop app starts its Code sessions with
+  `DISABLE_AUTOUPDATER=1`, which switches the plugin auto-update pass off and hides that menu
+  item. The install section now gives the settings route (`"autoUpdate": true` on the
+  `extraKnownMarketplaces.tarikai` entry) and `FORCE_AUTOUPDATE_PLUGINS=1` for the desktop app,
+  and says that a copy in `~/.claude/skills/adminwright/` loads as `adminwright@skills-dir`,
+  never updates itself, and stops loading once `adminwright@tarikai` is installed.
 - **CI on `main` was red** since `lesson adopt`/`reject` landed: `tests/test_lesson_close.py`
   called `Path.write_text(newline=)`, which Python 3.9 lacks, and compared the command's
   resolved paths with unresolved temp paths (`/private/var` on macOS, `RUNNER~1` on Windows).

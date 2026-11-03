@@ -250,8 +250,25 @@ claude plugin install adminwright@tarikai
 Then invoke it with `/adminwright:adminwright`, or just describe the admin work and let the
 model reach for it. To pick up new commits later, run
 `claude plugin marketplace update tarikai` followed by `claude plugin update adminwright`,
-or enable auto-update for the `tarikai` marketplace (`/plugin`, **Marketplaces**, `tarikai`,
-**Enable auto-update**). `python scripts/admin_console_manifest.py --version` prints the
+or turn auto-update on for the `tarikai` marketplace: in the CLI, `/plugin`, **Marketplaces**,
+`tarikai`, **Enable auto-update**; anywhere, by adding `"autoUpdate": true` to the entry that
+`marketplace add` wrote to `~/.claude/settings.json`:
+
+```json
+"extraKnownMarketplaces": {
+  "tarikai": {
+    "source": { "source": "github", "repo": "TarikAI/adminwright" },
+    "autoUpdate": true
+  }
+}
+```
+
+The Claude desktop app starts its Code sessions with `DISABLE_AUTOUPDATER=1`, which switches
+the plugin auto-update pass off and hides that menu item, so there the setting alone does
+nothing. Add `"env": { "FORCE_AUTOUPDATE_PLUGINS": "1" }` to the same file to keep plugin
+updates on ([docs](https://code.claude.com/docs/en/plugins/loading)). The pass runs within ten
+minutes of the first message of an interactive session and updates the files on disk; the
+next session loads the new commit. `python scripts/admin_console_manifest.py --version` prints the
 commit you are running (a plugin install reports the commit its cache folder is named after;
 a copied or vendored skill reports `unknown`), and every `validate` summary line carries it
 together with the
@@ -274,6 +291,10 @@ python /path/to/adminwright/scripts/install_agents.py --harness <name> --project
 | Gemini CLI | the project's `.agents/skills/adminwright/` (or `.gemini/skills/`) | `.gemini/agents/` + `.adminwright/agents/` + `GEMINI.md` block |
 | Cursor | the project's `.agents/skills/adminwright/` (or `.cursor/skills/`) | `.cursor/agents/` + `.adminwright/agents/` + `.cursor/rules/adminwright.mdc` |
 | Pi, anything else | Pi: the project's `.agents/skills/adminwright/`; otherwise point the agent at `SKILL.md` | `.adminwright/agents/` (harness `pi` adds the `AGENTS.md` block; `generic` prints it) |
+
+In Claude Code a copy in `~/.claude/skills/adminwright/` loads as the plugin
+`adminwright@skills-dir`. It never updates itself, and once the marketplace plugin is installed
+it stops loading, because `adminwright@tarikai` takes the name. Use one or the other.
 
 Nothing here is vendor-specific. See [agents/README.md](agents/README.md).
 
