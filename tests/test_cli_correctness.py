@@ -580,5 +580,74 @@ class TestRuleMatrix(unittest.TestCase):
         self.assertEqual(doc, out, "regenerate: emit --format rule-matrix --out references/rule-matrix.md")
 
 
+# --------------------------------------------------------------------------
+# Audit 2026-11-17 (02-cli)
+# --------------------------------------------------------------------------
+
+
+class TestProtectedOutputs(TempProject):
+    """C-01 -- `emit --out` and `promote --export` must never overwrite what the tool keeps."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.tmp / "store"
+        self.env = {"ADMINWRIGHT_HOME": str(self.store)}
+
+    def assert_refused(self, target, *argv):
+        before = target.read_bytes() if target.exists() else None
+        code, out, err = run(*argv, env=self.env)
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("nothing was written", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(target.read_bytes() if target.exists() else None, before)
+
+    def test_emit_onto_the_manifest_is_refused(self):
+        self.assert_refused(self.manifest, "emit", "--manifest", self.manifest, "--format", "nav-map",
+                            "--out", self.manifest)
+        code, out, err = self.validate(phase="plan")
+        self.assertEqual(code, 0, out + err)
+
+    @unittest.skipUnless(os.name == "nt", "case-insensitive paths are a Windows property")
+    def test_another_spelling_of_the_manifest_is_refused(self):
+        spelled = Path(str(self.manifest.parent).upper()) / "MANIFEST.JSON"
+        self.assert_refused(self.manifest, "emit", "--manifest", self.manifest, "--format", "nav-map",
+                            "--out", spelled)
+
+    def test_the_tools_own_files_beside_the_manifest_are_refused(self):
+        folder = self.manifest.parent
+        (folder / "locks").mkdir(exist_ok=True)
+        (folder / "worklog").mkdir(exist_ok=True)
+        (folder / "worklog" / "qa-1.md").write_text("qa-1 notes\n", encoding="utf-8")
+        for target in (folder / "admin-console.manifest.schema.json", folder / ".gitignore",
+                       folder / "locks" / "user.list.lock", folder / "worklog" / "qa-1.md",
+                       folder / "ocr-record-1.json"):
+            self.assert_refused(target, "emit", "--manifest", self.manifest, "--format", "seed-plan",
+                                "--out", target)
+            self.assert_refused(target, "emit", "--format", "rule-matrix", "--out", target)
+
+    def test_a_report_beside_the_manifest_is_still_written(self):
+        # verification.md and test-data.md emit working documents into .admin-console/.
+        target = self.manifest.parent / "authz-matrix.md"
+        code, out, err = run("emit", "--manifest", self.manifest, "--format", "authz-matrix",
+                             "--out", target, env=self.env)
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(target.read_text(encoding="utf-8").startswith("# Authorization matrix"))
+
+    def test_a_file_in_the_store_is_refused(self):
+        self.store.mkdir()
+        observations = self.store / "observations.jsonl"
+        records = "".join(json.dumps({"id": "p:%d" % i, "project": "P%d" % i, "category": "gap",
+                                      "scope": "SKILL.md", "observation": "same thing seen",
+                                      "proposedChange": "fix it the same way"}) + "\n" for i in range(3))
+        observations.write_text(records, encoding="utf-8")
+        self.assert_refused(observations, "promote", "--export", observations)
+        self.assert_refused(observations, "promote", "--store", self.store, "--export",
+                            self.store / "bundle.json")
+        self.assert_refused(observations, "emit", "--manifest", self.manifest, "--format", "nav-map",
+                            "--out", observations)
+        code, out, err = run("store", "status", env=self.env)
+        self.assertIn("Observations: 3", out, err)
+
+
 if __name__ == "__main__":
     unittest.main()

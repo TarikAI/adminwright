@@ -5332,7 +5332,63 @@ def observation_key(record):
     return text_of(record.get("id")) or observation_fingerprint(record)
 
 
-def merge_observation_files(*paths):
+def parse_observation_lines(text):
+    """(records, numbers of the lines that are not wholly observation records).
+
+    Split on LF only: a record written with ensure_ascii=False may hold U+2028,
+    which str.splitlines() treats as a line break and so cut one record in two.
+    Each line is decoded object by object, so two records glued onto one line
+    (an append onto a file that did not end in a newline) are both recovered.
+    A line that holds anything else -- a list, a string, a typo, a truncated
+    record -- is reported by number; what could be read from it still counts.
+    """
+    decoder = json.JSONDecoder()
+    records, bad = [], []
+    for number, line in enumerate(text.split("\n"), 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        position, whole = 0, True
+        while position < len(stripped):
+            try:
+                value, end = decoder.raw_decode(stripped, position)
+            except (ValueError, RecursionError):
+                whole = False
+                break
+            if not isinstance(value, dict):
+                whole = False
+                break
+            records.append(value)
+            position = end
+            while position < len(stripped) and stripped[position] in " \t":
+                position += 1
+        if not whole:
+            bad.append(number)
+    return records, bad
+
+
+def read_observation_file(path):
+    """(records, unreadable line numbers) of one observations file; empty when it is absent."""
+    if not path.exists():
+        return [], []
+    return parse_observation_lines(decode_text_bytes(path.read_bytes(), path))
+
+
+def describe_lines(numbers, limit=12):
+    shown = ", ".join(str(number) for number in numbers[:limit])
+    return ("line " if len(numbers) == 1 else "lines ") + shown + (" ..." if len(numbers) > limit else "")
+
+
+def warn_unreadable(path, bad):
+    if bad:
+        stderr(
+            "WARN: " + str(path) + " has " + str(len(bad)) + " line(s) that are not observation "
+            "records (" + describe_lines(bad) + "). They were skipped here and are kept in the file; "
+            "fix or delete them by hand, then run `store status` to check."
+        )
+
+
+def merge_observation_records(*record_lists):
     """Union of observation records by id, in canonical (sorted) order.
 
     observations.jsonl is append-only, so a sync conflict is never a real
@@ -5343,19 +5399,8 @@ def merge_observation_files(*paths):
     the same bytes, so a later merge never has anything to disagree about.
     """
     merged = {}
-    for path in paths:
-        if not path.exists():
-            continue
-        for line in decode_text_bytes(path.read_bytes(), path).splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict):
-                continue
+    for records in record_lists:
+        for record in records:
             merged.setdefault(observation_key(record), record)
     return [merged[key] for key in sorted(merged)]
 
@@ -5574,9 +5619,24 @@ def read_community_observations(skill_root=None):
             stderr("NOTE: skipped community bundle " + str(path)
                    + ": not a bundle written by `promote --export` (no observations list)")
             continue
-        for index, record in enumerate(payload["observations"]):
-            if not isinstance(record, dict):
+        malformed = 0
+        for index, raw in enumerate(payload["observations"]):
+            # Reduced to the bundle schema, typed: an object among the archetypes
+            # or a number among the evidence crashed promote for every bundle and
+            # for the local store with it.
+            observation = text_of(raw.get("observation")) if isinstance(raw, dict) else ""
+            if not observation:
+                malformed += 1
                 continue
+            record = {
+                "category": text_of(raw.get("category")),
+                "scope": text_of(raw.get("scope")),
+                "observation": observation,
+                "proposedChange": text_of(raw.get("proposedChange")),
+                "archetypes": str_items(raw.get("archetypes")),
+                "stacks": str_items(raw.get("stacks")),
+                "projects": str_items(raw.get("projects")),
+            }
             record["community"] = True
             # Recompute rather than trust the bundle's own fingerprint. A stale
             # or hand-edited value would either fail to group with matching local
@@ -5587,37 +5647,48 @@ def read_community_observations(skill_root=None):
             # The bundle's `projects` list cannot be verified, so it may not
             # multiply one contribution into several sightings, and a projectKey
             # written into the bundle is never believed.
-            record.pop("projectKey", None)
-            contributors = as_list(record.get("projects"))
+            contributors = record["projects"]
             record["project"] = (
                 (text_of(contributors[0]) if contributors else "")
                 or "community:" + path.stem + ":" + str(index)
             )
             records.append(record)
+        if malformed:
+            stderr("NOTE: skipped " + str(malformed) + " record(s) in community bundle " + str(path)
+                   + ": not an object with observation text")
     return records
 
 
-def read_observations(store):
+def read_observations(store, warn=True):
+    """The store's records (objects only). Unreadable lines are reported, never removed."""
     path = store / "observations.jsonl"
-    records = []
-    if not path.exists():
-        return records
-    for line in decode_text_bytes(path.read_bytes(), path).splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    records, bad = read_observation_file(path)
+    if warn:
+        warn_unreadable(path, bad)
     return records
 
 
 def append_observations(store, records):
+    """Append under the store lock, always starting on a new line.
+
+    A file that did not end in a newline (a hand fix saved by an editor, an
+    append cut short) used to get the next record glued onto its last line,
+    which then parsed as neither.
+    """
     store.mkdir(parents=True, exist_ok=True)
     path = store / "observations.jsonl"
     with FileLock(store / ".lock"):
+        lead = ""
+        try:
+            with open(str(path), "rb") as existing:
+                existing.seek(0, os.SEEK_END)
+                if existing.tell():
+                    existing.seek(-1, os.SEEK_END)
+                    lead = "" if existing.read(1) == b"\n" else "\n"
+        except FileNotFoundError:
+            pass
         with open(str(path), "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(lead)
             for record in records:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -6164,11 +6235,74 @@ def cmd_coverage(args):
     return 1 if findings.errors else 0
 
 
+def comparable_path(path):
+    """A spelling of a path that two names of one file share (case on Windows, links, ..)."""
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def path_within(path, folder):
+    """Whether comparable path `path` is `folder` or inside it."""
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+# Files the tool itself keeps beside a manifest; reports (`*.md`) may sit there too.
+OWNED_BESIDE_MANIFEST = frozenset((".gitignore", ".lock", ".lock.soft"))
+
+
+def refuse_protected_output(raw, flag, manifest_path=None, store=None):
+    """The resolved output path, or a refusal when it would overwrite what the tool keeps.
+
+    `emit --out <manifest>` replaced the manifest with Markdown, and `promote --export`
+    given the store's own file replaced every observation with one bundle; one
+    mistyped path destroyed the record the skill exists to keep. Refused: the
+    manifest; the files the tool keeps beside it (`*.json` such as the schema copy
+    and ocr records, `.gitignore`, the lock files, `*.tmp`, and everything under
+    `locks/` and `worklog/`), in the manifest's folder or in any `.admin-console`
+    folder; and any file in the observation store.
+    """
+    out_path = Path(raw).resolve()
+    target = comparable_path(out_path)
+    reason = None
+    if manifest_path is not None and target == comparable_path(manifest_path):
+        reason = "is the manifest"
+    folders = [Path(manifest_path).resolve().parent] if manifest_path is not None else []
+    folders.extend(parent for parent in out_path.parents if parent.name.lower() == ".admin-console")
+    for folder in folders:
+        if reason:
+            break
+        base = comparable_path(folder)
+        if not path_within(target, base) or target == base:
+            continue
+        inside = target[len(base.rstrip(os.sep)) + 1:].split(os.sep)
+        name = inside[-1]
+        if inside[0] in MANIFEST_WORKING_DIRS:
+            reason = "is in the tool's " + inside[0] + "/ folder"
+        elif len(inside) == 1 and (
+            name in OWNED_BESIDE_MANIFEST or name.endswith((".json", ".tmp"))
+        ):
+            reason = "is a file the tool keeps beside the manifest"
+    if not reason and store is not None and path_within(target, comparable_path(store)):
+        reason = "is inside the observation store " + str(store)
+    if reason:
+        raise ManifestError(
+            flag + " " + str(out_path) + " " + reason + "; nothing was written. Write the output "
+            "somewhere else, e.g. docs/admin-<name>.md or a bundle file outside the store."
+        )
+    return out_path
+
+
+def default_store_or_none():
+    try:
+        return global_store_dir()
+    except ManifestError:
+        return None
+
+
 def cmd_emit(args):
     if args.format == "rule-matrix":
         text = emit_rule_matrix()
         if args.out:
-            out_path = Path(args.out).resolve()
+            out_path = refuse_protected_output(args.out, "--out", store=default_store_or_none())
             write_text_file(out_path, text)
             print("Wrote " + str(out_path))
         else:
@@ -6177,6 +6311,9 @@ def cmd_emit(args):
     if not args.manifest:
         raise ManifestError("--manifest is required for --format " + args.format)
     manifest_path = resolve_manifest_path(args.manifest)
+    out_path = None
+    if args.out:
+        out_path = refuse_protected_output(args.out, "--out", manifest_path, default_store_or_none())
     manifest = load_json(manifest_path)
     profile = active_profile(manifest, None)[0]
     # Surface manifest health on every emit. Field-tested: an audit session
@@ -6215,8 +6352,7 @@ def cmd_emit(args):
             + " warning(s) at release validation." + caveat + "\n",
             1,
         )
-    if args.out:
-        out_path = Path(args.out).resolve()
+    if out_path is not None:
         write_text_file(out_path, text)
         print("Wrote " + str(out_path))
     else:
@@ -7274,7 +7410,7 @@ def cmd_harvest(args):
         text_of(stack.get(name)) for name in ("frontend", "backend", "database") if text_of(stack.get(name))
     )
     try:
-        known = {record.get("id") for record in read_observations(store)}
+        known = {observation_key(record) for record in read_observations(store)}
     except OSError as exc:
         raise ManifestError("Cannot read the observation store at " + str(store) + ": " + str(exc))
     harvested = []
@@ -7289,11 +7425,16 @@ def cmd_harvest(args):
                 and text_of(item.get("promotedHash"))
                 and text_of(item.get("promotedHash")) != chash
             )
-            if status != "open" and not edited:
+            # `promoted` with no hash was set by hand (an older manual close step),
+            # never by a harvest: send it once, or it never reaches the store.
+            unhashed = status == "promoted" and not text_of(item.get("promotedHash"))
+            if status != "open" and not edited and not unhashed:
                 continue
             record = {
                 "project": project,
                 "projectKey": key,
+                # Kept so an export can scrub the name even when --project renamed it.
+                "platformName": text_of(platform.get("name")),
                 "archetypes": [text_of(a) for a in as_list(platform.get("archetypes"))],
                 "stack": stack_summary,
                 "category": text_of(item.get("category")),
@@ -7317,10 +7458,20 @@ def cmd_harvest(args):
         if harvested:
             try:
                 append_observations(store, harvested)
+                # Verify before marking anything promoted: a record the store
+                # cannot read back is a record harvest would never send again.
+                present = {observation_key(record) for record in read_observations(store, warn=False)}
             except OSError as exc:
                 raise ManifestError(
                     "Cannot write the observation store at " + str(store) + " (" + str(exc)
                     + "); no feedback was marked promoted. Check ADMINWRIGHT_HOME."
+                )
+            missing = [record["id"] for record in harvested if record["id"] not in present]
+            if missing:
+                raise ManifestError(
+                    "the store at " + str(store) + " does not read back " + str(len(missing))
+                    + " record(s) just written (" + ", ".join(missing[:5]) + "); no feedback was "
+                    "marked promoted. Run `store status` and repair observations.jsonl."
                 )
         for item, chash in flipped:
             item["status"] = "promoted"
@@ -7425,8 +7576,17 @@ def sync_store(store, args):
     # a harvest can no longer write between our read and our rewrite.
     with FileLock(store / ".lock"):
         unstage_foreign_paths(store)
+        local_records, bad = read_observation_file(local_path)
+        if bad:
+            # Rewriting the file from what parses deleted every other line and
+            # committed the loss. A line is never dropped: it waits for a person.
+            raise ManifestError(
+                str(local_path) + " has " + str(len(bad)) + " line(s) that are not observation "
+                "records (" + describe_lines(bad) + "); nothing was synced. Fix or delete those "
+                "lines by hand, then run `store sync` again."
+            )
         # Normalise first, so what we commit is already the canonical union.
-        write_observations(local_path, merge_observation_files(local_path))
+        write_observations(local_path, merge_observation_records(local_records))
         print(
             "Committed local observations."
             if commit_store(store, "observations: " + (text_of(args.date) or "sync"))
@@ -7443,13 +7603,15 @@ def sync_store(store, args):
         if run_git(store, "rev-parse", "--verify", "-q", remote_ref, check=False).returncode == 0:
             theirs = run_git(store, "show", remote_ref + ":observations.jsonl", check=False)
             if theirs.returncode == 0:
-                incoming = store / ".incoming.jsonl"
-                try:
-                    write_text_file(incoming, theirs.stdout)
-                    merged = merge_observation_files(local_path, incoming)
-                finally:
-                    if incoming.exists():
-                        incoming.unlink()
+                incoming, incoming_bad = parse_observation_lines(theirs.stdout)
+                if incoming_bad:
+                    raise ManifestError(
+                        "the remote's observations.jsonl (" + remote_ref + ") has "
+                        + str(len(incoming_bad)) + " line(s) that are not observation records ("
+                        + describe_lines(incoming_bad) + "); nothing was merged or pushed, and the "
+                        "local commit stays. Fix them in the store that pushed them, then sync again."
+                    )
+                merged = merge_observation_records(read_observation_file(local_path)[0], incoming)
                 write_observations(local_path, merged)
                 print("Merged " + str(len(merged)) + " observation(s) by id union.")
                 # Commit the union BEFORE joining histories, so the tree the merge
@@ -7531,12 +7693,15 @@ def cmd_store(args):
         if not (store / ".git").exists():
             run_git(store, "init", "-q")
             run_git(store, "checkout", "-q", "-B", "main", check=False)
-        # Repo-local identity so merges and commits work without touching the
-        # user's global git config. A merge commit needs this as much as a
-        # regular commit does, which is why it is set once here rather than
-        # passed per-command.
-        run_git(store, "config", "user.name", "adminwright", check=False)
-        run_git(store, "config", "user.email", "adminwright@localhost", check=False)
+            # Repo-local identity so merges and commits work without touching the
+            # user's global git config -- only in a repository this command created.
+            run_git(store, "config", "user.name", "adminwright", check=False)
+            run_git(store, "config", "user.email", "adminwright@localhost", check=False)
+        else:
+            # Setting it unconditionally re-authored the user's own next commits in
+            # an existing repository; the store's commits pass -c identities anyway.
+            stderr("NOTE: " + str(store) + " is already a git repository; its git identity and "
+                   "history are left as they are.")
         gitignore = store / ".gitignore"
         if not gitignore.exists():
             # The salt is deliberately not synced: it exists so a published
@@ -7566,7 +7731,71 @@ def cmd_store(args):
     raise ManifestError("unknown store action: " + str(action))
 
 
-def sanitise_candidate(candidate, salt=""):
+PLATFORM_ID_SUFFIX = re.compile(r"-[0-9a-f]{6}$")
+
+
+def identifier_patterns(value):
+    """Regex sources that name one project, from its name, display name or platform.id.
+
+    The whole platform.id (random suffix and all) always; the name in any spacing,
+    case or separator ("Zentrix Billing", zentrix-billing, zentrix_billing,
+    ZentrixBilling) unless every word of it is the skill's own vocabulary; and
+    each word longer than three letters that the guidance never uses ("Zentrix").
+    A name such as "Admin Console" identifies nothing and is left readable.
+    """
+    value = text_of(value)
+    if not value:
+        return []
+    patterns = []
+    base = PLATFORM_ID_SUFFIX.sub("", value)
+    if base != value:
+        patterns.append(re.escape(value))
+    words = [word for word in re.split(r"[\W_]+", base) if word]
+    vocabulary = skill_words()
+    distinctive = [word for word in words if len(word) > 3 and word.lower() not in vocabulary]
+    if not distinctive and all(word.lower() in vocabulary or word.isdigit() for word in words):
+        return patterns
+    if len(words) > 1:
+        patterns.append(r"[\s_.-]*".join(re.escape(word) for word in words))
+    elif words and len(words[0]) > 2:
+        patterns.append(re.escape(words[0]))
+    patterns.extend(re.escape(word) for word in distinctive)
+    return patterns
+
+
+def project_name_scrubber(records, salt=""):
+    """A function replacing every known project's names with that project's fingerprint.
+
+    Every project in the store, not only the candidate's: a note written in one
+    project often names another one of the same owner's. The fingerprint is the
+    one the bundle's `projects` list carries for that project.
+    """
+    owners = {}
+    for record in records:
+        key = record_project_key(record)
+        if not key:
+            continue
+        for field in ("projectKey", "project", "platformName"):
+            for pattern in identifier_patterns(record.get(field)):
+                owners.setdefault(pattern.lower(), (pattern, key))
+    if not owners:
+        return lambda text: text
+    ordered = sorted(owners.values(), key=lambda item: -len(item[0]))
+    # Case-insensitive name, then a boundary that still allows camel case after
+    # it ("ZentrixBilling"), never inside a longer lowercase word ("innovation").
+    combined = re.compile("|".join(
+        "(?P<p%d>(?<![^\\W_])(?i:%s)(?![^\\W_A-Z]))" % (index, pattern)
+        for index, (pattern, _key) in enumerate(ordered)
+    ))
+    replacement = [project_fingerprint(key, salt) for _pattern, key in ordered]
+
+    def scrub(text):
+        return combined.sub(lambda match: replacement[int(match.lastgroup[1:])], text_of(text))
+
+    return scrub
+
+
+def sanitise_candidate(candidate, salt="", scrub_names=None):
     """Strip a promotion candidate down to what is safe to publish.
 
     No fingerprint of the observation text is exported: the local one is an
@@ -7574,16 +7803,19 @@ def sanitise_candidate(candidate, salt=""):
     scrubbed host or customer could confirm the guess by hashing it -- the
     attack the project salt exists to stop -- and read_community_observations
     recomputes fingerprints on load anyway. The scope travels only when it
-    names a file or area of the skill; a hand-set private path does not.
+    names a file or area of the skill; a hand-set private path does not. The
+    project's own names come out of every text field first (see
+    project_name_scrubber), before the pattern scrub.
     """
+    names = scrub_names or (lambda text: text_of(text))
     scope = candidate["scope"]
     category = candidate["category"]
     return {
         "category": category if category in FEEDBACK_CATEGORIES else "unassigned",
         "scope": scope if skill_scope_problem(scope) is None else "unassigned",
-        "observation": scrub_text(candidate["observation"]),
-        "proposedChange": scrub_text(candidate["proposedChange"]),
-        "archetypes": sorted({scrub_text(a) for a in candidate["archetypes"] if a}),
+        "observation": scrub_text(names(candidate["observation"])),
+        "proposedChange": scrub_text(names(candidate["proposedChange"])),
+        "archetypes": sorted({scrub_text(names(a)) for a in candidate["archetypes"] if a}),
         "stacks": sorted({family for stack in candidate["stacks"] for family in coarsen_stack(stack)}),
         "projectCount": candidate["projectCount"],
         "projects": [project_fingerprint(name, salt) for name in candidate["projectKeys"]],
@@ -7653,7 +7885,7 @@ def cmd_promote(args):
         # still one and two unrelated projects that share a name are still two.
         keys = sorted({counted_key(item) for item in items if counted_key(item)})
         names = sorted({text_of(item.get("project")) for item in items if text_of(item.get("project"))})
-        archetypes = sorted({a for item in items for a in as_list(item.get("archetypes"))})
+        archetypes = sorted({a for item in items for a in str_items(item.get("archetypes"))})
         stacks = sorted({text_of(item.get("stack")) for item in items if text_of(item.get("stack"))})
         category = text_of(items[0].get("category"))
         # A correction of wrong guidance promotes on first sighting; everything
@@ -7672,7 +7904,7 @@ def cmd_promote(args):
             "scope": text_of(items[0].get("scope")),
             "proposedChange": text_of(items[0].get("proposedChange")),
             "observation": text_of(items[0].get("observation")),
-            "evidence": sorted({e for item in items for e in as_list(item.get("evidence"))}),
+            "evidence": sorted({e for item in items for e in str_items(item.get("evidence"))}),
             "reason": "correction" if immediate else "seen on " + str(len(keys)) + " projects",
             "communityEvidence": sum(1 for item in items if item.get("community")),
             # Who was merged into this cluster, so a bad merge is visible.
@@ -7698,27 +7930,30 @@ def cmd_promote(args):
     community_only.sort(key=lambda c: (-c["projectCount"], c["scope"], c["fingerprint"]))
 
     if exporting:
+        out_path = refuse_protected_output(args.export, "--export", store=store)
         salt = store_salt(store)
+        scrub_names = project_name_scrubber(local_records, salt)
         bundle = {
             "bundleVersion": "1",
             "generatedFor": "adminwright community observations",
             "note": "Sanitised. Project names are one-way fingerprints salted per store, so they "
-                    "count as one project only within bundles from the same store; paths, hosts, "
-                    "emails, URLs, credentials and evidence references are removed; scope is kept "
-                    "only when it names a file or area of the skill.",
-            "observations": [sanitise_candidate(c, salt) for c in candidates],
+                    "count as one project only within bundles from the same store, and the "
+                    "store's own project names are replaced by those fingerprints in the text; "
+                    "paths, hosts, emails, URLs, credentials and evidence references are removed; "
+                    "scope is kept only when it names a file or area of the skill.",
+            "observations": [sanitise_candidate(c, salt, scrub_names) for c in candidates],
         }
-        out_path = Path(args.export).resolve()
         write_text_file(out_path, json.dumps(bundle, indent=2, ensure_ascii=False) + "\n")
         print("Wrote " + str(len(bundle["observations"])) + " sanitised candidate(s) to " + str(out_path))
         print()
         print("READ THE FILE BEFORE SHARING IT.")
         print("Patterns removed emails, URLs, paths, IP addresses, hostnames, domains,")
-        print("tokens and hashes, replaced project names with salted one-way fingerprints, and")
-        print("dropped evidence references entirely.")
+        print("tokens and hashes, replaced this store's project names and platform ids with")
+        print("salted one-way fingerprints (in the text too), and dropped evidence references.")
         print()
-        print("What no pattern can catch: a company, product, customer or person's name")
-        print("written as an ordinary word. Only you can see those. Read every line.")
+        print("What no pattern can catch: any other company, product, customer or person's")
+        print("name written as an ordinary word, or a nickname for your project. Only you can")
+        print("see those. Read every line.")
         print()
         print("To contribute, open a pull request adding this file under")
         print("community/observations/ in the skill repository. Contribution is opt-in,")

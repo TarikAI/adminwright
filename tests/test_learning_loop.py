@@ -1164,5 +1164,192 @@ class TestPrivacy(unittest.TestCase):
                 self.assertNotRegex(text, r"\b" + name + r"\b", path.name)
 
 
+# --------------------------------------------------------------------------
+# Audit 2026-11-17 (02-cli): the store must never lose what it cannot read, and
+# an export must not carry the project's own name.
+# --------------------------------------------------------------------------
+
+
+def a_record(ident, project="Alpha"):
+    return {"id": ident, "project": project, "projectKey": project.lower() + "-aaaaaa",
+            "category": "gap", "scope": "SKILL.md", "observation": "observation " + ident,
+            "proposedChange": "change " + ident, "evidence": [], "date": "2026-11-17"}
+
+
+class TestTheStoreKeepsWhatItCannotRead(LearningCase):
+    """C-02, C-12 -- an unreadable line is kept, counted and reported, never deleted."""
+
+    def observations(self):
+        return self.store / "observations.jsonl"
+
+    def seed(self, text):
+        self.store.mkdir(parents=True, exist_ok=True)
+        self.observations().write_bytes(text.encode("utf-8"))
+
+    def test_a_harvest_onto_a_file_without_a_final_newline_keeps_both_records(self):
+        self.seed(json.dumps(a_record("old:1")))            # no final newline
+        manifest = self.project("Beta", [("gap", "Bulk action authorized once for the whole batch",
+                                          "Require per-target authorization in bulk commands")])
+        out, _err = self.harvest(manifest)
+        self.assertIn("Harvested 1", out)
+        lines = [line for line in self.observations().read_text(encoding="utf-8").split("\n") if line]
+        self.assertEqual(len(lines), 2, "the append must start on a new line")
+        code, out, err = run("store", "status", env=self.env)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("Observations: 2", out)
+
+    def test_two_records_glued_on_one_line_are_both_read(self):
+        self.seed(json.dumps(a_record("a:1")) + json.dumps(a_record("b:2", "Beta")) + "\n")
+        code, out, err = run("store", "status", env=self.env)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("Observations: 2 across 2 project(s)", out)
+
+    def test_lines_that_are_not_records_are_reported_and_never_crash(self):
+        self.seed('[1, 2]\n"text"\n' + json.dumps(a_record("a:1")) + "\n{broken\n")
+        manifest = self.project("Beta", [("gap", "obs", "change")])
+        for argv in (("store", "status"), ("promote",), ("promote", "--json"),
+                     ("harvest", "--manifest", manifest, "--date", "2026-11-17")):
+            code, out, err = run(*argv, env=self.env)
+            self.assertEqual(code, 0, " ".join(map(str, argv)) + "\n" + out + err)
+            self.assertNotIn("Traceback", err)
+            self.assertIn("lines 1, 2, 4", err, argv)
+        text = self.observations().read_text(encoding="utf-8")
+        for kept in ('[1, 2]', '"text"', '{broken'):
+            self.assertIn(kept, text, "a line the store cannot read must stay on disk")
+
+    def test_a_record_whose_id_is_not_a_string_does_not_stop_a_harvest(self):
+        self.seed(json.dumps({"id": ["a"], "scope": "SKILL.md"}) + "\n")
+        manifest = self.project("Beta", [("gap", "obs", "change")])
+        out, _err = self.harvest(manifest)
+        self.assertIn("Harvested 1", out)
+
+    def test_a_line_separator_inside_a_record_does_not_split_it(self):
+        record = a_record("a:1")
+        record["observation"] = "first second"
+        self.seed(json.dumps(record, ensure_ascii=False) + "\n")
+        code, out, err = run("store", "status", env=self.env)
+        self.assertIn("Observations: 1", out, err)
+        self.assertNotIn("WARN", err)
+
+    def test_a_hand_promoted_entry_without_a_hash_is_harvested_once(self):
+        # C-22: the documented manual close step set `promoted` before any harvest.
+        manifest = self.project("Beta", [("gap", "obs", "change")])
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["feedback"][0]["status"] = "promoted"
+        manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        out, _err = self.harvest(manifest)
+        self.assertIn("Harvested 1", out)
+        self.assertTrue(json.loads(manifest.read_text(encoding="utf-8"))["feedback"][0]["promotedHash"])
+        out, _err = self.harvest(manifest)
+        self.assertIn("Harvested 0", out)
+
+
+@unittest.skipUnless(HAVE_GIT, "git is required for store sync")
+class TestSyncKeepsWhatItCannotRead(LearningCase):
+    """C-02 -- `store sync` rewrote the file from what it could parse, and committed the loss."""
+
+    def setUp(self):
+        super().setUp()
+        code, out, err = run("store", "init", "--store", self.store)
+        self.assertEqual(code, 0, out + err)
+        self.observations = self.store / "observations.jsonl"
+
+    def test_sync_after_a_harvest_onto_an_unterminated_line_keeps_both_records(self):
+        self.observations.write_bytes(json.dumps(a_record("old:1")).encode("utf-8"))
+        manifest = self.project("Beta", [("gap", "obs", "change")])
+        self.harvest(manifest)
+        code, out, err = run("store", "sync", "--store", self.store, "--date", "2026-11-17")
+        self.assertEqual(code, 0, out + err)
+        ids = [json.loads(line)["id"] for line in self.observations.read_text(encoding="utf-8").split("\n")
+               if line.strip()]
+        self.assertEqual(len(ids), 2, ids)
+        self.assertIn("old:1", ids)
+
+    def test_sync_refuses_while_a_line_cannot_be_read_and_keeps_it(self):
+        text = json.dumps(a_record("a:1")) + "\n{garbage that is not json\n"
+        self.observations.write_bytes(text.encode("utf-8"))
+        code, out, err = run("store", "sync", "--store", self.store, "--date", "2026-11-17")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("line 2", err)
+        self.assertEqual(self.observations.read_bytes(), text.encode("utf-8"), "nothing rewritten")
+
+    def test_store_init_leaves_an_existing_repositorys_identity_alone(self):
+        # C-14
+        other = self.tmp / "existing-repo"
+        git_repository(other, commit=False)
+        for key, value in (("user.name", "Real Person"), ("user.email", "real@example.invalid")):
+            subprocess.run(["git", "-C", str(other), "config", key, value], check=True, env=GIT_ENV)
+        code, out, err = run("store", "init", "--store", other)
+        self.assertEqual(code, 0, out + err)
+        for key, value in (("user.name", "Real Person"), ("user.email", "real@example.invalid")):
+            done = subprocess.run(["git", "-C", str(other), "config", key], capture_output=True,
+                                  text=True, env=GIT_ENV)
+            self.assertEqual(done.stdout.strip(), value, key)
+        self.assertIn("already a git repository", out + err)
+
+
+class TestExportScrubsTheProjectsOwnNames(LearningCase):
+    """C-03 -- the exporter knows every project name and id it holds; none may leave."""
+
+    def test_name_id_and_stem_are_replaced_by_the_projects_fingerprint(self):
+        manifest = self.project("Zentrix Billing", [(
+            "incorrect-guidance",
+            "On Zentrix Billing (zentrix-billing-a1b2c3) the guidance told us to model Zentrix "
+            "invoices before roles; zentrix_billing and ZentrixBilling dashboards broke",
+            "Tell Zentrix-like platforms to model roles first")], platform_id="zentrix-billing-a1b2c3")
+        self.harvest(manifest)
+        bundle = self.tmp / "bundle.json"
+        code, out, err = run("promote", "--export", bundle, env=self.env)
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(bundle.read_text(encoding="utf-8"))
+        self.assertEqual(len(payload["observations"]), 1)
+        observation = payload["observations"][0]
+        text = (observation["observation"] + " " + observation["proposedChange"]).lower()
+        self.assertNotIn("zentrix", text)
+        self.assertNotIn("a1b2c3", text)
+        fingerprint = observation["projects"][0]
+        self.assertIn(fingerprint, observation["observation"])
+        self.assertIn(fingerprint + "-like", observation["proposedChange"])
+        # The guidance words around the name survive.
+        self.assertIn("model roles first", observation["proposedChange"])
+
+    def test_a_name_made_only_of_the_skills_words_is_left_readable(self):
+        manifest = self.project("Admin Console", [(
+            "incorrect-guidance", "The admin console guidance told us to model invoices before roles",
+            "Model roles first")], platform_id="admin-console-a1b2c3")
+        self.harvest(manifest)
+        bundle = self.tmp / "bundle.json"
+        code, out, err = run("promote", "--export", bundle, env=self.env)
+        self.assertEqual(code, 0, out + err)
+        observation = json.loads(bundle.read_text(encoding="utf-8"))["observations"][0]
+        self.assertIn("admin console guidance", observation["observation"])
+
+
+class TestCommunityRecordsOfTheWrongShape(LearningCase):
+    """C-11 -- one malformed contributed bundle must not crash promote."""
+
+    def test_an_object_archetype_and_a_numeric_evidence_entry_are_survived(self):
+        manifest = self.project("Solo", [("incorrect-guidance", "Bulk action authorized once for the batch",
+                                          "Require per-target authorization in bulk commands")])
+        self.harvest(manifest)
+        directory = self.tmp / "skill" / "community" / "observations"
+        directory.mkdir(parents=True)
+        (directory / "bad.json").write_text(json.dumps({"observations": [
+            {"category": "gap", "scope": "SKILL.md", "observation": "alpha beta gamma delta",
+             "archetypes": [{"x": 1}], "projects": ["p_1"], "evidence": [1, "a"]},
+            {"category": "gap", "scope": "SKILL.md", "observation": "alpha beta gamma delta",
+             "archetypes": ["b2b-saas"], "projects": [{"p": 2}], "evidence": [1, "a"],
+             "proposedChange": ["not", "text"]},
+            {"category": "gap", "scope": "SKILL.md", "observation": ["no", "text"]},
+        ]}), encoding="utf-8")
+        for extra in ((), ("--json",)):
+            code, out, err = run("promote", "--include-community", "--skill-root", self.tmp / "skill",
+                                 "--min-projects", "1", *extra, env=self.env)
+            self.assertEqual(code, 0, out + err)
+            self.assertNotIn("Traceback", err)
+            self.assertIn("Bulk action authorized", out)
+        self.assertIn("bad.json", err, "a record without observation text is skipped by name")
+
+
 if __name__ == "__main__":
     unittest.main()

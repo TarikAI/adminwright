@@ -65,6 +65,11 @@ default and leaves this machine only through `store sync`, to the remote you con
   the same project is countable only within bundles exported from one store: exported from
   two stores (your laptop and your desktop, or a store created again) it gets two different
   fingerprints
+- replaces, in every text field, the names of every project in the store with that
+  project's fingerprint: its `platform.id` (`zentrix-billing-a1b2c3`), its `platform.name`
+  and harvest display name in any case or separator (`Zentrix Billing`, `zentrix_billing`,
+  `ZentrixBilling`), and each word of the name longer than three letters that the skill's
+  own guidance never uses (`Zentrix`, also in `Zentrix-like` or `ZentrixPay`)
 - carries no fingerprint of the observation text itself: a hash of the unscrubbed wording
   would let anyone confirm a guess at what was scrubbed
 - keeps `scope` only when it names a file or area of the skill; anything else is exported
@@ -74,7 +79,11 @@ default and leaves this machine only through `store sync`, to the remote you con
 
 **Its limits, stated plainly:** no pattern can detect a company, product, customer or
 person's name written as an ordinary word, and a credential in a shape not listed above that
-is shorter than 32 characters, or split by spaces, can survive. The exporter prints this
+is shorter than 32 characters, or split by spaces, can survive. Your own project's names are
+removed only in the spellings listed above: a nickname, an abbreviation, a misspelling, a
+name of two letters, or a name made only of words the guidance itself uses (`Admin Console`)
+stays in the text, and so does the `platform.name` of a project harvested with `--project`
+by an older version, which did not record it. The exporter prints this
 warning and the file is yours to read before you share it. If you contribute without reading
 it, you are the only person who could have caught what the patterns missed.
 
