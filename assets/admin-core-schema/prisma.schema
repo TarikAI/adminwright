@@ -29,10 +29,11 @@
 //      index, the queue indexes and the per-scope config uniqueness.
 //   3. Triggers and functions. Append-only enforcement on audit_event and
 //      approval_decision (UPDATE / DELETE / TRUNCATE), the audit hash chain (the
-//      trigger assigns chain_seq, prev_hash, row_hash — the placeholder defaults
-//      below are overwritten), verify_audit_chain(), scrub_audit_payload(), the
-//      separation-of-duties trigger, and the trigger that keeps an approval_request
-//      as written (only state, executed_at and execution_result change).
+//      trigger assigns chain_seq, prev_hash, row_hash, recorded_at and actor_subject;
+//      the placeholder defaults below are overwritten), verify_audit_chain(),
+//      scrub_audit_payload(), the separation-of-duties trigger, the approval_request
+//      state machine and immutability triggers, and the guards that keep a grant and
+//      an impersonation session as issued.
 //
 // Then run grants.sql (psql) for the regulated profile.
 //
@@ -43,11 +44,19 @@
 //   * Prisma emits ON UPDATE CASCADE by default (postgres.sql uses NO ACTION). It only
 //     matters if you rewrite referenced keys such as admin_permission.key.
 //   * chain_seq and row_hash have placeholder defaults (0 and "") because the client
-//     requires a value; the BEFORE INSERT trigger overwrites them.
+//     requires a value; the BEFORE INSERT trigger overwrites them. Prisma puts those
+//     defaults in the database too, so if prisma_raw.sql is never applied the first audit
+//     row is stored unchained (the second fails on audit_event_chain). With prisma_raw.sql,
+//     the audit_event_chain_assigned CHECK refuses any row the trigger did not chain.
 //   * admin_actor.email is text rather than citext.
+//
+// The generator is Prisma 7's `prisma-client`, which requires `output`; point it where
+// the project keeps generated code. (`prisma-client-js` still works on 7 but is
+// deprecated.)
 
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
@@ -285,7 +294,7 @@ model AdminPolicyVersion {
 /// Append-only. RAW SQL REQUIRED (prisma_raw.sql): BEFORE UPDATE / DELETE / TRUNCATE
 /// triggers that raise, and the BEFORE INSERT hash-chain trigger. Prisma cannot
 /// express this, and application-level guards are bypassed by raw queries and other
-/// services. Leave chainSeq, prevHash and rowHash to the trigger.
+/// services. Leave chainSeq, prevHash, rowHash, recordedAt and actorSubject to the trigger.
 model AuditEvent {
   id        BigInt   @id @default(autoincrement())
   eventUuid String   @unique @default(dbgenerated("gen_random_uuid()")) @map("event_uuid") @db.Uuid
@@ -297,6 +306,8 @@ model AuditEvent {
 
   actorId   BigInt?        @map("actor_id")
   actorKind AuditActorKind @default(human) @map("actor_kind")
+  /// admin_actor.auth_subject when the row was written; set by the trigger.
+  actorSubject String? @map("actor_subject")
   /// Null unless impersonating. Never overwrite actorId with the impersonated
   /// identity: that is the most common way impersonation audit is destroyed. The
   /// acted-as subject is usually a customer, not an AdminActor, so this is text in
@@ -346,8 +357,8 @@ model AuditEvent {
   @@index([targetType, targetId, occurredAt(sort: Desc)], map: "audit_event_target")
   @@index([actorId, occurredAt(sort: Desc)], map: "audit_event_actor")
   @@index([action, occurredAt(sort: Desc)], map: "audit_event_action")
-  // The four partial indexes (tenant, correlation, request, idempotency) are in
-  // prisma_raw.sql; Prisma would emit them as full indexes.
+  // The five partial indexes (tenant, correlation, request, idempotency,
+  // impersonation) are in prisma_raw.sql; Prisma would emit them as full indexes.
   @@map("audit_event")
 }
 

@@ -12,6 +12,10 @@ service container. Locally:
     ADMINWRIGHT_PG_TEST=1 PGHOST=127.0.0.1 PGPORT=54320 PGUSER=postgres PGPASSWORD=pw \\
         python -m unittest discover -s tests -p "test_core_schema_*.py" -v
 
+With ADMINWRIGHT_REQUIRE_DB=1 (CI sets it) nothing is skipped for a missing tool: every database
+test runs, and fails if psql, npm or npx is missing (and the Django test if Django or psycopg is
+not importable), so a broken install step cannot leave the job green with everything skipped.
+
 Standard library only (Python 3.9+).
 """
 
@@ -26,15 +30,32 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA = ROOT / "assets" / "admin-core-schema"
 
+def gate(env, which):
+    """What the database tests may run, from the environment and a `which` lookup.
+
+    Returns (enabled, npm_enabled, missing). Without ADMINWRIGHT_REQUIRE_DB=1 a missing tool turns
+    the tests into skips. With it (CI's core-schema job sets it) the tests always run, and
+    `missing` names the tools they will fail for, so a broken apt or npm step cannot pass green
+    by skipping everything (audit 2026-11-17 T-15).
+    """
+    psql = env.get("ADMINWRIGHT_PSQL") or which("psql")
+    npm, npx = which("npm"), which("npx")
+    if env.get("ADMINWRIGHT_REQUIRE_DB") == "1":
+        missing = [name for name, path in (("psql", psql), ("npm", npm), ("npx", npx)) if not path]
+        return True, True, missing
+    enabled = env.get("ADMINWRIGHT_PG_TEST") == "1" and bool(psql)
+    return enabled, enabled and env.get("ADMINWRIGHT_NPM_TEST") == "1" and bool(npm and npx), []
+
+
 PSQL = os.environ.get("ADMINWRIGHT_PSQL") or shutil.which("psql")
-ENABLED = os.environ.get("ADMINWRIGHT_PG_TEST") == "1" and bool(PSQL)
+ENABLED, NPM_ENABLED, MISSING = gate(os.environ, shutil.which)
+REQUIRED = os.environ.get("ADMINWRIGHT_REQUIRE_DB") == "1"
 SKIP_REASON = "set ADMINWRIGHT_PG_TEST=1 and provide psql + a PostgreSQL superuser to run"
 
 # The Prisma and Drizzle translations are checked with their real CLIs, which are downloaded
 # from the npm registry, so those tests are opt-in: ADMINWRIGHT_NPM_TEST=1 with npm/npx on PATH.
 NPM = shutil.which("npm")
 NPX = shutil.which("npx")
-NPM_ENABLED = ENABLED and os.environ.get("ADMINWRIGHT_NPM_TEST") == "1" and bool(NPM and NPX)
 NPM_SKIP_REASON = SKIP_REASON + "; plus ADMINWRIGHT_NPM_TEST=1 with npm and npx on PATH"
 
 
@@ -58,14 +79,13 @@ def integrity_section():
 
 def unqualified_schema_sql():
     """postgres.sql as the Django, Prisma, Laravel and Rails carriers install it: every table in
-    public and no schema qualifier, with the same rewrite tests/test_core_schema.py uses to prove
-    their function text equals the canonical text (the admin_core.scrub setting and the advisory
-    lock key are string literals and keep their names)."""
+    public, named public.<table> inside the functions, with the same rewrite tests/test_core_schema.py
+    uses to prove their function text equals the canonical text (the admin_core.scrub setting and the
+    advisory lock keys are string literals and keep their names)."""
     sql = (SCHEMA / "postgres.sql").read_text(encoding="utf-8")
     sql = sql.replace("CREATE SCHEMA IF NOT EXISTS admin_core;", "")
     sql = sql.replace("SET LOCAL search_path = admin_core, public;", "SET LOCAL search_path = public;")
-    sql = sql.replace("SET search_path = admin_core, pg_temp", "SET search_path = public, pg_temp")
-    return re.sub(r"(?<!['\w])admin_core\.", "", sql)
+    return re.sub(r"(?<!['\w])admin_core\.", "public.", sql)
 
 
 def canonical_check_names():
@@ -77,6 +97,9 @@ class PgCase(unittest.TestCase):
     """Base class: a scratch directory, throwaway databases and roles, a psql wrapper."""
 
     def setUp(self):
+        if MISSING:
+            self.fail("ADMINWRIGHT_REQUIRE_DB=1, but %s not found on PATH: the database tests must run, "
+                      "not skip" % ", ".join(MISSING))
         self.tmp = Path(tempfile.mkdtemp(prefix="aw-core-schema-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.dbs = []

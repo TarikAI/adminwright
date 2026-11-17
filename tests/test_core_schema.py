@@ -138,7 +138,7 @@ _TOKEN = re.compile(
     r"(?P<ws>\s+)"
     r"|(?P<str>'(?:[^']|'')*')"
     r"|(?P<num>\d+(?:\.\d+)?)"
-    r"|(?P<op><=|>=|<>|!=|::|[=<>+\-*/(),])"
+    r"|(?P<op><=|>=|<>|!=|::|[=<>+\-*/(),~])"
     r"|(?P<word>[A-Za-z_][A-Za-z0-9_]*)"
 )
 
@@ -174,7 +174,7 @@ def number(text):
 
 
 class SqlParser:
-    COMPARISONS = ("=", "<>", "!=", "<", "<=", ">", ">=")
+    COMPARISONS = ("=", "<>", "!=", "<", "<=", ">", ">=", "~")
 
     def __init__(self, text):
         self.tokens = tokenize(text)
@@ -528,6 +528,12 @@ class Model:
         self.fks = {}  # (table, column) -> block | cascade | setnull
         self.unnamed_indexes = []  # diagnostics: indexes a variant left unnamed
         self.uniques = set()  # (table, column) declared UNIQUE on its own
+        self.notnull = {}  # (table, column) -> NOT NULL?
+        self.defaults = {}  # (table, column) -> the database default, normalised (None: none)
+
+    def add_nullity(self, table, column, notnull, default):
+        self.notnull[(table, column)] = bool(notnull)
+        self.defaults[(table, column)] = default
 
     def add_column(self, table, column, sqltype=None, length=None):
         self.columns.setdefault(table, set()).add(column)
@@ -544,6 +550,46 @@ class Model:
     def add_index(self, name, table, unique, items, where=None, source=""):
         self.indexes[name] = table
         self.index_defs[name] = IndexDef(table, unique, items, where, source)
+
+
+def sql_default(expr):
+    """A database default as ("str", s) | ("json", s) | ("bool", b) | ("num", n) | ("now",) | ("uuid",)."""
+    expr = expr.strip()
+    if expr.upper() == "NULL":
+        return None  # the same as no default
+    m = re.fullmatch(r"'((?:[^']|'')*)'(?:::(\w+))?", expr)
+    if m:
+        value = m.group(1).replace("''", "'")
+        return ("json", value) if m.group(2) in ("jsonb", "json") else ("str", value)
+    low = expr.lower()
+    if low in ("true", "false"):
+        return ("bool", low == "true")
+    if re.fullmatch(r"-?\d+", expr):
+        return ("num", int(expr))
+    if low in ("now()", "current_timestamp", "statement_timestamp()"):
+        return ("now",)
+    if low == "gen_random_uuid()":
+        return ("uuid",)
+    raise ValueError("unsupported default %r" % expr)
+
+
+def literal_default(text, json=False):
+    """A default written as a host-language literal: a quoted string, true/false, a number, {} or []."""
+    text = text.strip()
+    if text in ("{}", "[]"):
+        return ("json", text)
+    m = re.fullmatch(r"\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)'", text)
+    if m:
+        value = m.group(1) if m.group(1) is not None else m.group(2)
+        return ("json", value) if json else ("str", value)
+    if text.lower() in ("true", "false"):
+        return ("bool", text.lower() == "true")
+    if re.fullmatch(r"-?\d+", text):
+        return ("num", int(text))
+    raise ValueError("unsupported default literal %r" % text)
+
+
+SERIAL = ("serial",)
 
 
 def implicit_unique(name, model):
@@ -598,6 +644,10 @@ def parse_canonical(text):
                 parts = item.split()
                 column = parts[0]
                 model.add_column(table, column, parts[1].lower())
+                spec = re.split(r"\b(?:CONSTRAINT|CHECK|REFERENCES)\b", item)[0]
+                dm = re.search(r"\bDEFAULT\s+(.+?)(?=\s+(?:NOT NULL|NULL|UNIQUE|PRIMARY KEY)\b|\s*$)", spec)
+                default = sql_default(dm.group(1)) if dm else (SERIAL if parts[1].lower() == "bigserial" else None)
+                model.add_nullity(table, column, re.search(r"\bNOT NULL\b|\bPRIMARY KEY\b", spec), default)
                 if re.search(r"\bUNIQUE\b", item):
                     model.uniques.add((table, column))
                 fk = re.search(
@@ -626,16 +676,36 @@ PRISMA_DB_TYPES = {"Uuid": "uuid", "Inet": "inet", "Timestamptz": "timestamptz",
                    "Integer": "integer"}
 
 
+def prisma_default(rest, ftype, enum_maps):
+    start = rest.find("@default(")
+    if start < 0:
+        return None
+    arg, _ = balanced(rest, start + len("@default"))
+    arg = arg.strip()
+    if arg == "autoincrement()":
+        return SERIAL
+    if arg == "now()":
+        return ("now",)
+    dm = re.fullmatch(r'dbgenerated\("(.*)"\)', arg)
+    if dm:
+        return sql_default(dm.group(1))
+    if ftype in enum_maps:
+        return ("str", enum_maps[ftype][arg])
+    return literal_default(arg, json=ftype == "Json")
+
+
 def parse_prisma(schema_text, raw_sql_text):
     text = re.sub(r"//[^\n]*", "", schema_text)
     model = Model("prisma")
-    enums = {}
+    enums, enum_maps = {}, {}
     for m in re.finditer(r"^enum\s+(\w+)\s*\{(.*?)^\}", text, re.M | re.S):
         values = []
+        enum_maps[m.group(1)] = {}
         for line in m.group(2).strip().splitlines():
             vm = re.match(r"\s*(\w+)(?:\s+@map\(\"([^\"]+)\"\))?", line)
             if vm:
                 values.append(vm.group(2) or vm.group(1))
+                enum_maps[m.group(1)][vm.group(1)] = vm.group(2) or vm.group(1)
         enums[m.group(1)] = frozenset(values)
     models = {}
     for m in re.finditer(r"^model\s+(\w+)\s*\{(.*?)^\}", text, re.M | re.S):
@@ -670,6 +740,7 @@ def parse_prisma(schema_text, raw_sql_text):
                 else:
                     sqltype, length = PRISMA_TYPES[ftype], None
                 model.add_column(table, column, sqltype, length)
+                model.add_nullity(table, column, not optional, prisma_default(rest, ftype, enum_maps))
                 if "@unique" in rest:
                     model.uniques.add((table, column))
                 if ftype in enums:
@@ -724,6 +795,21 @@ def drizzle_sql(template, field_to_col):
     return re.sub(r"\$\{t\.(\w+)\}", lambda k: field_to_col[k.group(1)], m.group(1))
 
 
+def drizzle_default(builder, chain):
+    if builder == "bigserial":
+        return SERIAL
+    if ".defaultNow()" in chain:
+        return ("now",)
+    if ".defaultRandom()" in chain:
+        return ("uuid",)
+    start = chain.find(".default(")
+    if start < 0:
+        return None  # $defaultFn is client-side only
+    arg, _ = balanced(chain, start + len(".default"))
+    sm = re.fullmatch(r"\s*sql`(.*)`\s*", arg, re.S)
+    return sql_default(sm.group(1)) if sm else literal_default(arg, json=builder == "jsonb")
+
+
 def parse_drizzle(text):
     text = strip_js_comments(text)
     model = Model("drizzle")
@@ -746,6 +832,9 @@ def parse_drizzle(text):
             length = re.search(r"length:\s*(\d+)", options)
             field_to_col[em.group(1)] = column
             model.add_column(table, column, sqltype, int(length.group(1)) if length else None)
+            chain = em.group(2)
+            model.add_nullity(table, column, ".notNull()" in chain or ".primaryKey()" in chain or builder == "bigserial",
+                              drizzle_default(builder, chain))
             if ".unique()" in em.group(2):
                 model.uniques.add((table, column))
             fk = re.search(
@@ -793,7 +882,7 @@ DJANGO_ACTIONS = {
     "CASCADE": "cascade", "DB_CASCADE": "cascade", "PROTECT": "block", "RESTRICT": "block",
     "DO_NOTHING": "block", "SET_NULL": "setnull", "DB_SET_NULL": "setnull",
 }
-DJANGO_LOOKUPS = {"exact": "=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+DJANGO_LOOKUPS = {"exact": "=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "regex": "~"}
 
 
 def dotted(node):
@@ -862,6 +951,31 @@ def django_condition(node, columns):
     raise ValueError("unsupported Django condition %s" % ast.dump(node))
 
 
+def django_default(node):
+    """db_default= as a normalised database default (default= is ORM-side only and ignored)."""
+    if node is None:
+        return None
+    if isinstance(node, ast.Call):
+        name = dotted(node.func)
+        if name == "Now":
+            return ("now",)
+        if name == "GenRandomUUID":
+            return ("uuid",)
+        raise ValueError("unsupported db_default %s" % ast.dump(node))
+    if isinstance(node, ast.Dict) and not node.keys:
+        return ("json", "{}")
+    if isinstance(node, ast.List) and not node.elts:
+        return ("json", "[]")
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool):
+            return ("bool", node.value)
+        if isinstance(node.value, int):
+            return ("num", node.value)
+        if isinstance(node.value, str):
+            return ("str", node.value)
+    raise ValueError("unsupported db_default %s" % ast.dump(node))
+
+
 def parse_django(text):
     model = Model("django")
     classes = [n for n in ast.parse(text).body
@@ -902,12 +1016,15 @@ def parse_django(text):
         table = meta["db_table"].value
         model.tables.add(table)
         model.add_column(table, "id", "bigint")  # DEFAULT_AUTO_FIELD = BigAutoField
+        model.add_nullity(table, "id", True, SERIAL)
         for fname, call in fields.items():
             kind = dotted(call.func)[len("models."):]
             if kind == "ManyToManyField":
                 continue
             kw = keywords(call)
             model.add_column(table, columns[fname], *field_type(cls.name, fname))
+            nullable = isinstance(kw.get("null"), ast.Constant) and kw["null"].value is True
+            model.add_nullity(table, columns[fname], not nullable, django_default(kw.get("db_default")))
             if kind == "ForeignKey":
                 model.fks[(table, columns[fname])] = DJANGO_ACTIONS[dotted(kw["on_delete"]).split(".")[-1]]
             elif isinstance(kw.get("unique"), ast.Constant) and kw["unique"].value is True:
@@ -951,6 +1068,21 @@ def php_sql(text):
     return strip_sql_comments(";\n".join(next(g for g in groups if g) for groups in found))
 
 
+def laravel_default(method, rest):
+    if method == "bigIncrements":
+        return SERIAL
+    if "->useCurrent()" in rest:
+        return ("now",)
+    start = rest.find("->default(")
+    if start < 0:
+        return None
+    arg, _ = balanced(rest, start + len("->default"))
+    rm = re.fullmatch(r"\s*DB::raw\((.*)\)\s*", arg, re.S)
+    if rm:
+        return sql_default(literal_default(rm.group(1))[1])
+    return literal_default(arg)
+
+
 def parse_laravel(text):
     model = Model("laravel")
     starts = [(m.start(), m.group(1)) for m in re.finditer(r"Schema::create\('(\w+)'", text)]
@@ -963,6 +1095,7 @@ def parse_laravel(text):
             method, column, size, rest = cm.groups()
             length = int(size) if size and method == "string" else (255 if method == "string" else None)
             model.add_column(table, column, LARAVEL_TYPES[method], length)
+            model.add_nullity(table, column, "->nullable()" not in rest, laravel_default(method, rest))
             if "->unique()" in rest:
                 model.uniques.add((table, column))
         for fk in re.finditer(
@@ -1011,6 +1144,13 @@ def rails_where(options):
     return parse_sql_expr(wm.group(1) or wm.group(2)) if wm else None
 
 
+def rails_default(options):
+    dm = re.search(r"default:\s*(->\s*\{\s*'([^']*)'\s*\}|\{\}|\[\]|'[^']*'|\"[^\"]*\"|true|false|-?\d+)", options)
+    if not dm:
+        return None
+    return sql_default(dm.group(2)) if dm.group(2) is not None else literal_default(dm.group(1))
+
+
 def parse_rails(text):
     model = Model("rails")
     starts = [(m.start(), m.group(1), m.group(0)) for m in re.finditer(r"create_table :(\w+)([^\n]*)", text)]
@@ -1021,6 +1161,7 @@ def parse_rails(text):
         model.tables.add(table)
         if "primary_key:" not in header:
             model.add_column(table, "id", "bigserial")
+            model.add_nullity(table, "id", True, SERIAL)
         for cm in re.finditer(r"\bt\.(%s)\s+:(\w+)([^\n]*)" % "|".join(RAILS_TYPES), chunk):
             kind, column, rest = cm.groups()
             limit = re.search(r"limit:\s*(\d+)", rest)
@@ -1030,9 +1171,11 @@ def parse_rails(text):
             if kind == "integer" and limit:
                 sqltype = RAILS_INTEGER_LIMITS[limit.group(1)]
             model.add_column(table, column, sqltype, length)
+            model.add_nullity(table, column, re.search(r"null:\s*false", rest), rails_default(rest))
         for rm in re.finditer(r"\bt\.references\s+:(\w+)([^\n]*(?:\n[ ]{10,}[^\n]*)*)", chunk):
             column = rm.group(1) + "_id"
             model.add_column(table, column, "bigint")
+            model.add_nullity(table, column, re.search(r"null:\s*false", rm.group(2)), None)
             od = re.search(r"on_delete:\s*:(\w+)", rm.group(2))
             model.fks[(table, column)] = {"cascade": "cascade", "restrict": "block", "nullify": "setnull"}.get(
                 od.group(1) if od else "", "block"
@@ -1072,10 +1215,44 @@ def parse_rails(text):
 
 
 def normalise_sql(text):
+    # The canonical copy names its tables admin_core.<table>, the carriers public.<table>;
+    # an unqualified table name stays unqualified and so does not match.
     text = strip_sql_comments(text)
-    text = re.sub(r"(?<!['\w])admin_core\.", "", text)
-    text = re.sub(r"SET search_path = (?:admin_core|public), pg_temp", "SET search_path = SCHEMA, pg_temp", text)
+    text = re.sub(r"(?<!['\w])(?:admin_core|public)\.", "SCHEMA.", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+# Words that are SQL or PL/pgSQL syntax followed by "(", not function calls.
+SYNTAX_BEFORE_PAREN = {"if", "elsif", "exists", "coalesce", "in", "values", "and", "or", "not", "when", "then",
+                       "else", "case", "return", "select", "from", "where", "is", "distinct", "null"}
+PACK_TABLES = ("audit_event", "admin_actor", "admin_actor_role", "approval_request", "approval_decision",
+               "impersonation_session")
+PIN = "SET search_path = pg_catalog, pg_temp"
+
+
+def function_problems(text, schema):
+    """(problems, number of functions) for every CREATE FUNCTION in `text`: each must pin PIN in
+    its header, and its body must name tables, row types and functions with a schema (`schema`
+    for the pack's own objects, pg_catalog for built-ins). T-01/T-02 of the 2026-11-17 audit."""
+    problems, found = [], 0
+    for m in re.finditer(r"CREATE OR REPLACE FUNCTION (?:(\w+)\.)?(\w+)\((.*?)\$\$(.*?)\$\$", text, re.S):
+        found += 1
+        owner_schema, name, header, body = m.groups()
+        if owner_schema != schema:
+            problems.append("%s is not created as %s.%s" % (name, schema, name))
+        if PIN not in header:
+            problems.append("%s does not pin %s" % (name, PIN))
+        for ptype in re.findall(r"(?<![.\w])(%s)\b" % "|".join(PACK_TABLES), header.split("RETURNS")[0]):
+            problems.append("%s: unqualified parameter type %s" % (name, ptype))
+        code = re.sub(r"'(?:[^']|'')*'", "''", strip_sql_comments(body))  # no string literals
+        for call in re.findall(r"(?<![.\w%])([A-Za-z_]\w*)\s*\(", code):
+            if call.lower() not in SYNTAX_BEFORE_PAREN:
+                problems.append("%s: unqualified call %s()" % (name, call))
+        for table in re.findall(r"(?<!DISTINCT )\b(?:FROM|JOIN|UPDATE|INSERT INTO)\s+(?!%s\.)(\w+)" % schema, code):
+            problems.append("%s: unqualified table %s" % (name, table))
+        for rowtype in re.findall(r"(?<![.\w])(\w+)%ROWTYPE", code):
+            problems.append("%s: unqualified row type %s" % (name, rowtype))
+    return problems, found
 
 
 def integrity_statements(text):
@@ -1083,7 +1260,8 @@ def integrity_statements(text):
     found = re.findall(
         r"CREATE OR REPLACE FUNCTION\b.*?\$\$.*?\$\$[^;]*;"
         r"|CREATE TRIGGER \w+\s+BEFORE .*?;"
-        r"|REVOKE ALL ON FUNCTION .*?;",
+        r"|REVOKE ALL ON FUNCTION .*?;"
+        r"|ALTER TABLE \S+ ENABLE ALWAYS TRIGGER \w+;",
         text,
         re.S,
     )
@@ -1146,6 +1324,30 @@ def index_drift(model, canon=None):
             diffs.append("a different WHERE")
         if diffs:
             problems.append("%s: %s (canonical %s)" % (name, "; ".join(diffs), want.describe()))
+    return problems
+
+
+# Database defaults a variant adds on purpose (documented in its header).
+KNOWN_EXTRA_DEFAULTS = {
+    "prisma": {("audit_event", "chain_seq"), ("audit_event", "row_hash")},  # client placeholders; the CHECK refuses them
+}
+
+
+def nullity_drift(model, canon=None):
+    """NOT NULL and the database default of every canonical column (audit 2026-11-17 T-12)."""
+    canon = canon or CANON
+    problems = []
+    extras = KNOWN_EXTRA_DEFAULTS.get(model.name, set())
+    for key in sorted(canon.notnull):
+        if key not in model.notnull:
+            problems.append("%s.%s: nullability and default not read" % key)
+            continue
+        if model.notnull[key] != canon.notnull[key]:
+            problems.append("%s.%s is %s, canonical %s" % (key + (
+                "NOT NULL" if model.notnull[key] else "nullable", "NOT NULL" if canon.notnull[key] else "nullable")))
+        want, got = canon.defaults[key], model.defaults[key]
+        if got != want and not (want is None and key in extras):
+            problems.append("%s.%s has default %r, canonical %r" % (key + (got, want)))
     return problems
 
 
@@ -1215,20 +1417,79 @@ class TestCanonicalIsSelfConsistent(unittest.TestCase):
         self.assertIn("NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL", link)
         self.assertIn("NEW.redaction_policy := 'none'", link)
 
-    def test_every_function_that_reads_a_table_pins_its_search_path(self):
-        # round-2 finding: a trigger runs with the caller's search_path, where the caller's own
-        # temporary tables are searched first; in the unqualified carriers a session could create
-        # TEMP TABLE approval_request and approve its own request. pg_temp must be listed last.
+    def test_every_function_pins_its_search_path_and_qualifies_what_it_calls(self):
+        # Audit 2026-11-17 T-01/T-02: a trigger runs with the caller's search_path, so a
+        # temporary table, or an exact-type overload such as public.to_jsonb(approval_request)
+        # created by any role that can CREATE in public, stood in for the real thing; the
+        # approval guard had no pin at all and the carriers pinned the writable public schema.
+        # No function is exempt: every one pins pg_catalog, pg_temp and names its tables,
+        # row types and functions with their schema.
+        problems, found = function_problems(read("postgres.sql"), "admin_core")
+        self.assertEqual(problems, [])
+        self.assertGreaterEqual(found, 11)
+
+    def test_the_function_check_catches_an_unpinned_or_unqualified_function(self):
+        sql = read("postgres.sql")
+        for old, new, expected in (
+            ("pg_catalog.to_jsonb(NEW) - 'state'", "to_jsonb(NEW) - 'state'", "unqualified call to_jsonb"),
+            ("pg_catalog.sha256(pg_catalog.convert_to(admin_core.audit_event_hash_input(r)",
+             "sha256(convert_to(admin_core.audit_event_hash_input(r)", "unqualified call convert_to"),
+            ("LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS", "LANGUAGE sql STABLE AS",
+             "audit_event_hash_input does not pin"),
+            ("FROM admin_core.approval_request r", "FROM approval_request r", "unqualified table approval_request"),
+            ("    req admin_core.approval_request%ROWTYPE", "    req approval_request%ROWTYPE",
+             "unqualified row type approval_request"),
+        ):
+            with self.subTest(mutation=new):
+                self.assertIn(old, sql)
+                problems, _ = function_problems(sql.replace(old, new, 1), "admin_core")
+                self.assertTrue(any(expected in p for p in problems), problems)
+
+    def test_every_trigger_fires_under_replica_role(self):
+        # T-09: session_replication_role = replica silenced every origin-mode trigger.
         sql = strip_sql_comments(read("postgres.sql"))
-        found = 0
-        for m in re.finditer(r"CREATE OR REPLACE FUNCTION admin_core\.(\w+)\(.*?\$\$(.*?)\$\$", sql, re.S):
-            name, body = m.group(1), m.group(2)
-            header = sql[m.start(): m.start() + m.group(0).index("$$")]
-            if re.search(r"\b(?:FROM|INTO|UPDATE|JOIN)\s+admin_core\.\w+|%ROWTYPE", body):
-                found += 1
-                with self.subTest(function=name):
-                    self.assertIn("SET search_path = admin_core, pg_temp", header)
-        self.assertGreaterEqual(found, 5)
+        triggers = set(re.findall(r"CREATE TRIGGER (\w+)\s+BEFORE [\w ]+? ON (admin_core\.\w+)", sql))
+        always = set((t, tbl) for tbl, t in re.findall(r"ALTER TABLE (admin_core\.\w+) ENABLE ALWAYS TRIGGER (\w+);", sql))
+        self.assertGreaterEqual(len(triggers), 14)
+        self.assertEqual(triggers, always)
+
+    def test_the_database_owns_the_audit_row_identity_and_time(self):
+        # T-04 / T-05: who acted is snapshotted into the hashed row, recorded_at is the database
+        # clock, and an impersonation session must be the acting actor's own.
+        sql = read("postgres.sql")
+        link = sql[sql.index("FUNCTION admin_core.audit_event_chain_link"):]
+        link = link[: link.index("$$ LANGUAGE plpgsql")]
+        self.assertIn("NEW.recorded_at := pg_catalog.clock_timestamp();", link)
+        self.assertIn("NEW.actor_subject := (SELECT a.auth_subject FROM admin_core.admin_actor a", link)
+        self.assertIn("sess.real_actor_id IS DISTINCT FROM NEW.actor_id", link)
+        hash_input = sql[sql.index("FUNCTION admin_core.audit_event_hash_input"):]
+        self.assertIn("e.actor_subject", hash_input[: hash_input.index("$$;")])
+        self.assertIn("actor_subject", CANON.columns["audit_event"])
+
+    def test_approval_state_machine_and_grant_guards_exist(self):
+        # T-03, T-07, T-08: enforced in the database, and no request is deleted.
+        sql = strip_sql_comments(read("postgres.sql"))
+        for trigger, timing in (("approval_request_state", "INSERT OR UPDATE ON admin_core.approval_request"),
+                                ("approval_request_no_delete", "DELETE ON admin_core.approval_request"),
+                                ("approval_request_no_truncate", "TRUNCATE ON admin_core.approval_request"),
+                                ("admin_actor_role_guard", "INSERT OR UPDATE ON admin_core.admin_actor_role"),
+                                ("impersonation_session_immutable", "UPDATE ON admin_core.impersonation_session")):
+            with self.subTest(trigger=trigger):
+                self.assertRegex(sql, r"CREATE TRIGGER %s\s+BEFORE %s" % (trigger, timing))
+        state = sql[sql.index("FUNCTION admin_core.approval_request_guard_state"):]
+        state = state[: state.index("$$ LANGUAGE plpgsql")]
+        self.assertIn("pg_catalog.count(DISTINCT d.approver_id)", state)
+        self.assertIn("d.approver_id <> NEW.requested_by", state)
+        sod = sql[sql.index("FUNCTION admin_core.enforce_separation_of_duties"):]
+        self.assertIn("req.state <> 'pending'", sod[: sod.index("$$ LANGUAGE plpgsql")])
+
+    def test_scrub_needs_an_actor(self):
+        # T-10: the SECURITY DEFINER scrub took any actor id, NULL included, on trust.
+        sql = read("postgres.sql")
+        self.assertIn("p_event_id bigint, p_policy text, p_reason text, p_actor_id bigint)", sql)
+        self.assertNotIn("p_actor_id bigint DEFAULT", sql)
+        self.assertIn("IF p_actor_id IS NULL THEN", sql)
+        self.assertIn("session_user", sql)
 
     def test_scrub_guard_needs_the_rows_scrub_event(self):
         # audit finding 5.11 (round 2): the guard trusted a user-settable flag, so any role with
@@ -1404,6 +1665,15 @@ class TestDefinitionsMatchCanonical(unittest.TestCase):
             with self.subTest(variant=v):
                 self.assertEqual(check_drift(MODELS[v]), [], "CHECK expression drift in %s" % v)
 
+    def test_same_nullability_and_database_defaults(self):
+        # T-12 (audit 2026-11-17): read_only defaulting to false (write impersonation by default)
+        # or a nullable auth_subject survived every other comparison.
+        self.assertEqual(len(CANON.notnull), len(CANON.types))
+        self.assertEqual(CANON.defaults[("impersonation_session", "read_only")], ("bool", True))
+        for v in VARIANTS:
+            with self.subTest(variant=v):
+                self.assertEqual(nullity_drift(MODELS[v]), [], "NOT NULL / DEFAULT drift in %s" % v)
+
 
 class TestTheComparisonCatchesRealDrift(unittest.TestCase):
     """Each case puts back a bug the audit found (or a sibling of it) into one variant, in memory,
@@ -1477,6 +1747,39 @@ class TestTheComparisonCatchesRealDrift(unittest.TestCase):
         drift = type_drift(self.mutated("prisma.schema", '@map("occurred_at") @db.Timestamptz', '@map("occurred_at")'))
         self.assert_reported(drift, "audit_event.occurred_at")
 
+    def test_write_impersonation_by_default(self):
+        # T-12: the audit's mutation run flipped read_only's default in every variant unnoticed.
+        for filename, old, new in (
+            ("rails_migration.rb", "t.boolean :read_only, null: false, default: true",
+             "t.boolean :read_only, null: false, default: false"),
+            ("laravel_migration.php", "$table->boolean('read_only')->default(true)",
+             "$table->boolean('read_only')->default(false)"),
+            ("django_models.py", "read_only = models.BooleanField(default=True, db_default=True)",
+             "read_only = models.BooleanField(default=False, db_default=False)"),
+            ("drizzle.ts", 'readOnly: boolean("read_only").notNull().default(true)',
+             'readOnly: boolean("read_only").notNull().default(false)'),
+            ("prisma.schema", 'readOnly          Boolean   @default(true)', 'readOnly          Boolean   @default(false)'),
+        ):
+            with self.subTest(file=filename):
+                self.assert_reported(nullity_drift(self.mutated(filename, old, new)), "impersonation_session.read_only")
+
+    def test_nullable_auth_subject_and_mfa_default(self):
+        for filename, old, new, column in (
+            ("rails_migration.rb", "t.text    :auth_subject, null: false", "t.text    :auth_subject", "auth_subject"),
+            ("laravel_migration.php", "$table->text('auth_subject')->unique()",
+             "$table->text('auth_subject')->nullable()->unique()", "auth_subject"),
+            ("django_models.py", "auth_subject = models.TextField(", "auth_subject = models.TextField(null=True, ",
+             "auth_subject"),
+            ("drizzle.ts", 'authSubject: text("auth_subject").notNull()', 'authSubject: text("auth_subject")',
+             "auth_subject"),
+            ("prisma.schema", "authSubject    String         @unique", "authSubject    String?        @unique",
+             "auth_subject"),
+            ("rails_migration.rb", "t.boolean :requires_mfa, null: false, default: true",
+             "t.boolean :requires_mfa, null: false, default: false", "requires_mfa"),
+        ):
+            with self.subTest(file=filename, column=column):
+                self.assert_reported(nullity_drift(self.mutated(filename, old, new)), "." + column)
+
     def test_enum_value_longer_than_its_column(self):
         drift = type_drift(self.mutated("laravel_migration.php", "$table->string('state', 16)->default('pending')",
                                         "$table->string('state', 8)->default('pending')"))
@@ -1510,12 +1813,21 @@ class TestInlineSqlMatchesCanonical(unittest.TestCase):
                 with self.subTest(file=filename, statement=stmt[:70]):
                     self.assertIn(stmt, canonical, "%s has a function/trigger that is not in postgres.sql" % filename)
 
+    def test_carriers_pin_and_qualify_like_the_canonical(self):
+        # T-02: the carriers pinned search_path = public, pg_temp, and public is writable on
+        # databases that started before PostgreSQL 15. They now name their tables public.<table>.
+        for filename in self.CARRIERS:
+            with self.subTest(file=filename):
+                problems, found = function_problems(read(filename), "public")
+                self.assertEqual(problems, [])
+                self.assertGreaterEqual(found, 11)
+
     def test_drizzle_tells_the_reader_to_append_the_integrity_section(self):
         self.assertIn("Integrity section of", read("drizzle.ts"))
 
     def test_down_migrations_drop_every_trigger_and_function(self):
         canonical = strip_sql_comments(read("postgres.sql"))
-        triggers = sorted(set(re.findall(r"CREATE TRIGGER (\w+)\s+BEFORE \w+ ON admin_core\.(\w+)", canonical)))
+        triggers = sorted(set(re.findall(r"CREATE TRIGGER (\w+)\s+BEFORE [\w ]+? ON admin_core\.(\w+)", canonical)))
         functions = sorted(set(re.findall(r"CREATE OR REPLACE FUNCTION admin_core\.(\w+)\(", canonical)))
         self.assertGreaterEqual(len(triggers), 9)
         for filename, marker in (("laravel_migration.php", "public function down"), ("rails_migration.rb", "  def down")):
@@ -1541,8 +1853,28 @@ class TestPackContents(unittest.TestCase):
         for table in ("audit_event", "approval_decision", "config_change", "admin_job_failure"):
             self.assertIn(":\"schema\".%s" % table, grants)
         self.assertIn("REVOKE ALL ON", grants)
-        self.assertRegex(grants, r"GRANT SELECT, INSERT ON")
+        self.assertNotRegex(grants, r"GRANT [A-Z, ]*\b(?:UPDATE|DELETE|TRUNCATE)\b[A-Z, ]* ON")  # table-wide
         self.assertIn("scrub_audit_payload", grants)
+
+    def test_grants_sql_inserts_every_column_but_id(self):
+        # T-05/T-06 (audit 2026-11-17): a table-wide INSERT let a writer choose id (and block
+        # every later insert) or recorded_at. INSERT is column by column, never id; the lists
+        # follow postgres.sql so a new column is not silently left out.
+        grants = strip_sql_comments(read("grants.sql"))
+        found = {m.group(2): {c.strip() for c in m.group(1).split(",")}
+                 for m in re.finditer(r'GRANT INSERT \(([^)]*)\)\s+ON :"schema"\.(\w+)', grants)}
+        self.assertEqual(set(found), {"audit_event", "approval_decision", "config_change", "admin_job_failure",
+                                      "approval_request", "admin_actor_role", "impersonation_session"})
+        for table, columns in found.items():
+            with self.subTest(table=table):
+                self.assertEqual(columns, CANON.columns[table] - {"id"})
+        updates = {m.group(2): {c.strip() for c in m.group(1).split(",")}
+                   for m in re.finditer(r'GRANT UPDATE \(([^)]*)\) ON :"schema"\.(\w+)', grants)}
+        self.assertEqual(updates, {"approval_request": {"state", "executed_at", "execution_result"},
+                                   "admin_actor_role": {"revoked_at", "revoked_by", "revoke_reason"},
+                                   "impersonation_session": {"ended_at", "ended_reason", "revoked_by"}})
+        for check in ("aw_app_owns", "aw_app_creates", "pg_has_role", "has_schema_privilege"):
+            self.assertIn(check, grants)
 
     def test_django_uses_the_condition_keyword_on_every_check_constraint(self):
         # audit finding 5.1: CheckConstraint(check=...) is a TypeError on Django 6.
@@ -1618,9 +1950,49 @@ class TestPackContents(unittest.TestCase):
                        "GUC-only payload drop", "another row''s scrub event", "payload dropped%",
                        "re-attributing a request", "lowering required_approvals",
                        "duplicate job idempotency key", "duplicate config_setting scope",
-                       "unknown audit result", "fulfilled under legal hold", "DELETE admin_job with failures"):
+                       "unknown audit result", "fulfilled under legal hold", "DELETE admin_job with failures",
+                       # audit 2026-11-17 T-03 to T-10, T-13: each control has a refused case
+                       "approved with no approvals", "approved with too few approvals", "approved over a rejection",
+                       "decision on a rejected request", "decision on an expired request", "executed back to pending",
+                       "request inserted already expired", "DELETE a pending approval_request",
+                       "rewriting a grant''s role", "un-revoking a grant", "tenant scope with a global scope_tenant_id",
+                       "retargeting a session", "sliding a session''s window", "another actor''s impersonation session",
+                       "rewriting admin_actor re-attributed", "a writer-supplied recorded_at was kept",
+                       "tgenabled <> 'A'", "unchained audit row", "scrub without an actor"):
             self.assertIn(needle, block)
         self.assertTrue(block.lstrip().startswith("BEGIN;") and block.rstrip().endswith("ROLLBACK;"))
+
+
+class TestDatabaseTestGate(unittest.TestCase):
+    """T-15 (audit 2026-11-17): with ADMINWRIGHT_REQUIRE_DB=1 a missing tool fails the database
+    tests instead of skipping them, so CI cannot pass green with all of them skipped."""
+
+    def test_gate(self):
+        import _core_schema_pg as pg
+
+        none = lambda name: None  # noqa: E731 - an empty PATH
+        found = lambda name: "/usr/bin/" + name  # noqa: E731
+        self.assertEqual(pg.gate({}, none), (False, False, []))
+        self.assertEqual(pg.gate({"ADMINWRIGHT_PG_TEST": "1"}, none), (False, False, []))
+        self.assertEqual(pg.gate({"ADMINWRIGHT_PG_TEST": "1", "ADMINWRIGHT_NPM_TEST": "1"}, found), (True, True, []))
+        self.assertEqual(pg.gate({"ADMINWRIGHT_REQUIRE_DB": "1"}, none), (True, True, ["psql", "npm", "npx"]))
+        self.assertEqual(pg.gate({"ADMINWRIGHT_REQUIRE_DB": "1", "ADMINWRIGHT_PSQL": "/opt/psql"}, none),
+                         (True, True, ["npm", "npx"]))
+
+    def test_required_database_tests_fail_with_an_empty_path(self):
+        import os
+        import subprocess
+        import sys
+
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ADMINWRIGHT_")}
+        env.update(ADMINWRIGHT_REQUIRE_DB="1", PATH="", PYTHONIOENCODING="cp1252")
+        result = subprocess.run(
+            [sys.executable, "-m", "unittest", "test_core_schema_db.TestCoreSchemaOnPostgres."
+             "test_postgres_sql_applies_and_the_readme_verification_passes", "test_core_schema_django"],
+            cwd=str(ROOT / "tests"), env=env, capture_output=True, encoding="cp1252", errors="replace", timeout=300)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ADMINWRIGHT_REQUIRE_DB=1, but psql, npm, npx not found", result.stderr)
+        self.assertNotIn("skipped=", result.stderr)
 
 
 class TestModelDocMatchesSchema(unittest.TestCase):

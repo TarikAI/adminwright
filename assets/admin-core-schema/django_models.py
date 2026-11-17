@@ -12,14 +12,15 @@ in postgres.sql) needs Django 5.0+.
 WHAT DJANGO CANNOT ENFORCE IN MODELS — add these in a migration:
 
   1. Triggers and functions. Append-only enforcement on AuditEvent and
-     ApprovalDecision, the audit hash chain (chain_seq / prev_hash / row_hash are
-     assigned by a BEFORE INSERT trigger), verify_audit_chain(), the payload
-     scrub function, the separation-of-duties trigger, and the trigger that keeps
-     an ApprovalRequest as written (only state, executed_at and execution_result
-     change; prefer save(update_fields=[...]) for those, since a full save()
-     rewrites every column and is refused if a value does not round-trip exactly).
-     They live in ./django_triggers.sql (unqualified names, canonical column
-     names). Model-level guards (save() overrides, signals) are bypassed by bulk
+     ApprovalDecision, the audit hash chain (chain_seq / prev_hash / row_hash,
+     recorded_at and actor_subject are assigned by a BEFORE INSERT trigger),
+     verify_audit_chain(), the payload scrub function, the separation-of-duties
+     trigger, the ApprovalRequest state machine and the triggers that keep an
+     ApprovalRequest, an AdminActorRole and an ImpersonationSession as written
+     (only their lifecycle columns change; prefer save(update_fields=[...]) for
+     those, since a full save() rewrites every column and is refused if a value
+     does not round-trip exactly). They live in ./django_triggers.sql (public.
+     qualified names, canonical column names). Model-level guards (save() overrides, signals) are bypassed by bulk
      operations, raw SQL and other services.
   2. Nothing else. Every CHECK in postgres.sql (including the enum-like ones, which
      are CheckConstraints below and not just choices=) and every partial /
@@ -61,7 +62,8 @@ DIFFERENCES FROM postgres.sql that Django's ORM imposes (all deliberate):
   * admin_actor.email is an EmailField (varchar) rather than citext, and Django's
     Now() is STATEMENT_TIMESTAMP() where postgres.sql uses now() (transaction start).
   * Record-keeping timestamps (created_at, recorded_at, decided_at, changed_at) use
-    auto_now_add: the ORM stamps the current time whatever a caller passes.
+    auto_now_add: the ORM stamps the current time whatever a caller passes (and the
+    triggers stamp recorded_at and decided_at again with the database clock).
     Business timestamps (starts_at, granted_at, activated_at, started_at,
     requested_at, queued_at, failed_at, received_at) use default=timezone.now, so a
     caller can schedule a grant to start later or record a request received by post
@@ -73,9 +75,11 @@ DIFFERENCES FROM postgres.sql that Django's ORM imposes (all deliberate):
     commit rather than at the statement) and CASCADE is emulated by the ORM, so a
     raw DELETE of a parent row does not cascade the way postgres.sql does. Django 6.1's
     database-level DB_CASCADE is not used: it cannot be mixed with the PROTECT
-    references elsewhere in this schema (system check fields.E323).
+    references elsewhere in this schema (system check models.E050 refuses mixing the
+    database-level and ORM-level variants on one model).
   * AuditEvent.chain_seq and row_hash carry placeholder defaults (0 and "") because
-    the ORM always sends a value; the trigger overwrites them.
+    the ORM always sends a value; the trigger overwrites them, and the
+    audit_event_chain_assigned CHECK refuses a row that kept them.
 
 App label assumed to be "admin_core". Adjust db_table names to project convention;
 keep AdminPermission.key equal to the manifest capability id.
@@ -375,6 +379,8 @@ class AuditEvent(models.Model):
     actor_kind = models.CharField(
         max_length=16, choices=ActorKind.choices, default=ActorKind.HUMAN, db_default="human"
     )
+    # admin_actor.auth_subject when the row was written (set by the trigger).
+    actor_subject = models.TextField(null=True, blank=True)
     # Null unless impersonating. Never overwrite actor with the impersonated
     # identity: that is the most common way impersonation audit is destroyed. The
     # acted-as subject is usually a customer, not an AdminActor, so this is text in
@@ -445,6 +451,11 @@ class AuditEvent(models.Model):
                 | Q(impersonation_session__isnull=False),
                 name="audit_event_effective_actor_requires_session",
             ),
+            # Only the chain trigger produces these values; the placeholder defaults fail.
+            models.CheckConstraint(
+                condition=Q(chain_seq__gte=1) & Q(row_hash__regex=r"^[0-9a-f]{64}$"),
+                name="audit_event_chain_assigned",
+            ),
         ]
         # The narrow, predictable query set. Every extra index taxes the hottest
         # insert path in the system, so add nothing speculative.
@@ -474,6 +485,11 @@ class AuditEvent(models.Model):
                 fields=["idempotency_key"],
                 condition=Q(idempotency_key__isnull=False),
                 name="audit_event_idempotency",
+            ),
+            models.Index(
+                fields=["impersonation_session", "-occurred_at"],
+                condition=Q(impersonation_session__isnull=False),
+                name="audit_event_impersonation",
             ),
         ]
 

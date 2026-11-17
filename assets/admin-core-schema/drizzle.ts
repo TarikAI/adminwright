@@ -6,13 +6,15 @@
 // WHAT DRIZZLE CANNOT ENFORCE — add these in a hand-written migration:
 //
 //   1. Triggers and functions. Append-only enforcement on auditEvent and
-//      approvalDecision, the audit hash chain (chain_seq / prev_hash / row_hash are
-//      assigned by a BEFORE INSERT trigger; leave them out of your inserts: chainSeq
+//      approvalDecision, the audit hash chain (chain_seq / prev_hash / row_hash,
+//      recorded_at and actor_subject are assigned by a BEFORE INSERT trigger; leave
+//      them out of your inserts: chainSeq
 //      and rowHash carry client-side $defaultFn placeholders so the insert type
 //      allows that, and the trigger overwrites them),
 //      verify_audit_chain(), scrub_audit_payload(), the separation-of-duties
-//      trigger, and the trigger that keeps an approval_request as written (only
-//      state, executed_at and execution_result change). Application-level guards
+//      trigger, the approval_request state machine and the triggers that keep an
+//      approval_request, a grant and an impersonation session as written (only their
+//      lifecycle columns change). Application-level guards
 //      are bypassed by raw queries and other services.
 //   2. Nothing else. Drizzle expresses CHECK constraints (`check()`), partial
 //      unique indexes (`.where()`) and expression indexes (a sql template inside
@@ -241,6 +243,8 @@ export const auditEvent = adminCore.table("audit_event", {
 
   actorId: bigint("actor_id", { mode: "bigint" }).references(() => adminActor.id),
   actorKind: text("actor_kind").notNull().default("human"),
+  // admin_actor.auth_subject when the row was written; the trigger sets it.
+  actorSubject: text("actor_subject"),
   // Null unless impersonating. Never overwrite actorId with the impersonated
   // identity: that is the most common way impersonation audit is destroyed. The
   // acted-as subject is usually a customer, not an admin_actor, so this is text in
@@ -297,6 +301,8 @@ export const auditEvent = adminCore.table("audit_event", {
     "audit_event_effective_actor_requires_session",
     sql`${t.effectiveActorId} IS NULL OR ${t.impersonationSessionId} IS NOT NULL`,
   ),
+  // Only the chain trigger produces these values; the client placeholders fail it.
+  check("audit_event_chain_assigned", sql`${t.chainSeq} >= 1 AND ${t.rowHash} ~ '^[0-9a-f]{64}$'`),
   uniqueIndex("audit_event_chain").on(t.chainId, t.chainSeq),
   // The narrow, predictable query set. Every extra index taxes the hottest insert
   // path in the system, so add nothing speculative.
@@ -312,6 +318,9 @@ export const auditEvent = adminCore.table("audit_event", {
   index("audit_event_idempotency")
     .on(t.idempotencyKey)
     .where(sql`${t.idempotencyKey} IS NOT NULL`),
+  index("audit_event_impersonation")
+    .on(t.impersonationSessionId, sql`${t.occurredAt} DESC`)
+    .where(sql`${t.impersonationSessionId} IS NOT NULL`),
 ]);
 
 // Paginate by keyset on (occurredAt, id), not offset. Offset pagination on an
