@@ -31,7 +31,8 @@ Two rules:
   the version the project actually pins. These links change; the project's lockfile does not
   lie. See [stack-adapters.md](stack-adapters.md) for how to identify the stack first.
 
-Every URL here was fetched on 2026-09-23. A dead link is a defect worth fixing, not a reason to guess.
+Every URL here was fetched on 2026-09-23, and the ones marked (2026-11-17) were added or
+rechecked on that date. A dead link is a defect worth fixing, not a reason to guess.
 
 ## Discovery and user needs
 
@@ -72,7 +73,8 @@ element supports.
 
 | Question | Source |
 |---|---|
-| What does a complete data table owe the operator? | [IBM Carbon data table](https://carbondesignsystem.com/components/data-table/usage/) |
+| What does a complete data table owe the operator? | [IBM Carbon data table](https://www.carbondesignsystem.com/building-blocks/core/components/data-table/guidelines) (2026-11-17) |
+| Which admin conventions does Shopify's design system define? | [Shopify Polaris](https://shopify.dev/docs/api/polaris), now web components; the React implementation is deprecated and its repository archived (2026-11-17) |
 | What is the required keyboard behavior for a grid? | [WAI-ARIA APG: grid pattern](https://www.w3.org/WAI/ARIA/apg/patterns/grid/) |
 | Which interaction pattern applies to this component? | [WAI-ARIA Authoring Practices](https://www.w3.org/WAI/ARIA/apg/patterns/) |
 | How do I mark up a complex table? | [W3C tables tutorial](https://www.w3.org/WAI/tutorials/tables/) |
@@ -101,8 +103,8 @@ in [verification.md](verification.md) are not optional extras.
 
 | Question | Source |
 |---|---|
-| What security requirements apply at this assurance level? | [OWASP ASVS](https://owasp.org/projects/ASVS/) |
-| What are the most common classes of failure? | [OWASP Top 10](https://owasp.org/www-project-top-ten/) |
+| What security requirements apply at this assurance level? | [OWASP ASVS](https://owasp.org/projects/ASVS/); in 5.0, chapter V6 is Authentication and V8 is Authorization ([5.0 source](https://github.com/OWASP/ASVS/tree/master/5.0/en), 2026-11-17) |
+| What are the most common classes of failure? | [OWASP Top 10:2025](https://top10.owasp.org/2025/) (2026-11-17) |
 | How should authorization be designed and enforced? | [OWASP Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) |
 | What should be logged, and what must never be? | [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) |
 | Which second factor is appropriate for privileged roles? | [OWASP MFA Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Multifactor_Authentication_Cheat_Sheet.html) |
@@ -189,9 +191,13 @@ Always read the version the project pins. These are the entry points, not the an
 
 | Stack | Entry point |
 |---|---|
-| Next.js App Router | [nextjs.org/docs/app](https://nextjs.org/docs/app); [Proxy](https://nextjs.org/docs/app/api-reference/file-conventions/proxy) (`middleware.ts` before v16) |
-| Laravel | [laravel.com/framework/docs](https://laravel.com/framework/docs) |
-| Django admin | [docs.djangoproject.com](https://docs.djangoproject.com/en/stable/ref/contrib/admin/) |
+| Next.js App Router | [nextjs.org/docs/app](https://nextjs.org/docs/app); [Proxy](https://nextjs.org/docs/app/api-reference/file-conventions/proxy) (`middleware.ts` before v16); [`cacheComponents`](https://nextjs.org/docs/app/api-reference/config/next-config-js/cacheComponents), [migrating to Cache Components](https://nextjs.org/docs/app/guides/migrating-to-cache-components), [`'use cache: private'`](https://nextjs.org/docs/app/api-reference/directives/use-cache-private) and [route groups](https://nextjs.org/docs/app/api-reference/file-conventions/route-groups) (2026-11-17) |
+| React Router framework mode | [Middleware](https://reactrouter.com/how-to/middleware); the 8.0.0 release removed the `future.v8_middleware` flag ([changelog](https://github.com/remix-run/react-router/releases/tag/react-router%408.0.0)) (2026-11-17). Remix 3 is a separate framework: [remix.run](https://remix.run/) |
+| Laravel | [laravel.com/framework/docs](https://laravel.com/framework/docs); CSRF by version: [13.x](https://laravel.com/docs/13.x/csrf), [12.x](https://laravel.com/docs/12.x/csrf), [11.x](https://laravel.com/docs/11.x/csrf), [10.x](https://laravel.com/docs/10.x/csrf) (2026-11-17); [Nova pricing](https://nova.laravel.com/) |
+| Django admin | [docs.djangoproject.com](https://docs.djangoproject.com/en/stable/ref/contrib/admin/); [Tasks](https://docs.djangoproject.com/en/stable/topics/tasks/) and the [6.1 release notes](https://docs.djangoproject.com/en/6.1/releases/6.1/) (`list_select_related = True` deprecated) (2026-11-17) |
+| Go | [`http.CrossOriginProtection`](https://pkg.go.dev/net/http#CrossOriginProtection), Go 1.25 and later (2026-11-17) |
+| .NET MediatR licence | [LICENSE.md](https://github.com/LuckyPennySoftware/MediatR/blob/main/LICENSE.md) (2026-11-17) |
+| Admin accelerator licences | [AdminJS releases](https://github.com/SoftwareBrothers/adminjs/releases), [Directus licence](https://github.com/directus/directus/blob/main/license), [Budibase licence](https://github.com/Budibase/budibase/blob/master/LICENSE) (2026-11-17) |
 | Ruby on Rails | [guides.rubyonrails.org](https://guides.rubyonrails.org/) |
 | NestJS | [docs.nestjs.com](https://docs.nestjs.com/) |
 | ASP.NET Core authorization | [learn.microsoft.com](https://learn.microsoft.com/en-us/aspnet/core/security/authorization/introduction) |

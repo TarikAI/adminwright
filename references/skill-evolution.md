@@ -25,14 +25,14 @@ The loop below is the only sanctioned path from experience to guidance.
 build/audit
 -> observation                     something the skill got wrong, omitted, or made expensive
 -> manifest feedback[]             add --kind feedback          (status: open)
--> cross-project store             harvest                      (~/.adminwright)
+-> cross-project store             harvest                      (~/.adminwright; entry -> promoted)
 -> promotion candidates            promote                      (bar applied across projects)
 -> lessons/NNNN-<slug>.md          lesson add                   (status: proposed)
 -> reference file edit             deliberate edit, states what it replaces
--> lessons/index.md adopted        + manifest feedback status: promoted
+-> lessons/index.md adopted        lesson adopt
 ```
 
-The `harvest` step is what makes the bar in section 4 answerable. "Seen on two or more
+The `harvest` step is what makes [the promotion bar](#the-promotion-bar) answerable. "Seen on two or more
 distinct projects" cannot be evaluated while each project's copy of the skill only knows
 about itself. `harvest` moves a finished project's `feedback[]` into a store outside every
 project — `$ADMINWRIGHT_HOME`, or `~/.adminwright` by default — where observations from every
@@ -94,7 +94,7 @@ Commands, and exactly what each writes:
 |---|---|---|
 | Record in the project | `add --manifest <path> --kind feedback --json '<obj>'` | one `feedback[]` entry in the project manifest, `status: open` |
 | Open a lesson in the skill | `lesson add --title <t> --category <c> --scope <ref> --trigger <s> --rule <s> [--evidence <path> ...]` | `lessons/NNNN-<slug>.md` with `status: proposed`, plus one row in `lessons/index.md` |
-| Collect across projects | `harvest --manifest <path> --date <YYYY-MM-DD>` | appends to `observations.jsonl` in the store; sets the harvested entries to `promoted` |
+| Collect across projects | `harvest --manifest <path> --date <YYYY-MM-DD>` | appends to `observations.jsonl` in the store; sets the harvested entries to `promoted` (which means harvested, not adopted). This is the only step that closes a project entry: an entry set to `promoted` by hand is skipped by `harvest` and never reaches the store |
 | Apply the bar | `promote [--min-projects 2] [--json]` | nothing; reports candidates and why each qualifies |
 | Sync across devices | `store sync --date <YYYY-MM-DD>` | commits, merges by id union, pushes to your private remote |
 | Share, opt-in | `promote --export <file>` | a sanitised bundle; sharing happens only when you open a pull request |
@@ -103,7 +103,6 @@ Commands, and exactly what each writes:
 | Adopt | edit of the one file named in `scope`, or in `Proposed edit` for an area scope | the guidance change |
 | Close the lesson | `lesson adopt <id> --by <reviewer> [--commit <sha>] [--date <YYYY-MM-DD>]` | `status: adopted` and one `Review notes` line naming the reviewer and where the edit is, with the index rebuilt from the files; refused until the edit has landed |
 | Reject the lesson | `lesson reject <id> --reason <reason> [--note <text>] [--date <YYYY-MM-DD>]` | `status: rejected`, `rejected-reason` and one `Review notes` line, with the index rebuilt |
-| Close the project entry | `set --manifest <path> --path 'feedback[fb-003].status' --value promoted` | the manifest entry |
 
 Invocation form:
 
@@ -152,7 +151,7 @@ what happened; a lesson is a claim about what the skill should say.
 
 ## Open a lesson
 
-Open a lesson only after the observation passes the test in section 6.
+Open a lesson only after the observation passes [Was it the skill or was it me?](#was-it-the-skill-or-was-it-me).
 
 Before opening, run `lesson list` and read the `rejected` and `adopted` entries. If your
 idea matches a rejected lesson, either add new evidence from a distinct project to that
@@ -253,7 +252,7 @@ If a fixture flips, one of two things is true and the adopting session must deci
 | Finding | Meaning | Action |
 |---|---|---|
 | A defect stopped being caught | the change removed a guarantee | scope it to a profile, or reject it |
-| An honest fixture started failing | the change blocks legitimate work | scope or reject; this is the regression-safety rule in section 9, made mechanical |
+| An honest fixture started failing | the change blocks legitimate work | scope or reject; this is the rule in [Regression safety and scoping](#regression-safety-and-scoping), made mechanical |
 | Behaviour changed and both are correct | the expectation was stale | update it in the same commit, with the reason in the message |
 
 Never re-record expectations to make the suite quiet. A silent `--update` is how a validator
@@ -284,7 +283,7 @@ stops validating. Details in [../evals/README.md](../evals/README.md).
 
 ## Consolidation pass
 
-Run before any release declaration, and at least every fifth build.
+This is maintenance of the skill itself, so it runs in a git checkout of the skill, by whoever maintains it: before tagging a skill release, and at least every fifth build. It is not part of a console release. A project's agents usually run an installed copy of the skill, which `lesson adopt` and `lesson reject` refuse to change, and a console release should not wait on link checks in the skill's references.
 
 1. `lesson list` and read every `proposed` entry.
 2. Merge duplicates. Same rule proposed twice becomes one lesson at the higher confidence;
@@ -331,8 +330,9 @@ Roles are defined in [multi-agent.md](multi-agent.md).
 | When | Who | What |
 |---|---|---|
 | End of each capability slice | `implementer` | capture observations into `feedback[]`; do not open lessons |
-| End of every build or audit | the `harvester` pass (`qa` when none is dispatched) | triage `feedback[]`, apply the test in section 6, run `harvest` and `promote`, open the lessons that pass |
-| Before any release declaration | `qa` | run the consolidation pass; no `feedback[]` entry left `open` and untriaged |
+| End of every build or audit | the `harvester` pass (`qa` when none is dispatched) | triage `feedback[]`, apply [Was it the skill or was it me?](#was-it-the-skill-or-was-it-me), run `harvest` and `promote`, open the lessons that pass |
+| Before any console release declaration | `qa` | no `feedback[]` entry left `open` and untriaged |
+| Before tagging a skill release | the skill's maintainer, in a git checkout of the skill | the [consolidation pass](#consolidation-pass) |
 | When the human confirms a rule in conversation | whoever heard it | `lesson add` immediately, confidence `confirmed`, quoting the confirmation |
 | Lessons scoped to [security-governance.md](security-governance.md) at `regulated` profile | `security` | review before adoption |
 | Single-agent operation | the agent | an explicitly declared final pass that re-reads the references and the `feedback[]` entries, rather than recalling them |
@@ -348,9 +348,12 @@ skill later learned something.
 
 - The **guidance level** is the highest adopted lesson id, recorded on the
   `Guidance level` line at the top of [../lessons/index.md](../lessons/index.md).
-- Every build records the level it was built under as a manifest decision:
-  `add --manifest <path> --kind decision --json '{"id":"d-guidance-level","decision":"built under guidance level 0007","reason":"skill version pin for audit","status":"confirmed","appliesTo":["*"]}'`
-  `"*"` in `appliesTo` means the whole manifest; it is the one value that is not an id.
+- Every build records the level it was built under as a manifest decision, where `<level>`
+  is the four-digit id on that `Guidance level` line when the build starts:
+  `add --manifest <path> --kind decision --json '{"id":"d-guidance-level","kind":"other","decision":"built under guidance level <level>","reason":"skill version pin for audit","status":"confirmed","appliesTo":["*"]}'`
+  It records a fact read from a file rather than a judgment, so it is the one decision an
+  agent writes as `confirmed` itself. `"*"` in `appliesTo` means the whole manifest; it is
+  the one value that is not an id.
 - When auditing an older console, read that decision first. A finding that exists only
   because of a lesson adopted after that level is reported as a `gaps[]` entry naming the
   lesson id, with severity taken from the rule's real risk. Report it as a delta against
