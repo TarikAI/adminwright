@@ -57,6 +57,22 @@ class TestProfileDecision(RoundTwoCase):
         self.assertIn("[profile-decision-missing]", out)
         self.assertEqual(acm.RULES["profile-decision-missing"], acm.STRICT_ONLY)
 
+    def set_profile_sentence(self, sentence):
+        for decision in self.data["decisions"]:
+            if decision["id"] == "dec.profile":
+                decision["decision"] = sentence
+
+    def test_the_profile_named_with_the_word_profile_wins(self):
+        # R-21: the first profile word in the sentence was taken as the profile.
+        self.set_profile_sentence("Not internal: run at the regulated profile")
+        self.assertNotIn("profile-decision-mismatch", self.findings())
+        self.set_profile_sentence("Run at the internal profile")
+        self.assertEqual(self.findings().get("profile-decision-mismatch"), "error")
+        self.set_profile_sentence("regulated or standard, to be decided")
+        self.assertEqual(self.findings().get("profile-decision-mismatch"), "error")
+        self.set_profile_sentence("Regulated: card data is in scope")
+        self.assertNotIn("profile-decision-mismatch", self.findings())
+
     def test_regulated_data_rules_out_the_internal_profile(self):
         self.data["platform"]["regulatedData"] = ["billing"]
         self.data["profile"] = "internal"
@@ -88,11 +104,15 @@ class TestRequiredGates(RoundTwoCase):
     def test_other_required_gates_need_a_not_applicable_decision(self):
         self.set_gate("typecheck", status="not-applicable", rationale="Ruby app", evidence=[])
         self.assertEqual(self.findings().get("gate-not-applicable-undecided"), "error")
-        self.data["decisions"].append({
+        decision = {
             "id": "dec.typecheck", "kind": "not-applicable", "decision": "No type checker",
             "reason": "Ruby without Sorbet", "evidence": [], "status": "confirmed",
             "appliesTo": ["typecheck"],
-        })
+        }
+        self.data["decisions"].append(decision)
+        # R-05: confirmed by whom? Without a person's name the waiver does not count.
+        self.assertEqual(self.findings().get("gate-not-applicable-undecided"), "error")
+        decision["confirmedBy"] = "Priya Shah, engineering lead"
         self.assertNotIn("gate-not-applicable-undecided", self.findings())
         self.assertNotIn("decision-applies-to-unknown", self.findings())
 
@@ -117,6 +137,23 @@ class TestProjectRoot(RoundTwoCase):
     def test_the_default_project_root_is_fine(self):
         (self.root / ".git").mkdir()
         self.assertNotIn("project-root-outside", self.findings())
+
+    def test_a_project_root_flag_that_does_not_hold_the_manifest_is_refused(self):
+        # R-07: evidence deleted here, copies in a sibling folder, --project-root there.
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        code, out, _err = run("validate", "--manifest", self.manifest, "--project-root",
+                              elsewhere, "--phase", "release")
+        self.assertEqual(code, 1)
+        self.assertIn("[project-root-outside]", out)
+
+    def test_a_project_root_outside_the_manifest_without_git_is_refused(self):
+        (self.tmp / "elsewhere").mkdir()
+        self.data["projectRoot"] = "../../elsewhere"
+        self.write(self.data)
+        code, out, _err = run("validate", "--manifest", self.manifest, "--phase", "release")
+        self.assertEqual(code, 1)
+        self.assertIn("[project-root-outside]", out)
 
 
 class TestHeadlessConsole(RoundTwoCase):

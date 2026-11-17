@@ -509,6 +509,10 @@ RULES = {
     "gate-evidence-missing": E3,
     "gate-rationale-missing": E3,
     "gap-unresolved": E3,
+    # A critical or high gap closed as `fixed` must cite the run that proves the fix,
+    # and one closed as `accepted` must name a human's confirmed risk-acceptance.
+    "gap-fix-unproven": E3,
+    "gap-acceptance-undecided": E3,
     "feedback-scope": W3,
     "unknown-field": QUALITY,
     "gap-rationale-missing": E3,
@@ -524,8 +528,13 @@ RULES = {
     "crosscutting-flag": E3,
     "decision-reason-missing": E3,
     "decision-applies-to-unknown": E3,
+    # Evidence that records its own run failing (`# exit code: 1`) proves the opposite.
+    "evidence-records-failure": E3,
     # quality tier: honest internal teams may carry these as warnings
     "crosscutting-evidence": QUALITY,
+    # MFA, a tamper-protected audit trail and tested keyboard and responsive flows
+    # may be waived with a recorded rationale at internal only.
+    "crosscutting-flag-waived": QUALITY,
     "authorization-policy-tests": QUALITY,
     "gate-evidence-path": QUALITY,
     "evidence-file-empty": QUALITY,
@@ -565,6 +574,9 @@ RULES = {
     "test-file-shared": STRICT_ONLY,
     "implementer-unrecorded": LATE,
     "not-applicable-undecided": STRICT_ONLY,
+    # A decision that waives a gate or accepts risk names who confirmed it, and that
+    # is not an agent of the build.
+    "decision-self-confirmed": STRICT_ONLY,
     # The write guard refuses `contested` without its gap at every profile, which is
     # what the agents' contest protocol says happens.
     "contested-needs-gap": E3,
@@ -572,7 +584,7 @@ RULES = {
     # round 2: monorepo and headless layouts
     "project-root-outside": E3,
     # round 2: not-applicable needs a decision about not-applicability
-    "gate-always-required": QUALITY,
+    "gate-always-required": E3,
     "gate-not-applicable-undecided": QUALITY,
     "profile-decision-mismatch": E3,
     "profile-decision-missing": STRICT_ONLY,
@@ -816,6 +828,10 @@ def is_headless(manifest):
     return not any("ui" in surface_of(cap) for cap in capabilities)
 
 
+# Test-file paths (`tests`, `policyTests`) are deliberately absent: a test's path
+# says what it tests, and honest names say mock or fake (`UserControllerMockMvcTest`,
+# `tenant-fake-clock.spec.ts`). Which data a capability shows is what dataBinding and
+# serverOperations say, and those are scanned hardest.
 SCANNED_CAPABILITY_FIELDS = (
     "dataBinding",
     "serverOperations",
@@ -823,9 +839,10 @@ SCANNED_CAPABILITY_FIELDS = (
     "auditEvents",
     "safeguards",
     "entrypoints",
-    "tests",
     "evidence",
 )
+# Descriptions of how a command behaves: scanned as prose, so Spanish 'todo' is a word.
+SCANNED_CAPABILITY_PROSE = ("idempotency", "recovery", "concurrency")
 
 
 # --------------------------------------------------------------------------
@@ -858,6 +875,10 @@ class Findings:
         self.manifest_digest = ""
         self.domain_terms = []
         self.static_allowed = frozenset()
+        # Resolved files a `#content` declaredStatic entry exempts, wherever cited.
+        self.static_files = frozenset()
+        # Gaps indexed once per validation (build_gap_index); None outside one.
+        self.gap_index = None
 
     def severity_for(self, rule):
         severity = RULES.get(rule, E3)[self._index]
@@ -1023,9 +1044,14 @@ def commit_manifest(path, manifest):
 
 
 def nonempty(value):
+    """Whether a field holds something. A list counts only if a member does:
+    `[""]` and `[" "]` are non-empty lists that name no operation, policy or event,
+    and they satisfied every "must not be empty" rule."""
     if isinstance(value, str):
         return bool(value.strip())
-    if isinstance(value, (list, dict)):
+    if isinstance(value, list):
+        return any(nonempty(item) for item in value)
+    if isinstance(value, dict):
         return bool(value)
     return value is not None
 
@@ -1543,34 +1569,58 @@ NON_EVIDENCE_NAMES = frozenset((
     "cargo.lock", "go.mod", "go.sum", "gemfile", "gemfile.lock", "composer.json", "composer.lock",
     "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "makefile", "dockerfile",
     "docker-compose.yml", "docker-compose.yaml", "compose.yaml", ".gitignore", ".editorconfig",
+))
+# A repository's own documents. In a folder that holds run output (evidence/security.md,
+# a written security review) the same name is a record, not the project's policy file.
+NON_EVIDENCE_DOC_NAMES = frozenset((
     "security.md", "code_of_conduct.md", "contributing.md", "agents.md", "claude.md", "gemini.md",
     "notice", "skill.md",
 ))
-NON_EVIDENCE_PREFIXES = (
-    "readme", "changelog", "license", "licence", "tsconfig.", ".eslintrc", ".prettierrc",
-    ".babelrc", ".env",
-)
+EVIDENCE_FOLDERS = frozenset(("evidence", "artifacts", "reports"))
+# Whole stems: 'license' refused evidence/license-check.log, a licence scan's output.
+NON_EVIDENCE_STEM = re.compile(r"^(?:readme|changelog|license|licence)(?:\.[a-z0-9]+)?$")
+NON_EVIDENCE_PREFIXES = ("tsconfig.", ".eslintrc", ".prettierrc", ".babelrc", ".env")
 CONFIG_FILE_PATTERN = re.compile(r"\.config\.(?:js|cjs|mjs|ts|cts|mts|json|ya?ml|toml)$|\.config$", re.I)
-# Source code is not the output of running it; a quality gate needs the run.
+# Version control and installed dependencies: present in every checkout, the output of no run.
+DEPENDENCY_FOLDERS = frozenset((
+    ".git", ".hg", ".svn", "node_modules", "bower_components", ".venv", "venv",
+    "site-packages", "__pycache__", ".tox",
+))
+# Source code is not the output of running it; a quality gate, a capability's proof
+# and a fixed gap's proof all need the run.
 SOURCE_SUFFIXES = frozenset((
     ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".py", ".rb", ".go", ".rs",
     ".java", ".kt", ".kts", ".cs", ".php", ".swift", ".scala", ".ex", ".exs", ".dart", ".vue",
     ".svelte", ".sql", ".groovy",
 ))
+RUN_OUTPUT_ROLES = ("gate", "capability-evidence", "gap-evidence")
 
 
-def non_evidence_reason(candidate, role):
-    """Why a cited file cannot be evidence for this role, or ''."""
+def non_evidence_reason(candidate, role, relative=None):
+    """Why a cited file cannot be evidence for this role, or ''.
+
+    `relative` is the path as the project cites it. Folders are judged on it, so a
+    checkout that happens to sit under ~/node_modules/ or ~/evidence/ is not judged
+    by where it lives.
+    """
     name = candidate.name.lower()
     normalised = str(candidate).replace("\\", "/").lower()
+    if relative:
+        folders = [part for part in relative.replace("\\", "/").lower().split("/")[:-1] if part]
+    else:
+        folders = [candidate.parent.name.lower()]
+    if any(part in DEPENDENCY_FOLDERS for part in folders):
+        return "a dependency or version-control file"
     if (
         name in NON_EVIDENCE_NAMES
+        or NON_EVIDENCE_STEM.match(name)
         or name.startswith(NON_EVIDENCE_PREFIXES)
         or CONFIG_FILE_PATTERN.search(name)
         or "/.github/workflows/" in normalised
+        or (name in NON_EVIDENCE_DOC_NAMES and not EVIDENCE_FOLDERS.intersection(folders))
     ):
         return "a project or configuration file"
-    if role == "gate" and candidate.suffix.lower() in SOURCE_SUFFIXES:
+    if role in RUN_OUTPUT_ROLES and candidate.suffix.lower() in SOURCE_SUFFIXES:
         return "source code"
     return ""
 
@@ -1667,11 +1717,16 @@ TEST_CAPABLE_PATTERN = re.compile(r"\.(?:" + _TEST_SOURCE_EXT + r"|ps1)$", re.I)
 NEVER_TEST_PATTERN = re.compile(
     r"(?:^|/)(?:conftest\.py|spec_helper\.rb|rails_helper\.rb|test_helper\.(?:rb|exs|php)"
     r"|TestCase\.php|setup(?:Tests)?\.[cm]?[jt]s|[\w.-]*\.config\.[cm]?[jt]s)$"
-    r"|(?:^|/)(?:__fixtures__|__mocks__|fixtures|helpers|support)/",
+    r"|(?:^|/)(?:__fixtures__|__mocks__|fixtures)/",   # inputs fed to tests, test-named or not
     re.I,
 )
+# Folders that hold what tests use, judged only for a file whose name is not a test's:
+# 'support' is also an admin domain, and tests/support/tickets.spec.ts is a test;
+# cypress/support/commands.ts is not.
+NEVER_TEST_DIR_PATTERN = re.compile(r"(?:^|/)(?:helpers|support)/", re.I)
 TEST_RUNNER_PATTERN = re.compile(
     r"(?<![\w.])(?:test|it|describe|suite|context|specify)\s*(?:\.\w+\s*)*\("   # jest/vitest/mocha/node:test/Pest
+    r"|\bDeno\.test\s*(?:\.\w+\s*)*\("                                          # Deno.test, Deno.test.ignore
     r"|\bdef\s+test_\w*|\bclass\s+Test\w*|@pytest\."
     r"|\bfunc\s+Test\w*\s*\(|\bfunc\s+test\w*\s*\("                           # Go, XCTest
     r"|#\[(?:[\w:]+::)?test\b|#\[rstest\b|#\[test_case\b"                     # Rust incl. tokio::test
@@ -1748,6 +1803,8 @@ def looks_like_test_file(candidate, body, relative=None):
     if not TEST_CAPABLE_PATTERN.search(name) or NEVER_TEST_PATTERN.search(name):
         return False
     named = bool(TEST_NAME_PATTERN.search(name))
+    if not named and NEVER_TEST_DIR_PATTERN.search(name):
+        return False
     in_test_dir = bool(TEST_DIR_PATTERN.search(name))
     strict = lowered.endswith(STRICT_TEST_SUFFIXES)
     if not body.strip():
@@ -1762,12 +1819,76 @@ def looks_like_test_file(candidate, body, relative=None):
     return named or in_test_dir or bool(WEAK_TEST_NAME_PATTERN.search(name))
 
 
+# What a specific record carries: a count, a route or ratio, a dotted or camelCase name.
+SPECIFIC_EVIDENCE = re.compile(r"\d|/|[A-Za-z]\.[A-Za-z]|[a-z][A-Z]")
+# An exit status is the attestation itself, not something the run found.
+EXIT_STATUS_WORDS = re.compile(r"\b(?:exit(?:ed)?(?:\s+(?:code|status))?|rc|status)\s*[:=]?\s*-?\d+\b", re.I)
+
+
 def is_uninformative(body):
-    """A single short line whose only content is a claim of success."""
+    """A single short line that claims success and names nothing the run found.
+
+    A vague word alone is not enough: 'axe-core 4.10: 0 violations across 14 admin
+    routes, checked at 320px' says 'checked' and is as specific as evidence gets.
+    """
     stripped = body.strip()
     if not stripped or "\n" in stripped or len(stripped) > 100:
         return False
-    return bool(VAGUE_EVIDENCE_WORDS.search(stripped))
+    if not VAGUE_EVIDENCE_WORDS.search(stripped):
+        return False
+    return not SPECIFIC_EVIDENCE.search(EXIT_STATUS_WORDS.sub(" ", stripped))
+
+
+def project_relative(candidate, project_root, raw):
+    """The cited file as a path inside the project, for judging its folders."""
+    try:
+        return candidate.resolve().relative_to(project_root.resolve()).as_posix()
+    except (ValueError, OSError, AttributeError):
+        return raw.split("#", 1)[0].strip().replace("\\", "/")
+
+
+def file_key(candidate):
+    """A resolved file's identity for set membership, case-folded where the OS folds case."""
+    try:
+        return os.path.normcase(str(candidate.resolve()))
+    except OSError:
+        return ""
+
+
+def content_exempt(entry_path, candidate, findings):
+    """Whether declaredStatic exempts this cited file's content from the placeholder scan.
+
+    Keyed by the file as well as by the citation: one log cited by four capabilities
+    and a gate needed five registrations, each with its own approver.
+    """
+    if (entry_path + "#content") in findings.static_allowed:
+        return True
+    return bool(findings.static_files) and file_key(candidate) in findings.static_files
+
+
+def static_content_files(manifest, allowed, project_root):
+    """The files whose content a `#content` registration exempts.
+
+    The registration names the file ('evidence/tests.log#content') or one citation of
+    it ('qualityGates[tests].evidence[0]#content'); either covers the file wherever it
+    is cited.
+    """
+    files = set()
+    for target in allowed:
+        if not target.endswith("#content"):
+            continue
+        base = target[: -len("#content")]
+        cited = value_at(manifest, base)
+        raw = cited if isinstance(cited, str) else base
+        if evidence_kind(raw) != "path":
+            continue
+        candidate = evidence_path(raw, project_root)
+        if candidate is None or escapes_root(candidate, project_root):
+            continue
+        key = file_key(candidate)
+        if key:
+            files.add(key)
+    return files
 
 
 def check_evidence_list(
@@ -1874,7 +1995,7 @@ def check_evidence_list(
             )
             continue
         if not expect_assertions:
-            reason = non_evidence_reason(candidate, role)
+            reason = non_evidence_reason(candidate, role, project_relative(candidate, project_root, raw))
             if reason:
                 findings.add(
                     "evidence-not-output",
@@ -1908,7 +2029,7 @@ def check_evidence_list(
                 continue
         else:
             hit = scan_file_placeholder(body, findings.domain_terms)
-            if hit and (entry_path + "#content") not in findings.static_allowed:
+            if hit and not content_exempt(entry_path, candidate, findings):
                 token, line = hit
                 findings.add(
                     "placeholder-scan",
@@ -1916,7 +2037,19 @@ def check_evidence_list(
                     "evidence file " + raw.strip() + " contains placeholder token '"
                     + token + "' at line " + str(line)
                     + "; replace it with real output, or register the file's content in "
-                    "declaredStatic[] with path '" + entry_path + "#content'",
+                    "declaredStatic[] with path '" + raw.split("#", 1)[0].strip() + "#content' "
+                    "(one entry covers every place that cites the file)",
+                )
+                continue
+            # The frame the capture recipe writes. A run that recorded its own failure
+            # proves the opposite of what it is cited for; a gate says so on its status.
+            codes = EXIT_FRAME_PATTERN.findall(body)
+            if role != "gate" and codes and codes[-1] != "0":
+                findings.add(
+                    "evidence-records-failure",
+                    entry_path,
+                    "'" + raw.strip() + "' records exit code " + codes[-1] + " for the command "
+                    "it ran; cite a passing run, or record the failure as a gap",
                 )
                 continue
             if is_uninformative(body):
@@ -1954,17 +2087,29 @@ GENERIC_TOKEN_WORDS = frozenset(
 )
 
 
+_TOKEN_IDENT = r"[A-Za-z_$][\w$-]*"
+SPECIFIC_TOKEN_PATTERN = re.compile(
+    # Service.method, ns::fn, Controller#action, Controller@action, App\Service, a path
+    r"^(?:(?:GET|POST|PUT|PATCH|DELETE)\s+)?/?(?:\(\*?" + _TOKEN_IDENT + r"\)|" + _TOKEN_IDENT + r")"
+    r"(?:(?:\.|::|#|@|/|\\)" + _TOKEN_IDENT + r")+/?$"
+    r"|^[A-Za-z_$]\w*(?:_\w+|[a-z0-9][A-Z]\w*)$"                  # snake_case or camelCase
+    r"|^[A-Za-z][\w:.-]*(?: [A-Za-z][\w:.-]*)+$"                  # a command of plain words
+)
+
+
 def specific_token(value):
     """A server operation or entrypoint specific enough to prove a test is about it.
 
     `serverOperations: ["expect"]` made every test that calls expect() match every
-    capability. Only qualified names count: Service.method, a path, ns::fn, snake or
-    camel case, a multi-word command.
+    capability, and so did `expect(res.status)` and `async () =>`, which only had to
+    hold punctuation. Only identifier-shaped names count: Service.method, a path,
+    ns::fn, snake or camel case, a command of plain words; nothing with parentheses,
+    quotes, `=>` or `=`.
     """
     text = value.strip()
     if len(text) < 6 or text.lower() in GENERIC_TOKEN_WORDS:
         return False
-    return bool(re.search(r"[./:#_\\ ]|[a-z][A-Z]", text))
+    return bool(SPECIFIC_TOKEN_PATTERN.match(text))
 
 
 def capability_named(capability, cid, body):
@@ -2019,21 +2164,21 @@ def scan_targets(manifest, release):
     for eid, entity in iter_entities(manifest):
         targets.append(("entities[" + eid + "].sourceOfTruth", entity.get("sourceOfTruth")))
     for path, _entity, capability in iter_capabilities(manifest):
-        for key in SCANNED_CAPABILITY_FIELDS:
+        for key in SCANNED_CAPABILITY_FIELDS + SCANNED_CAPABILITY_PROSE:
             targets.append((path + "." + key, capability.get(key)))
     for path, screen in iter_named(manifest, "screens"):
         targets.append((path + ".dataSources", screen.get("dataSources")))
-        targets.append((path + ".tests", screen.get("tests")))
     for path, integration in iter_named(manifest, "integrations"):
         targets.append((path + ".sourceOfTruth", integration.get("sourceOfTruth")))
+        targets.append((path + ".operations", integration.get("operations")))
+    for path, queue in iter_named(manifest, "workQueues"):
+        targets.append((path + ".source", queue.get("source")))
     for path, gate in iter_named(manifest, "qualityGates"):
         targets.append((path + ".evidence", gate.get("evidence")))
     cross = as_dict(manifest.get("crossCutting"))
     for section in CROSS_SECTIONS:
         values = as_dict(cross.get(section))
         targets.append(("crossCutting." + section + ".evidence", values.get("evidence")))
-    authorization = as_dict(cross.get("authorization"))
-    targets.append(("crossCutting.authorization.policyTests", authorization.get("policyTests")))
     return targets
 
 
@@ -2046,7 +2191,7 @@ FORBIDDEN_STATIC_FIELDS = frozenset(
     (
         "dataBinding", "sourceOfTruth", "serverOperations", "authorizationPolicies",
         "auditEvents", "tests", "evidence", "dataSources", "policyTests", "uiRoutes",
-        "entrypoints",
+        "entrypoints", "operations", "source",
     )
 )
 
@@ -2076,7 +2221,7 @@ def static_index(manifest, findings):
     allowed = set()
     caps = capability_index(manifest)
     agent_ids = {
-        text_of(agent.get("id")).lower() for _p, agent in iter_named(manifest, "agents")
+        identity_key(agent.get("id")) for _p, agent in iter_named(manifest, "agents")
     }
     for path, entry in iter_named(manifest, "declaredStatic"):
         target = text_of(entry.get("path"))
@@ -2107,13 +2252,13 @@ def static_index(manifest, findings):
                 "where data comes from or how it is proven, so it can never be declared static",
             )
             continue
-        approver = text_of(entry.get("approvedBy")).lower()
+        approver = identity_key(entry.get("approvedBy"))
         interested = set(agent_ids)
         covered = re.search(r"capabilities\[([^\]]+)\]", target)
         if covered and covered.group(1) in caps:
             capability = caps[covered.group(1)][2]
             for key in ("owner", "implementedBy", "reviewedBy"):
-                interested.add(text_of(capability.get(key)).lower())
+                interested.add(identity_key(capability.get(key)))
         interested.discard("")
         if approver in interested:
             findings.add(
@@ -2242,10 +2387,20 @@ def placeholder_match(text, terms=(), prose=False):
     for token in folded.split():
         if terms:
             token = without_domain_terms(split_identifiers(token), terms).replace(" ", "")
-        hit = substring_hit(token)
+        hit = substring_hit(token) or substring_hit(LEET_DIGIT.sub(unleet, token))
         if hit:
             return hit.group(0)
     return None
+
+
+# A digit standing in for a letter inside a word: 'M0ckTenantRepository', 'F4keService'.
+# Only between two letters, so 's3://', 'k8s', 'v1', 'ipv4' and version numbers are left alone.
+LEET_DIGIT = re.compile(r"(?<=[A-Za-z])[013457](?=[A-Za-z])")
+LEET_LETTERS = {"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t"}
+
+
+def unleet(match):
+    return LEET_LETTERS[match.group(0)]
 
 
 def fabrication_match(folded, terms=()):
@@ -2268,6 +2423,20 @@ def fabrication_match(folded, terms=()):
     return None
 
 
+# A line a test runner prints about one test: its id or title and its outcome. The
+# title is the test's name ('rejects a fake session token'), not data an operator sees,
+# and every verbose reporter prints it, so a gate log of an honest suite failed the scan.
+TEST_RESULT_LINE = re.compile(
+    r"::\S*\s+(?:PASSED|FAILED|SKIPPED|XFAIL|XPASS|ERROR)\b"                # pytest -v
+    r"|^\s*[✓✔✗✘×✕√○↓]\s"     # jest, vitest, mocha, playwright list
+    r"|^\s*(?:---|===)\s+(?:PASS|FAIL|SKIP|RUN|PAUSE|CONT|NAME):?\s+\S"     # go test -v
+    r"|^\s*(?:not\s+)?ok\s+\d+\b"                                          # TAP, node:test
+    r"|\s\.\.\.\s+(?:ok|FAIL|ERROR|skipped|expected failure)\b"           # unittest -v
+    r"|^\s*(?:PASS|FAIL)\s+\S"                                             # jest file header
+    r"|^\s*(?:Passed|Failed|Skipped)\s+\S.*\[\s*[\d.,]+\s*m?s\s*\]"        # dotnet test
+)
+
+
 def scan_file_placeholder(body, terms=()):
     """Return (token, line_number) for the first placeholder in an evidence file, else None.
 
@@ -2276,6 +2445,8 @@ def scan_file_placeholder(body, terms=()):
     Declared domain nouns ('TodoRepository: 12 passed') are vocabulary here too.
     """
     for number, line in enumerate(body.splitlines(), 1):
+        if TEST_RESULT_LINE.search(line):
+            continue
         cleaned = split_identifiers(FRAMEWORK_CALLS.sub(" ", mask_prose_todo(fold_confusables(line))))
         if terms:
             cleaned = without_domain_terms(cleaned, terms)
@@ -2289,6 +2460,7 @@ def run_placeholder_scan(manifest, findings, release):
     targets = scan_targets(manifest, release)
     allowed = findings.static_allowed
     known_paths = set()
+    cited_files = set()
     for field_path, value in targets:
         known_paths.add(field_path)
         if isinstance(value, str):
@@ -2301,6 +2473,8 @@ def run_placeholder_scan(manifest, findings, release):
             continue
         for entry_path, text in entries:
             known_paths.add(entry_path)
+            if final_field(entry_path) == "evidence":
+                cited_files.add(text.split("#", 1)[0].strip().replace("\\", "/"))
             if entry_path in allowed or field_path in allowed:
                 continue
             folded = fold_confusables(text)
@@ -2334,7 +2508,9 @@ def run_placeholder_scan(manifest, findings, release):
                 )
     for target in sorted(allowed):
         base = target[: -len("#content")] if target.endswith("#content") else target
-        if base not in known_paths:
+        if base not in known_paths and not (
+            target.endswith("#content") and base.replace("\\", "/") in cited_files
+        ):
             findings.add(
                 "declared-static-unused",
                 "declaredStatic",
@@ -2522,7 +2698,9 @@ def check_schema_types(value, schema, root, path, findings, unknown_field=False)
 
 
 def structural_findings(manifest, findings, release):
-    roles = [item for item in as_list(manifest.get("roles")) if isinstance(item, dict)]
+    if findings.gap_index is None:
+        findings.gap_index = build_gap_index(manifest)
+    roles =[item for item in as_list(manifest.get("roles")) if isinstance(item, dict)]
     role_ids = {text_of(role.get("id")) for role in roles if text_of(role.get("id"))}
     screens = [item for item in as_list(manifest.get("screens")) if isinstance(item, dict)]
     caps = capability_index(manifest)
@@ -2628,7 +2806,12 @@ def structural_findings(manifest, findings, release):
         entity_caps = [
             cap for cap in as_list(entity.get("capabilities")) if isinstance(cap, dict)
         ]
-        kinds = {cap.get("kind") for cap in entity_caps if isinstance(cap.get("kind"), str)}
+        # A not-applicable query was rejected from the catalog; it lets no operator
+        # observe anything, so it cannot be the entity's query.
+        kinds = {
+            cap.get("kind") for cap in entity_caps
+            if isinstance(cap.get("kind"), str) and cap.get("status") != "not-applicable"
+        }
         if "query" not in kinds:
             findings.add(
                 "entity-query-missing",
@@ -2685,7 +2868,7 @@ def structural_findings(manifest, findings, release):
                         "'" + value + "' is not one of the declared lifecycleStates",
                     )
         for position, state in enumerate(states):
-            if state not in observed and not lifecycle_escaped(manifest, entity, state):
+            if state not in observed and not lifecycle_escaped(manifest, entity, state, findings.gap_index):
                 findings.add(
                     "lifecycle-observable",
                     path + ".lifecycleStates",
@@ -2700,7 +2883,7 @@ def structural_findings(manifest, findings, release):
             if (
                 state not in reached
                 and state not in transition_targets
-                and not lifecycle_escaped(manifest, entity, state)
+                and not lifecycle_escaped(manifest, entity, state, findings.gap_index)
             ):
                 findings.add(
                     "lifecycle-reachable",
@@ -2771,7 +2954,64 @@ def structural_findings(manifest, findings, release):
                 )
 
 
-def lifecycle_escaped(manifest, entity, state):
+def gap_text(gap):
+    return text_of(gap.get("description")) + " " + text_of(gap.get("rationale"))
+
+
+def build_gap_index(manifest):
+    """Gaps read once per validation.
+
+    `blocking_gap_for`, `contested_gap_exists` and `lifecycle_escaped` each walked
+    every gap with a regex per capability or state: 400 capabilities and 1,500 OCR
+    gaps spent 1.8 s there alone. `by_capability` maps an id to the gaps (in manifest
+    order) that might name it -- its `capability` field, or an id-shaped run of the
+    text it could be a prefix of -- and the callers confirm with `names_capability`.
+    `escapes` holds the gaps a lifecycle escape can come from.
+    """
+    by_capability = {}
+    escapes = []
+    order = {}
+    for _path, gap in iter_named(manifest, "gaps"):
+        order[id(gap)] = len(order)
+        text = gap_text(gap)
+        lowered = text.lower()
+        candidates = set()
+        target = text_of(gap.get("capability"))
+        if target:
+            candidates.add(target)
+        for run in re.findall(r"(?<![\w.-])[\w.-]+", lowered):
+            for position, char in enumerate(run):
+                if char == ".":
+                    candidates.add(run[:position])
+            candidates.add(run.rstrip("."))
+        for cid in candidates:
+            by_capability.setdefault(cid, []).append((gap, text))
+        if gap.get("status") in ("open", "accepted") and text_of(gap.get("source")).lower() != "ocr":
+            escapes.append((gap, lowered))
+    return {"by_capability": by_capability, "escapes": escapes, "order": order}
+
+
+def gaps_naming(manifest, capability_id, index=None):
+    """(gap, text) pairs, in manifest order, whose `capability` or text names the id."""
+    if index is None:
+        pairs = [(gap, gap_text(gap)) for _path, gap in iter_named(manifest, "gaps")]
+    else:
+        # Text candidates are lower-cased, as names_capability compares them.
+        pairs = list(index["by_capability"].get(capability_id, ()))
+        if capability_id.lower() != capability_id:
+            seen = {id(gap) for gap, _text in pairs}
+            pairs.extend(
+                pair for pair in index["by_capability"].get(capability_id.lower(), ())
+                if id(pair[0]) not in seen
+            )
+            pairs.sort(key=lambda pair: index["order"][id(pair[0])])
+    return [
+        (gap, text) for gap, text in pairs
+        if text_of(gap.get("capability")) == capability_id or names_capability(text, capability_id)
+    ]
+
+
+def lifecycle_escaped(manifest, entity, state, index=None):
     """Whether a recorded gap explains why a lifecycle state has no operator path.
 
     A state entered only by an external system (a payment webhook, a device
@@ -2790,12 +3030,9 @@ def lifecycle_escaped(manifest, entity, state):
         if isinstance(cap, dict)
     }
     wanted = re.compile(r"(?<![a-z0-9])" + re.escape(state.lower()) + r"(?![a-z0-9])")
-    for _path, gap in iter_named(manifest, "gaps"):
-        if gap.get("status") not in ("open", "accepted"):
-            continue
-        if text_of(gap.get("source")).lower() == "ocr":
-            continue
-        text = (text_of(gap.get("description")) + " " + text_of(gap.get("rationale"))).lower()
+    if index is None:
+        index = build_gap_index(manifest)
+    for gap, text in index["escapes"]:
         if not wanted.search(text):
             continue
         gap_entity = text_of(gap.get("entity")).lower()
@@ -2861,7 +3098,11 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
         schema = load_schema()
         check_schema_types(manifest, schema, schema, "", findings, unknown_field=True)
         findings.static_allowed = frozenset(static_index(manifest, findings))
+        findings.static_files = frozenset(
+            static_content_files(manifest, findings.static_allowed, project_root)
+        )
         findings.domain_terms = domain_terms(manifest)
+        findings.gap_index = build_gap_index(manifest)
 
     version = manifest.get("manifestVersion")
     if version != MANIFEST_VERSION:
@@ -2884,6 +3125,7 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
         )
 
     check_project_root(manifest, findings)
+    check_effective_root(project_root, findings)
     validate_platform(manifest, findings, release)
     check_domain_terms(manifest, findings)
     for key in COLLECTION_KEYS:
@@ -2898,7 +3140,7 @@ def validate_manifest(manifest, phase, project_root, profile, manifest_dir=None)
     validate_queues_and_integrations(manifest, findings, release)
     validate_cross_cutting(manifest, findings, release, project_root)
     validate_gates(manifest, findings, release, project_root)
-    validate_decisions(manifest, findings, release)
+    validate_decisions(manifest, findings, release, project_root)
     check_profile_decision(manifest, findings)
     validate_gaps(manifest, findings, release)
     validate_agents(manifest, findings)
@@ -2968,6 +3210,53 @@ def check_project_root(manifest, findings):
             "'" + text + "' resolves outside the repository that holds the manifest (" + str(top)
             + "); evidence must live where reviewers of this repository can see it",
         )
+    elif not root_holds_manifest(resolved, findings):
+        # With no .git above the manifest (a fresh project, an exported tree, a CI
+        # cache) the repository check above cannot run, and '../../elsewhere' passed.
+        findings.add(
+            "project-root-outside",
+            "manifest.projectRoot",
+            "'" + text + "' resolves to " + str(resolved) + ", which does not contain the "
+            "manifest; the project root is the folder the manifest describes",
+        )
+
+
+def root_holds_manifest(root, findings):
+    """Whether the manifest (its file, else its folder) lies inside `root`.
+
+    Both documented layouts satisfy it without git: .admin-console/manifest.json under
+    the root, and apps/admin/console.json two levels below it.
+    """
+    location = findings.manifest_file if findings.manifest_file is not None else findings.manifest_dir
+    if location is None:
+        return True
+    try:
+        inner = os.path.normcase(str(Path(location).resolve()))
+        outer = os.path.normcase(str(Path(root).resolve()))
+    except OSError:
+        return True
+    return inner == outer or inner.startswith(outer.rstrip("\\/") + os.sep)
+
+
+def check_effective_root(project_root, findings):
+    """The root evidence actually resolves against must hold the manifest.
+
+    `validate --project-root <another folder>` resolved every evidence path there:
+    a repository whose evidence and tests were deleted passed release against a
+    sibling folder holding copies. The declared `projectRoot` was checked; the
+    override was not.
+    """
+    if project_root is None or any(
+        item["rule"] == "project-root-outside" for item in findings.items
+    ):
+        return
+    if not root_holds_manifest(project_root, findings):
+        findings.add(
+            "project-root-outside",
+            "projectRoot",
+            "evidence is being resolved against " + str(project_root) + ", which does not "
+            "contain the manifest; pass the project root the manifest belongs to",
+        )
 
 
 def validate_platform(manifest, findings, release):
@@ -2987,6 +3276,14 @@ def validate_platform(manifest, findings, release):
     if not check_required(platform, keys, "platform", findings):
         return
     check_nonempty(platform, ("name",), "platform", findings)
+    if "<" in text_of(platform.get("id")):
+        # The template's '<name>-<6 hex>', copied by hand and never filled in: every
+        # such console would count as one project in `harvest`.
+        findings.add(
+            "platform-id-missing",
+            "platform.id",
+            "is still the template's '" + text_of(platform.get("id")) + "'; " + PLATFORM_ID_HINT,
+        )
     for key in ("summary", "archetypes", "operationalObjectives"):
         if nonempty(platform.get(key)):
             continue
@@ -3159,7 +3456,7 @@ def validate_entities(manifest, findings, release, role_ids):
                     "an implemented capability must record who implemented it "
                     "(`claim --role implementer` stamps it), or review independence cannot be checked",
                 )
-        if capability.get("reviewStatus") == "contested" and not contested_gap_exists(manifest, cid):
+        if capability.get("reviewStatus") == "contested" and not contested_gap_exists(manifest, cid, findings.gap_index):
             findings.add(
                 "contested-needs-gap",
                 path + ".reviewStatus",
@@ -3167,7 +3464,7 @@ def validate_entities(manifest, findings, release, role_ids):
                 + "' (its `capability` field, or its id in the description), so the implementer "
                 "knows what to fix; file the gap first, then contest",
             )
-        blocking = blocking_gap_for(manifest, cid) if capability.get("reviewStatus") == "reviewed" else ""
+        blocking = blocking_gap_for(manifest, cid, findings.gap_index) if capability.get("reviewStatus") == "reviewed" else ""
         if blocking:
             # A review verdict and an open blocking finding cannot both stand. Filing
             # the gap is never refused for this (see VERDICT_FIELD_RULES); the reviewer
@@ -3182,7 +3479,7 @@ def validate_entities(manifest, findings, release, role_ids):
         if (
             capability.get("reviewStatus") == "reviewed"
             and contester
-            and contester.lower() == text_of(capability.get("reviewedBy")).lower()
+            and identity_key(contester) == identity_key(capability.get("reviewedBy"))
         ):
             findings.add(
                 "contest-self-cleared",
@@ -3284,6 +3581,7 @@ INTEGRATION_CONTENT = ("sourceOfTruth", "operations", "failureHandling")
 
 
 def validate_queues_and_integrations(manifest, findings, release):
+    decided = not_applicable_targets(manifest)
     for key in ("workQueues", "integrations"):
         required = QUEUE_REQUIRED if key == "workQueues" else INTEGRATION_REQUIRED
         content = QUEUE_CONTENT if key == "workQueues" else INTEGRATION_CONTENT
@@ -3300,6 +3598,16 @@ def validate_queues_and_integrations(manifest, findings, release):
                 findings.add("rationale-required", path + ".rationale", "status '" + str(status) + "' requires a recorded rationale")
             if key == "integrations":
                 check_enum(item.get("direction"), DIRECTIONS, path + ".direction", findings, "direction")
+            if status == "not-applicable" and text_of(item.get("id")) not in decided:
+                # Relabelling a built integration or queue dropped its tests and its
+                # integration-controls with a one-word rationale.
+                findings.add(
+                    "not-applicable-undecided",
+                    path + ".status",
+                    "a not-applicable " + ("work queue" if key == "workQueues" else "integration")
+                    + " needs a confirmed decision of kind 'not-applicable' whose appliesTo names '"
+                    + text_of(item.get("id")) + "'",
+                )
             if not release:
                 continue
             if status not in RESOLVED_STATUSES:
@@ -3310,6 +3618,17 @@ def validate_queues_and_integrations(manifest, findings, release):
                 )
             if status == "implemented" and not nonempty(item.get("tests")):
                 findings.add("required-field-empty", path + ".tests", "must not be empty for release")
+
+
+# The release flags a small internal tool may honestly not have: MFA, a tamper-protected
+# audit trail, and tested keyboard and responsive flows. At internal each may be waived
+# with a rationale in `crossCutting.<section>.notApplicable.<flag>` (a warning); at
+# standard and regulated the waiver is an error, so the flag stays required.
+WAIVABLE_FLAGS = {
+    "authentication": ("mfaForPrivilegedRoles",),
+    "audit": ("tamperProtected",),
+    "experience": ("keyboardCriticalFlowsTested", "responsiveCriticalFlowsTested"),
+}
 
 
 def validate_cross_cutting(manifest, findings, release, project_root):
@@ -3352,6 +3671,9 @@ def validate_cross_cutting(manifest, findings, release, project_root):
         required_true["data"].append("tenantIsolationTested")
     if any(cap.get("risk") in ("high", "critical") for cap in implemented):
         required_true["authentication"].append("stepUpForSensitiveActions")
+        required_true["safety"].append("highRiskApprovalOrStepUp")
+    if any(cap.get("kind") in ("job", "export") for cap in implemented):
+        required_true["safety"].append("bulkPreviewAndPartialFailure")
     if any(cap.get("kind") in MUTATING_KINDS for cap in implemented):
         required_true["audit"].append("capturesSafeBeforeAfter")
     if as_list(manifest.get("workQueues")) or as_list(manifest.get("integrations")) or any(
@@ -3364,13 +3686,20 @@ def validate_cross_cutting(manifest, findings, release, project_root):
         if not isinstance(values, dict):
             findings.add("manifest-type", "crossCutting." + section, "must be an object")
             continue
+        waivers = as_dict(values.get("notApplicable"))
         for key in keys:
-            if values.get(key) is not True:
+            if values.get(key) is True:
+                continue
+            flag_path = "crossCutting." + section + "." + key
+            if key in WAIVABLE_FLAGS.get(section, ()) and nonempty(waivers.get(key)):
                 findings.add(
-                    "crosscutting-flag",
-                    "crossCutting." + section + "." + key,
-                    "must be true for release",
+                    "crosscutting-flag-waived",
+                    flag_path,
+                    "is waived (" + flag_path.rsplit(".", 1)[0] + ".notApplicable." + key + "); "
+                    "a recorded rationale stands in for this flag only at profile internal",
                 )
+                continue
+            findings.add("crosscutting-flag", flag_path, "must be true for release")
         path = "crossCutting." + section + ".evidence"
         if headless and section == "experience" and not nonempty(values.get("evidence")):
             continue
@@ -3515,11 +3844,39 @@ def decision_kind(decision):
     return "profile" if text_of(decision.get("id")) == "dec.profile" else "other"
 
 
-def not_applicable_targets(manifest):
-    """Ids named by a CONFIRMED decision about not-applicability ('*' names nothing)."""
+# Decisions only a person may take: waiving a required gate or capability, accepting risk.
+HUMAN_DECISION_KINDS = ("not-applicable", "risk-acceptance")
+
+
+def confirmer_problem(manifest, decision):
+    """Why a decision's `confirmedBy` does not show a person confirmed it, or ''.
+
+    The validator cannot prove a human typed the name. What it can do is make an agent
+    write a false one rather than merely flip `status` to confirmed: the name must not
+    be a registered agent, or an owner, implementer or reviewer of what it covers.
+    """
+    confirmer = identity_key(decision.get("confirmedBy"))
+    if not confirmer:
+        return "records no confirmedBy"
+    interested = set(agent_roles(manifest))
+    caps = capability_index(manifest)
+    for value in as_list(decision.get("appliesTo")):
+        if isinstance(value, str) and value in caps:
+            for key in ("owner", "implementedBy", "reviewedBy"):
+                interested.add(identity_key(caps[value][2].get(key)))
+    interested.discard("")
+    if confirmer in interested:
+        return "names '" + text_of(decision.get("confirmedBy")) + "', an agent of this build"
+    return ""
+
+
+def human_decided(manifest, kind):
+    """Ids named by a confirmed decision of `kind` that a person confirmed ('*' names nothing)."""
     targets = set()
     for _path, decision in iter_named(manifest, "decisions"):
-        if decision.get("status") != "confirmed" or decision_kind(decision) != "not-applicable":
+        if decision.get("status") != "confirmed" or decision_kind(decision) != kind:
+            continue
+        if confirmer_problem(manifest, decision):
             continue
         targets.update(
             value for value in as_list(decision.get("appliesTo"))
@@ -3528,7 +3885,31 @@ def not_applicable_targets(manifest):
     return targets
 
 
+def not_applicable_targets(manifest):
+    """Ids named by a CONFIRMED decision about not-applicability, confirmed by a person."""
+    return human_decided(manifest, "not-applicable")
+
+
 PROFILE_WORD = re.compile(r"\b(internal|standard|regulated)\b", re.I)
+# 'the regulated profile', 'profile: regulated'. Preferred over a bare word, so "Not
+# internal: run at the regulated profile" names regulated, not internal.
+PROFILE_PHRASE = re.compile(
+    r"\b(internal|standard|regulated)\s+profile\b|\bprofile\s*[:=]?\s*(internal|standard|regulated)\b",
+    re.I,
+)
+
+
+def named_profile(text):
+    """The one profile a decision sentence names, or None when it names none or several."""
+    phrased = {
+        (match.group(1) or match.group(2)).lower() for match in PROFILE_PHRASE.finditer(text)
+    }
+    if len(phrased) == 1:
+        return phrased.pop()
+    if phrased:
+        return None
+    bare = {match.group(1).lower() for match in PROFILE_WORD.finditer(text)}
+    return bare.pop() if len(bare) == 1 else None
 
 
 def check_profile_decision(manifest, findings):
@@ -3552,13 +3933,13 @@ def check_profile_decision(manifest, findings):
             "choosing a profile is a recorded decision (kind 'profile')",
         )
     for path, decision in live:
-        named = PROFILE_WORD.search(text_of(decision.get("decision")))
-        if not named or named.group(1).lower() != declared:
+        if named_profile(text_of(decision.get("decision"))) != declared:
             findings.add(
                 "profile-decision-mismatch",
                 path + ".decision",
                 "the profile decision says '" + text_of(decision.get("decision")) + "' but the "
-                "manifest profile is '" + declared + "'; change both together (`set --path profile` "
+                "manifest profile is '" + declared + "' (a sentence naming several profiles must "
+                "say which with '<profile> profile'); change both together (`set --path profile` "
                 "updates the decision and marks it assumed until the owner confirms it)",
             )
     if declared == "internal" and as_list(as_dict(manifest.get("platform")).get("regulatedData")):
@@ -3570,7 +3951,7 @@ def check_profile_decision(manifest, findings):
         )
 
 
-def validate_decisions(manifest, findings, release):
+def validate_decisions(manifest, findings, release, project_root=None):
     caps = capability_index(manifest)
     known = set(caps)
     for key in ("screens", "entities", "workQueues", "integrations", "roles", "gaps", "qualityGates"):
@@ -3602,9 +3983,41 @@ def validate_decisions(manifest, findings, release):
                 path + ".status",
                 "is still assumed at release; confirm it with the owner or record it as a gap",
             )
+        if decision.get("status") == "confirmed" and decision_kind(decision) in HUMAN_DECISION_KINDS:
+            problem = confirmer_problem(manifest, decision)
+            if problem:
+                findings.add(
+                    "decision-self-confirmed",
+                    path + ".confirmedBy",
+                    "a confirmed '" + decision_kind(decision) + "' decision " + problem + "; "
+                    "only a person waives a gate or accepts risk. Record who confirmed it "
+                    "(name, role) after asking them, or leave the decision assumed",
+                )
+        if release:
+            check_decision_evidence(decision, path, findings, project_root)
+
+
+def check_decision_evidence(decision, path, findings, project_root):
+    """A file a decision cites must exist; `[]` stays allowed (a decision may rest on a conversation)."""
+    if project_root is None:
+        return
+    for index, raw in enumerate(str_items(decision.get("evidence"))):
+        if evidence_kind(raw) != "path":
+            continue
+        candidate = evidence_path(raw, project_root)
+        if candidate is None:
+            continue
+        entry_path = path + ".evidence[" + str(index) + "]"
+        if escapes_root(candidate, project_root):
+            findings.add("evidence-path-missing", entry_path,
+                         "evidence path resolves outside the project: " + raw.strip())
+        elif path_state(candidate) == "missing":
+            findings.add("evidence-path-missing", entry_path,
+                         "evidence path does not exist: " + raw.strip())
 
 
 def validate_gaps(manifest, findings, release):
+    accepted = human_decided(manifest, "risk-acceptance") if release else set()
     for path, gap in iter_named(manifest, "gaps"):
         check_required(gap, ("id", "severity", "description", "status", "rationale", "evidence"), path, findings)
         check_enum(gap.get("severity"), GAP_SEVERITIES, path + ".severity", findings, "severity")
@@ -3616,6 +4029,22 @@ def validate_gaps(manifest, findings, release):
                 "gap-unresolved",
                 path + ".status",
                 "unresolved " + str(gap.get("severity")) + " gap blocks release",
+            )
+        if (
+            release
+            and gap.get("severity") in ("critical", "high")
+            and gap.get("status") == "accepted"
+            and text_of(gap.get("id")) not in accepted
+        ):
+            # Only a person accepts risk. Without this any agent turned a
+            # release-blocking finding into a pass with `set status accepted`.
+            findings.add(
+                "gap-acceptance-undecided",
+                path + ".status",
+                "an accepted " + str(gap.get("severity")) + " gap needs a confirmed decision of "
+                "kind 'risk-acceptance' whose appliesTo names '" + text_of(gap.get("id"))
+                + "' and whose confirmedBy names the person who accepted it; an agent proposes "
+                "the acceptance and leaves the gap open for them",
             )
     for path, item in iter_named(manifest, "feedback"):
         check_required(item, ("id", "observation", "category", "proposedChange", "evidence", "status"), path, findings)
@@ -3666,34 +4095,47 @@ def names_capability(text, capability_id):
     ) is not None
 
 
-def blocking_gap_for(manifest, capability_id):
+def blocking_gap_for(manifest, capability_id, index=None):
     """The id of an open or blocked critical/high gap that targets this capability, or ''."""
     if not capability_id:
         return ""
-    for _path, gap in iter_named(manifest, "gaps"):
-        if gap.get("status") not in ("open", "blocked") or gap.get("severity") not in ("critical", "high"):
-            continue
-        if text_of(gap.get("capability")) == capability_id or names_capability(
-            text_of(gap.get("description")) + " " + text_of(gap.get("rationale")), capability_id
-        ):
+    for gap, _text in gaps_naming(manifest, capability_id, index):
+        if gap.get("status") in ("open", "blocked") and gap.get("severity") in ("critical", "high"):
             return text_of(gap.get("id")) or "(a gap with no id)"
     return ""
 
 
-def contested_gap_exists(manifest, capability_id):
+def contested_gap_exists(manifest, capability_id, index=None):
     """An open or blocked gap that names the capability a reviewer contested."""
-    for _path, gap in iter_named(manifest, "gaps"):
-        if gap.get("status") not in ("open", "blocked"):
-            continue
-        if text_of(gap.get("capability")) == capability_id:
-            return True
-        if names_capability(text_of(gap.get("description")) + " " + text_of(gap.get("rationale")), capability_id):
-            return True
-    return False
+    return any(
+        gap.get("status") in ("open", "blocked")
+        for gap, _text in gaps_naming(manifest, capability_id, index)
+    )
+
+
+def identity_key(value):
+    """An id as a reader sees it, for comparing who did what.
+
+    `strip().lower()` let 'impl\\u200b' (a zero-width space), 'іmpl' (a Cyrillic і) and
+    'impl.' review impl's own work. The same fold as the placeholder scan, applied to
+    every script, plus case and the punctuation at either end.
+    """
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"^[\W_]+|[\W_]+$", "", fold_token(value)).casefold()
+
+
+def agent_roles(manifest):
+    """identity key -> role, for every registered agent."""
+    return {
+        identity_key(agent.get("id")): text_of(agent.get("role"))
+        for _path, agent in iter_named(manifest, "agents")
+        if identity_key(agent.get("id"))
+    }
 
 
 def implementer_ids(manifest, capability):
-    """Every id that built or held this capability, lowercased.
+    """Every id that built or held this capability, as identity keys.
 
     `owner` alone is not enough: release-claim (step 5 of every implementer's
     exit protocol) blanks it, after which "who implemented this" was recorded
@@ -3707,7 +4149,7 @@ def implementer_ids(manifest, capability):
         held = as_list(agent.get("ownsCapabilities")) + as_list(agent.get("previouslyOwned"))
         if cid and cid in held:
             names.add(text_of(agent.get("id")))
-    return {name.lower() for name in names if name}
+    return {identity_key(name) for name in names if identity_key(name)}
 
 
 def check_reviewer_identity(manifest, capability, path, findings):
@@ -3728,13 +4170,25 @@ def check_reviewer_identity(manifest, capability, path, findings):
             "an unattributed review cannot be distinguished from self-review",
         )
         return
-    if reviewer.lower() in implementer_ids(manifest, capability):
+    if identity_key(reviewer) in implementer_ids(manifest, capability):
         findings.add(
             "reviewer-identity",
             path + ".reviewedBy",
             "reviewer '" + reviewer + "' is the implementer (owner, implementedBy, or an "
             "implementer that held this capability); review must be a separate pass "
             "by a different agent",
+        )
+        return
+    # Once the build registers its agents, a review is one of theirs: any other string
+    # that is not the implementer's id would otherwise count as an independent review.
+    roles = agent_roles(manifest)
+    if roles and roles.get(identity_key(reviewer)) not in REVIEWER_ROLES:
+        findings.add(
+            "reviewer-identity",
+            path + ".reviewedBy",
+            "reviewer '" + reviewer + "' is not a registered agent with a reviewer role ("
+            + ", ".join(REVIEWER_ROLES) + "); the reviewer claims the capability "
+            "(`claim --role qa`) before recording the review",
         )
 
 
@@ -3787,17 +4241,23 @@ def validate_evidence(manifest, findings, project_root):
         # but unrelated test file forever.
         if findings.severity_for("evidence-token-match") == OFF:
             continue
-        screen_tokens = {
-            token
-            for token in (text_of(screen.get("id")), text_of(screen.get("route")))
-            if token
-        }
-        if not screen_tokens or not screen_tests:
+        # The id as a word and the route only when it is specific: route '/' was
+        # "named" by any test with a slash in it, an import included.
+        screen_patterns = []
+        screen_id = text_of(screen.get("id")).lower()
+        if screen_id:
+            screen_patterns.append(
+                re.compile(r"(?<![a-z0-9])" + re.escape(screen_id) + r"(?![a-z0-9])")
+            )
+        route = text_of(screen.get("route")).lower()
+        if len(route) >= 4:
+            screen_patterns.append(re.compile(re.escape(route)))
+        if not screen_patterns or not screen_tests:
             continue
         if not any(
-            token.lower() in strip_comments(read_head(candidate)).lower()
+            pattern.search(strip_comments(read_head(candidate)).lower())
             for candidate in screen_tests
-            for token in screen_tokens
+            for pattern in screen_patterns
         ):
             findings.add(
                 "evidence-token-match",
@@ -3831,6 +4291,18 @@ def validate_evidence(manifest, findings, project_root):
                         )
                     )
                 ]
+            if gap.get("severity") in ("critical", "high") and not nonempty(entries):
+                # gap-unresolved clears on `fixed`, and an empty list has no entry to
+                # fail to resolve, so a critical finding closed with no proof at all.
+                findings.add(
+                    "gap-fix-unproven",
+                    path + ".evidence",
+                    "a " + str(gap.get("severity")) + " gap marked fixed must cite the run that "
+                    "proves the fix (a test log or a re-run of the check that found it)"
+                    + ("; the OCR review record is where the finding came from, not proof"
+                       if text_of(gap.get("source")).lower() == "ocr" else ""),
+                )
+                continue
             check_evidence_list(
                 entries, path + ".evidence", findings, project_root, True,
                 role="gap-evidence", owner=text_of(gap.get("id")),

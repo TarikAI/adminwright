@@ -11,6 +11,7 @@ was reproduced at `--profile regulated` with exit 0 and zero warnings.
 
 import json
 import unittest
+from pathlib import Path
 
 from cli_helpers import TempProject, acm, run
 
@@ -44,6 +45,30 @@ class ReleaseGateCase(TempProject):
         path = self.root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
+
+    def add_command(self, cid="user.suspend", kind="command", risk="high"):
+        """A second, honest, implemented capability that mutates."""
+        self.write_file(
+            "tests/" + cid + ".spec.ts",
+            "test('" + cid + " suspends an account', async () => {\n"
+            "  expect((await suspendUser('u-1')).status).toBe('suspended');\n"
+            "});\n")
+        capability = {
+            "id": cid, "outcome": "Suspend an account", "kind": kind, "roles": ["ops"],
+            "risk": risk, "status": "implemented", "rationale": "",
+            "entityStates": {"from": ["active"], "to": ["active"]},
+            "uiRoutes": ["/admin/users"], "serverOperations": ["UserService.suspend"],
+            "authorizationPolicies": ["policy/user.suspend"], "auditEvents": ["user.suspended"],
+            "safeguards": ["reason capture"], "recovery": "user.restore reverses it",
+            "idempotency": "state-conditional; a repeat is a no-op",
+            "dataBinding": "postgres:users via UserService.suspend",
+            "tests": ["tests/" + cid + ".spec.ts"], "evidence": ["evidence/tests.log"],
+            "owner": "impl", "implementedBy": "impl", "reviewStatus": "reviewed",
+            "reviewedBy": "qa",
+        }
+        self.data["entities"][0]["capabilities"].append(capability)
+        self.data["screens"][0]["capabilities"].append(cid)
+        return capability
 
 
 class TestBaseline(ReleaseGateCase):
@@ -468,9 +493,13 @@ class TestSelfReview(ReleaseGateCase):
         self.blank_review()
         self.cli("claim", "--agent", "a1", "--role", "implementer", "--capability", "user.list")
         self.cli("release-claim", "--agent", "a1")
+        # Once agents are registered the reviewer is one of them (R-06): it claims first.
+        code, _o, err = self.cli("claim", "--agent", "a2", "--role", "qa", "--capability", "user.list")
+        self.assertEqual(code, 0, err)
         self.cli("set", "--path", CAP + ".reviewedBy", "--value", "a2")
         code, _o, err = self.cli("set", "--path", CAP + ".reviewStatus", "--value", "reviewed")
         self.assertEqual(code, 0, err)
+        self.cli("release-claim", "--agent", "a2")
         code, out, err = self.validate()
         self.assertEqual(code, 0, out + err)
 
@@ -597,11 +626,23 @@ class TestNotApplicableRelabel(ReleaseGateCase):
         self.data["decisions"].append({
             "id": "dec.purge", "kind": "not-applicable", "decision": "No purge command",
             "reason": "legal hold", "evidence": [], "status": "confirmed",
-            "appliesTo": ["user.purge"],
+            "appliesTo": ["user.purge"], "confirmedBy": "Dana Reyes, legal counsel",
         })
         self.save()
         code, out, err = self.validate()
         self.assertEqual(code, 0, out + err)
+
+    def test_a_decision_nobody_is_recorded_as_confirming_is_not_enough(self):
+        # R-05: `status: confirmed` alone is what any agent can write.
+        self.add_command()
+        self.data["decisions"].append({
+            "id": "dec.purge", "kind": "not-applicable", "decision": "No purge command",
+            "reason": "legal hold", "evidence": [], "status": "confirmed",
+            "appliesTo": ["user.purge"],
+        })
+        errors = self.errors("regulated")
+        self.assertIn("not-applicable-undecided", errors)
+        self.assertIn("decision-self-confirmed", errors)
 
     def test_a_decision_about_something_else_is_not_enough(self):
         # The critic's reproduction: the fixture's own profile decision named the
@@ -694,6 +735,412 @@ class TestLifecycleEscape(ReleaseGateCase):
         for status in ("fixed", "blocked"):
             self.gap(description="user quarantined by webhook", status=status)
             self.assertIn("lifecycle-observable", self.rule_names("standard"), status)
+
+
+class TestFixedGapNeedsProof(ReleaseGateCase):
+    """R-01 -- a critical gap closed as fixed must cite the run that proves the fix."""
+
+    def add_gap(self, **fields):
+        gap = {"id": "gap.authz", "severity": "critical", "capability": "user.list",
+               "description": "user.list skips the tenant scope check", "status": "fixed",
+               "rationale": "", "evidence": []}
+        gap.update(fields)
+        self.data["gaps"] = [gap]
+
+    def test_fixed_critical_gap_without_evidence_blocks_release(self):
+        self.add_gap()
+        for profile in PROFILES:
+            self.assertIn("gap-fix-unproven", self.errors(profile), profile)
+
+    def test_an_ocr_gap_whose_only_evidence_is_its_own_record_is_unproven(self):
+        (self.manifest.parent / "ocr-record-1.json").write_text('{"finding": "x"}', encoding="utf-8")
+        self.add_gap(source="ocr", evidence=[".admin-console/ocr-record-1.json"])
+        self.assertIn("gap-fix-unproven", self.errors("internal"))
+        self.assertIn("gap-fix-unproven", self.errors("regulated"))
+
+    def test_a_fixed_gap_citing_a_passing_run_passes(self):
+        self.add_gap(evidence=["evidence/tests.log"])
+        self.assertEqual(self.errors("regulated"), set())
+
+    def test_a_low_fixed_gap_needs_no_proof(self):
+        self.add_gap(severity="low")
+        self.assertNotIn("gap-fix-unproven", self.rule_names("regulated"))
+
+
+class TestAcceptedGapNeedsAPerson(ReleaseGateCase):
+    """R-02 -- only a person accepts a critical or high risk."""
+
+    def add_gap(self, severity="critical"):
+        self.data["gaps"] = [{
+            "id": "gap.authz", "severity": severity,
+            "description": "Support operators can list any tenant's users",
+            "status": "accepted", "rationale": "ship it", "evidence": [],
+        }]
+
+    def accept(self, **fields):
+        decision = {
+            "id": "dec.accept-authz", "kind": "risk-acceptance",
+            "decision": "Accept gap.authz until the March release",
+            "reason": "compensating control: nightly access review", "evidence": [],
+            "status": "confirmed", "appliesTo": ["gap.authz"],
+            "confirmedBy": "Dana Reyes, Head of Operations, 2026-11-17",
+        }
+        decision.update(fields)
+        self.data["decisions"].append(decision)
+
+    def test_accepted_critical_gap_without_decision_blocks_release(self):
+        self.add_gap()
+        for profile in PROFILES:
+            self.assertIn("gap-acceptance-undecided", self.errors(profile), profile)
+
+    def test_a_confirmed_risk_acceptance_naming_the_gap_clears_it(self):
+        self.add_gap()
+        self.accept()
+        self.assertEqual(self.errors("regulated"), set())
+
+    def test_an_unconfirmed_or_unattributed_decision_does_not_count(self):
+        self.add_gap()
+        for fields in ({"status": "assumed"}, {"confirmedBy": ""}, {"kind": "other"},
+                       {"appliesTo": ["*"]}):
+            self.data["decisions"] = [d for d in self.data["decisions"] if d["id"] != "dec.accept-authz"]
+            self.accept(**fields)
+            self.assertIn("gap-acceptance-undecided", self.errors("internal"), fields)
+
+    def test_an_agent_cannot_be_the_person_who_accepted(self):
+        self.add_gap()
+        self.data["agents"] = [{"id": "sec-1", "role": "security", "ownsCapabilities": [],
+                                "ownsScreens": [], "status": "done"}]
+        self.accept(confirmedBy="SEC-1​")
+        self.assertIn("gap-acceptance-undecided", self.errors("internal"))
+        self.assertIn("decision-self-confirmed", self.errors("regulated"))
+
+    def test_a_high_gap_counts_and_a_low_gap_needs_only_its_rationale(self):
+        self.add_gap("high")
+        self.assertIn("gap-acceptance-undecided", self.errors("internal"))
+        self.add_gap("low")
+        self.assertNotIn("gap-acceptance-undecided", self.rule_names("regulated"))
+
+
+class TestBlankListMembers(ReleaseGateCase):
+    """R-03 -- a list of blank strings is as empty as an empty list."""
+
+    def test_the_command_is_honest_to_begin_with(self):
+        self.add_command()
+        self.assertEqual(self.errors("regulated"), set())
+
+    def test_blank_members_raise_the_rule_an_empty_list_raises(self):
+        command = self.add_command()
+        cases = (
+            ("serverOperations", "required-field-empty"),
+            ("authorizationPolicies", "required-field-empty"),
+            ("auditEvents", "audit-events-missing"),
+            ("safeguards", "high-risk-controls"),
+        )
+        for key, rule in cases:
+            original = command[key]
+            for blank in ([], [""], ["  "]):
+                command[key] = blank
+                self.assertIn(rule, self.errors("internal"), "%s = %r" % (key, blank))
+            command[key] = original
+
+    def test_blank_separation_of_duties_is_none(self):
+        self.add_command(risk="critical")
+        self.data["roles"][0]["separationOfDuties"] = [""]
+        self.assertIn("separation-of-duties", self.errors("regulated"))
+        self.data["roles"][0]["separationOfDuties"] = ["user.suspend"]
+        self.assertNotIn("separation-of-duties", self.rule_names("regulated"))
+
+
+class TestNotApplicableIsNoQueryAndNeedsADecision(ReleaseGateCase):
+    """R-04 -- not-applicable is not a query, and is not free for integrations and queues."""
+
+    def test_an_entity_whose_only_query_is_not_applicable_has_no_query(self):
+        self.cap.update({"status": "not-applicable", "rationale": "n/a", "tests": [],
+                         "evidence": [], "reviewStatus": "unreviewed", "reviewedBy": ""})
+        self.assertIn("entity-query-missing", self.errors("standard"))
+
+    def integration(self):
+        self.data["integrations"] = [{
+            "id": "stripe", "direction": "outbound", "sourceOfTruth": "Stripe for billing",
+            "operations": ["cancel subscription"], "failureHandling": "retry with backoff",
+            "reconciliation": "", "monitoring": "", "status": "not-applicable",
+            "rationale": "n/a", "tests": [], "roles": ["ops"],
+        }]
+
+    def queue(self):
+        self.data["workQueues"] = [{
+            "id": "refunds", "purpose": "Review refunds", "roles": ["ops"],
+            "source": "postgres:refunds where status = pending", "priorityRule": "oldest first",
+            "sla": "4h", "actions": ["approve"], "status": "not-applicable", "rationale": "n/a",
+            "tests": [],
+        }]
+
+    def test_a_not_applicable_integration_or_queue_needs_a_decision(self):
+        for build, cid in ((self.integration, "stripe"), (self.queue, "refunds")):
+            build()
+            self.assertIn("not-applicable-undecided", self.errors("regulated"), cid)
+            self.data["decisions"].append({
+                "id": "dec." + cid, "kind": "not-applicable", "decision": "Not part of this console",
+                "reason": "the vendor console covers it", "evidence": [], "status": "confirmed",
+                "appliesTo": [cid], "confirmedBy": "Sam Okafor, product owner",
+            })
+            self.assertNotIn("not-applicable-undecided", self.rule_names("regulated"), cid)
+            self.data["integrations"] = []
+            self.data["workQueues"] = []
+
+
+class TestDecisionsNameWhoConfirmed(ReleaseGateCase):
+    """R-05 -- a waiver needs a person's name, not only `status: confirmed`."""
+
+    WAIVED = ("build", "typecheck", "lint", "browser")
+
+    def waive(self, **fields):
+        for gate in self.data["qualityGates"]:
+            if gate["id"] in self.WAIVED:
+                gate.update({"status": "not-applicable", "evidence": [], "rationale": "not needed"})
+        decision = {"id": "dec.skip", "kind": "not-applicable",
+                    "decision": "skip build, typecheck, lint and browser", "reason": "agent decided",
+                    "evidence": [], "status": "confirmed", "appliesTo": list(self.WAIVED)}
+        decision.update(fields)
+        self.data["decisions"].append(decision)
+
+    def test_a_self_confirmed_waiver_is_refused(self):
+        self.waive()
+        errors = self.errors("regulated")
+        self.assertIn("decision-self-confirmed", errors)
+        self.assertIn("gate-not-applicable-undecided", errors)
+
+    def test_an_agent_named_as_confirmer_is_refused_even_disguised(self):
+        self.data["agents"] = [{"id": "arch-1", "role": "architect", "ownsCapabilities": [],
+                                "ownsScreens": [], "status": "done"}]
+        for name in ("arch-1", "Arch-1.", "arch​-1"):
+            self.data["decisions"] = [d for d in self.data["decisions"] if d["id"] != "dec.skip"]
+            self.waive(confirmedBy=name)
+            self.assertIn("decision-self-confirmed", self.errors("regulated"), repr(name))
+            self.assertIn("gate-not-applicable-undecided", self.errors("regulated"), repr(name))
+
+    def test_the_implementer_of_a_covered_capability_cannot_confirm(self):
+        self.waive(confirmedBy="impl", appliesTo=list(self.WAIVED) + ["user.list"])
+        self.assertIn("decision-self-confirmed", self.errors("regulated"))
+
+    def test_a_named_person_clears_it(self):
+        self.waive(confirmedBy="product-owner")
+        names = self.rule_names("regulated")
+        self.assertNotIn("decision-self-confirmed", names)
+        self.assertNotIn("gate-not-applicable-undecided", names)
+
+    def test_a_file_a_decision_cites_must_exist(self):
+        self.waive(confirmedBy="product-owner", evidence=["evidence/waiver-email.md"])
+        self.assertIn("evidence-path-missing", self.errors("internal"))
+        self.write_file("evidence/waiver-email.md", "From the product owner, 2026-11-17: agreed.\n")
+        self.assertNotIn("evidence-path-missing", self.rule_names("internal"))
+
+
+class TestReviewerIdentityIsFolded(ReleaseGateCase):
+    """R-06 -- the reviewer is compared after the placeholder scan's fold, and registered."""
+
+    def test_a_disguised_implementer_is_still_the_implementer(self):
+        for disguised in ("impl​", "іmpl", "IMPL.", " impl "):
+            self.cap["reviewedBy"] = disguised
+            self.assertIn("reviewer-identity", self.errors("regulated"), repr(disguised))
+
+    def agents(self, *extra):
+        self.data["agents"] = [{"id": "impl", "role": "implementer", "ownsCapabilities": [],
+                                "previouslyOwned": ["user.list"], "ownsScreens": [],
+                                "status": "done"}] + list(extra)
+
+    def test_once_agents_register_the_reviewer_must_be_one_of_them(self):
+        self.agents()
+        self.cap["reviewedBy"] = "someone-else"
+        self.assertIn("reviewer-identity", self.errors("regulated"))
+        self.agents({"id": "qa-1", "role": "qa", "ownsCapabilities": [], "ownsScreens": [],
+                     "status": "done"})
+        self.cap["reviewedBy"] = "qa-1"
+        self.assertNotIn("reviewer-identity", self.rule_names("regulated"))
+
+    def test_another_implementer_is_not_a_reviewer(self):
+        self.agents({"id": "impl-2", "role": "implementer", "ownsCapabilities": [],
+                     "ownsScreens": [], "status": "done"})
+        self.cap["reviewedBy"] = "impl-2"
+        self.assertIn("reviewer-identity", self.errors("regulated"))
+
+    def test_contest_and_static_approval_are_folded_too(self):
+        self.cap["contestedBy"] = "qa​"
+        self.assertIn("contest-self-cleared", self.errors("regulated"))
+        self.data["declaredStatic"] = [{
+            "id": "static.one", "path": CAP + ".safeguards", "value": "v", "reason": "r",
+            "approvedBy": "Impl.", "evidence": [],
+        }]
+        self.assertIn("declared-static-self-approved", self.errors("regulated"))
+
+
+class TestEvidenceIsRunOutput(ReleaseGateCase):
+    """R-08, R-09, R-10 -- capability, crossCutting and fixed-gap evidence is a passing run."""
+
+    def test_source_code_is_not_capability_or_gap_evidence(self):
+        self.write_file("src/user.service.ts", "export function list() {\n  return db.users.findMany();\n}\n")
+        self.cap["evidence"] = ["src/user.service.ts"]
+        self.assertIn("evidence-not-output", self.errors("standard"))
+        self.cap["evidence"] = ["evidence/tests.log"]
+        self.data["gaps"] = [{"id": "gap.x", "severity": "high", "description": "user.list leaks",
+                              "status": "fixed", "rationale": "", "evidence": ["src/user.service.ts"]}]
+        self.assertIn("evidence-not-output", self.errors("standard"))
+
+    def test_evidence_that_records_a_failed_run_is_refused(self):
+        self.write_file("evidence/list-e2e.log",
+                        "$ playwright test user-list\n1 failed: user.list returns 500\n\n# exit code: 1\n")
+        self.cap["evidence"] = ["evidence/list-e2e.log"]
+        for profile in ("internal", "regulated"):
+            self.assertIn("evidence-records-failure", self.errors(profile), profile)
+        self.data["crossCutting"]["audit"]["evidence"] = ["evidence/list-e2e.log"]
+        self.cap["evidence"] = ["evidence/tests.log"]
+        self.assertIn("evidence-records-failure", self.errors("internal"))
+
+    def test_a_passing_frame_is_accepted(self):
+        self.write_file("evidence/list-e2e.log",
+                        "$ playwright test user-list\n4 passed: user.list returns 3 rows\n\n# exit code: 0\n")
+        self.cap["evidence"] = ["evidence/list-e2e.log"]
+        self.assertNotIn("evidence-records-failure", self.rule_names("regulated"))
+        self.assertEqual(self.errors("regulated"), set())
+
+    def test_version_control_and_dependency_files_are_not_evidence(self):
+        self.write_file(".git/HEAD", "ref: refs/heads/main\n")
+        self.write_file(".git/config", "[core]\n\trepositoryformatversion = 0\n")
+        self.write_file("node_modules/left-pad/index.js", "module.exports = leftPad;\n")
+        cross = self.data["crossCutting"]
+        cross["audit"]["evidence"] = [".git/config"]
+        cross["safety"]["evidence"] = [".git/HEAD"]
+        cross["data"]["evidence"] = ["node_modules/left-pad/index.js"]
+        found = [item for item in self.result("standard").errors
+                 if item["rule"] == "evidence-not-output"]
+        self.assertEqual(len(found), 3, found)
+
+    def test_folders_are_judged_inside_the_project(self):
+        reason = acm.non_evidence_reason
+        checkout = Path("/home/x/node_modules/app/evidence/audit.log")
+        self.assertEqual(reason(checkout, "cross", "evidence/audit.log"), "")
+        self.assertNotEqual(reason(checkout, "cross", "node_modules/app/evidence/audit.log"), "")
+
+
+class TestTestsAndSecurityGatesAtInternal(ReleaseGateCase):
+    """R-13 -- the tests and security gates are never not-applicable, at internal either."""
+
+    def test_internal_release_needs_both_gates(self):
+        for gate in self.data["qualityGates"]:
+            if gate["id"] in ("tests", "security"):
+                gate.update({"status": "not-applicable", "evidence": [],
+                             "rationale": "small internal tool"})
+        self.assertIn("gate-always-required", self.errors("internal"))
+        self.assertEqual(acm.RULES["gate-always-required"], acm.E3)
+
+
+class TestSafetyFlags(ReleaseGateCase):
+    """R-14 -- the safety flags the template ships are enforced when they apply."""
+
+    def test_step_up_and_bulk_preview_are_required_when_they_apply(self):
+        safety = self.data["crossCutting"]["safety"]
+        safety["highRiskApprovalOrStepUp"] = False
+        safety["bulkPreviewAndPartialFailure"] = False
+        self.assertNotIn("crosscutting-flag", self.rule_names("regulated"))
+        self.add_command()
+        self.add_command("user.export", kind="export", risk="moderate")
+        paths = {item["path"] for item in self.result("regulated").errors
+                 if item["rule"] == "crosscutting-flag"}
+        self.assertEqual(paths, {"crossCutting.safety.highRiskApprovalOrStepUp",
+                                 "crossCutting.safety.bulkPreviewAndPartialFailure"})
+
+
+class TestInternalCrossCuttingWaivers(ReleaseGateCase):
+    """D-01 -- at internal four release flags may be waived with a rationale."""
+
+    def test_a_waiver_warns_at_internal_and_fails_above_it(self):
+        audit = self.data["crossCutting"]["audit"]
+        audit["tamperProtected"] = False
+        self.assertIn("crosscutting-flag", self.errors("internal"))
+        audit["notApplicable"] = {"tamperProtected": "three operators; append-only grants, no hash chain"}
+        self.assertNotIn("crosscutting-flag", self.rule_names("internal"))
+        self.assertEqual(self.errors("internal"), set())
+        self.assertIn("crosscutting-flag-waived", self.rule_names("internal"))
+        self.assertIn("crosscutting-flag-waived", self.errors("standard"))
+        self.assertIn("crosscutting-flag-waived", self.errors("regulated"))
+
+    def test_only_the_four_flags_can_be_waived(self):
+        self.data["crossCutting"]["experience"].update({
+            "keyboardCriticalFlowsTested": False, "responsiveCriticalFlowsTested": False,
+            "notApplicable": {"keyboardCriticalFlowsTested": "r", "responsiveCriticalFlowsTested": "r"},
+        })
+        self.data["crossCutting"]["authentication"].update({
+            "mfaForPrivilegedRoles": False, "notApplicable": {"mfaForPrivilegedRoles": "r"},
+        })
+        self.assertEqual(self.errors("internal"), set())
+        self.data["crossCutting"]["authorization"]["serverEnforced"] = False
+        self.data["crossCutting"]["authorization"]["notApplicable"] = {"serverEnforced": "r"}
+        errors = self.errors("internal")
+        self.assertIn("crosscutting-flag", errors)
+        self.assertIn("unknown-field", self.rule_names("internal"))
+
+
+class TestSpecificTokens(ReleaseGateCase):
+    """R-12 -- a test idiom or a short route does not name a capability or a screen."""
+
+    def test_code_idioms_are_not_specific(self):
+        for value in ("expect(res.status)", "async () =>", "x = y.z", "'quoted.thing'"):
+            self.assertFalse(acm.specific_token(value), value)
+        for value in ("TenantService.suspend", "admin users suspend", "suspend_tenant",
+                      "suspendTenant", "TenantsController#suspend", "ns::suspend_tenant",
+                      "POST /admin/tenants", "App\\Services\\TenantService::suspend"):
+            self.assertTrue(acm.specific_token(value), value)
+
+    def test_a_test_idiom_as_an_operation_does_not_match_an_unrelated_test(self):
+        self.write_file("tests/generic.spec.ts",
+                        "test('health', async () => {\n  const res = await get('/health');\n"
+                        "  expect(res.status).toBe(200);\n});\n")
+        self.cap.update({"serverOperations": ["expect(res.status)"], "tests": ["tests/generic.spec.ts"]})
+        self.assertIn("evidence-token-match", self.errors("regulated"))
+
+    def test_a_root_route_does_not_name_a_screen(self):
+        self.write_file("tests/unrelated.spec.ts",
+                        "import { add } from './math';\n"
+                        "test('adds', () => { expect(add(1, 2)).toBe(3); });\n")
+        screen = self.data["screens"][0]
+        screen.update({"id": "home", "route": "/", "tests": ["tests/unrelated.spec.ts"]})
+        self.cap["uiRoutes"] = ["/"]
+        paths = {item["path"] for item in self.result("regulated").errors
+                 if item["rule"] == "evidence-token-match"}
+        self.assertIn("screens[home].tests", paths)
+
+
+class TestGapLookupsAreIndexed(ReleaseGateCase):
+    """R-24 -- gaps are walked a fixed number of times, not once per capability."""
+
+    def count_gap_walks(self, capabilities):
+        for index in range(capabilities):
+            cid = "user.view-" + str(index)
+            capability = dict(self.cap, id=cid)
+            self.data["entities"][0]["capabilities"].append(capability)
+            self.data["screens"][0]["capabilities"].append(cid)
+        self.data["gaps"] = [{"id": "gap." + str(n), "severity": "low", "source": "ocr",
+                              "description": "finding " + str(n), "status": "open",
+                              "rationale": "", "evidence": []} for n in range(20)]
+        original = acm.iter_named
+        calls = []
+
+        def counting(manifest, key):
+            if key == "gaps":
+                calls.append(key)
+            return original(manifest, key)
+
+        acm.iter_named = counting
+        try:
+            self.result("regulated")
+        finally:
+            acm.iter_named = original
+        return len(calls)
+
+    def test_gap_walks_do_not_grow_with_capabilities(self):
+        # One walk each for the index, decisions, gaps, evidence and (sometimes) the
+        # archetype escape text; before the index it was one per capability and state.
+        self.assertLessEqual(self.count_gap_walks(40), 6)
 
 
 if __name__ == "__main__":
