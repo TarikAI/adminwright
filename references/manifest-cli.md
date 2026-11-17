@@ -52,7 +52,7 @@ Exit codes: 0 clean; 1 the manifest was read and has findings at error severity;
 
 Keys the schema does not declare are reported as `unknown-field`; prefix a key with `x-` to keep project-specific data without the finding. Backslashes in evidence paths are stored as `/`.
 
-`remove --kind <kind> --id <id>` is refused while anything still refers to the item, and the message lists every reference, including ones no rule checks, such as a research source's `appliedTo` or a gap's `capability`. `rename --kind <kind> --id <old> --to <new>` changes the id and every reference to it, lock files included. Never edit `manifest.json` by hand: a whole-file write discards every change another agent made since you read it.
+`remove --kind <kind> --id <id>` is refused while anything still refers to the item, and the message lists every reference, including ones no rule checks, such as a research source's `appliedTo`, a gap's `capability` or a held claim lock; removing an entity checks the references to each of its capabilities too. `rename --kind <kind> --id <old> --to <new>` changes the id and every reference to it, lock files included. Never edit `manifest.json` by hand: a whole-file write discards every change another agent made since you read it.
 
 ## Shell-safe forms
 
@@ -93,18 +93,18 @@ python <skill-dir>/scripts/admin_console_manifest.py release-claim --manifest <p
 
 - The first claim registers the agent.
 - A builder's claim (`implementer`, `architect`) writes `locks/<capability>.lock` and sets `owner`. It also sets `implementedBy` when that is empty; an implementer's claim replaces an architect's.
-- A reviewer's claim writes `locks/<capability>.<role>.lock` and changes neither field.
+- A reviewer's claim writes `locks/<capability>@<role>.lock` and changes neither field. A lock of the older form `<capability>.<role>.lock` is renamed to this one by the next claim or release.
 - A builder excludes everyone: nothing is reviewed while it is being built. Reviewers of different roles review one capability in parallel; two reviewers of the same role do not.
-- An id that has built something cannot claim as a reviewer.
+- An id that has built something cannot claim as a reviewer, and an id that still holds a claim cannot claim under another reviewer role; release first.
 - Exit 3 names the holder, from the lock file or from `agents[]` (lock files are git-ignored, so the manifest is checked too).
 
-`release-claim` without `--capability` releases everything the agent holds. It blanks `owner`, moves the capability to the agent's `previouslyOwned`, and sets the agent `done` when nothing is left. `implementedBy` is never cleared. `claim --force-steal --reason '<why>'` takes a capability from an agent that stalled. It is recorded on both agents; never steal from an agent that may still be writing.
+`release-claim` without `--capability` releases everything the agent holds: what `agents[]` lists and every lock file that names it. It blanks `owner`, moves the capability to the agent's `previouslyOwned`, and sets the agent `done` when nothing is left. `implementedBy` is never cleared. An id that is not in `agents[]` and holds no lock exits 3 and writes nothing. `claim --force-steal --reason '<why>'` takes a capability from an agent that stalled, its lock included (a reviewer's steal from a builder removes the builder's lock). It is recorded on both agents; never steal from an agent that may still be writing.
 
 | Lock | Where | Freed by |
 |---|---|---|
 | Write lock | `.admin-console/.lock`, held for milliseconds by each write | the operating system, when the holding process exits. A write that waits 30 seconds exits 2 naming the holder's pid. The file itself stays; deleting it frees nothing. On a filesystem without OS locks, `.lock.soft` is used instead. It is removed on release; delete one left by a crashed process by hand, once that process is gone |
 | Builder claim | `locks/<capability>.lock` | `release-claim`, or `--force-steal` |
-| Reviewer claim | `locks/<capability>.<role>.lock` | the same |
+| Reviewer claim | `locks/<capability>@<role>.lock` | the same |
 | Manifest claim | `agents[].ownsCapabilities` of an `active` agent, and `owner` | `release-claim`, the holder's status set to `done` or `handed-off`, or `--force-steal` |
 
 A claim is refused on either of the last rows. Deleting a lock file does not free a capability the manifest still assigns to an active agent.

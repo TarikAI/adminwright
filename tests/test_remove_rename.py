@@ -138,6 +138,46 @@ class TestRename(RemoveRenameCase):
         self.assertEqual(code, 0, err)
 
 
+class TestAudit20261117(RemoveRenameCase):
+    """C-08, C-09 (audit 2026-11-17)."""
+
+    def add_capability(self, cid):
+        data = self.read()
+        copy = json.loads(json.dumps(self.capability_of(data)))
+        copy.update({"id": cid, "owner": "", "implementedBy": "", "reviewStatus": "unreviewed",
+                     "reviewedBy": ""})
+        data["entities"][0]["capabilities"].append(copy)
+        self.write(data)
+
+    def test_renaming_a_capability_leaves_a_dotted_childs_lock_in_place(self):
+        self.add_capability("user.list.bulk")
+        code, _o, err = self.cli("claim", "--agent", "impl-1", "--role", "implementer",
+                                 "--capability", "user.list.bulk")
+        self.assertEqual(code, 0, err)
+        code, _o, err = self.cli("rename", "--kind", "capability", "--id", "user.list", "--to", "user.index")
+        self.assertEqual(code, 0, err)
+        locks = sorted(p.name for p in (self.manifest.parent / "locks").glob("*.lock"))
+        self.assertEqual(locks, ["user.list.bulk.lock"])
+        code, _o, err = self.cli("release-claim", "--agent", "impl-1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(list((self.manifest.parent / "locks").glob("*.lock")), [])
+
+    def test_removing_an_entity_lists_references_to_its_capabilities(self):
+        data = self.read()
+        data["screens"][0]["capabilities"] = []
+        data["decisions"][-1]["appliesTo"] = ["users", "ops"]
+        data["gaps"] = [{"id": "gap.list-race", "severity": "low", "description": "d", "status": "open",
+                         "rationale": "", "evidence": [], "capability": "user.list"}]
+        data["agents"][0]["previouslyOwned"] = []
+        self.write(data)
+        before = self.manifest.read_bytes()
+        code, _o, err = self.cli("remove", "--kind", "entity", "--id", "user")
+        self.assertEqual(code, 2, err)
+        self.assertIn("gaps[gap.list-race].capability", err)
+        self.assertIn("researchSources", err)
+        self.assertEqual(self.manifest.read_bytes(), before)
+
+
 class TestSetWholeObjects(RemoveRenameCase):
     """Part 2: one `set` for a whole crossCutting section instead of one call per flag."""
 

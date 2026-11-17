@@ -6667,6 +6667,21 @@ def references_to(manifest, kind, item_id, lock_dir=None):
             found.append(path)
 
     walk(manifest, probe, "")
+    if kind == "entity":
+        # Removing an entity removes its capabilities: whatever names them dangles too.
+        inside = "entities[" + item_id + "]"
+        for _path, entity, capability in iter_capabilities(manifest):
+            cid = text_of(capability.get("id"))
+            if cid and text_of(entity.get("id")) == item_id:
+                found.extend(
+                    where for where in references_to(manifest, "capability", cid, lock_dir)
+                    if not where.startswith(inside) and where not in found
+                )
+    if kind == "capability" and lock_dir is not None and lock_dir.is_dir():
+        for role in (None,) + REVIEWER_ROLES:
+            lock = lock_dir / lock_file_name(item_id, role)
+            if lock.exists() and lock_holder(lock):
+                found.append("locks/" + lock.name + " (held by " + lock_holder(lock) + ")")
     # An agent's history of what it once held is a record, not a dependency.
     found = [where for where in found if ".previouslyOwned[" not in where]
     if kind == "agent":
@@ -6829,14 +6844,15 @@ def cmd_rename(args):
         commit_manifest(manifest_path, manifest)
         lock_dir = manifest_path.parent / "locks"
         if args.kind == "capability" and lock_dir.is_dir():
-            # The implementer's lock and every reviewer's lock move with the id.
-            prefix = lock_file_name(args.id)[: -len(".lock")]
-            for old_lock in sorted(lock_dir.glob("*.lock")):
-                stem = old_lock.name[: -len(".lock")]
-                if stem == prefix or stem.startswith(prefix + "."):
-                    renamed_lock = lock_dir / (lock_file_name(new_id)[: -len(".lock")] + stem[len(prefix):] + ".lock")
+            # The implementer's lock and every reviewer's lock move with the id --
+            # exactly those names: a prefix match also moved `<id>.bulk.lock`, the
+            # builder lock of another capability.
+            migrate_legacy_locks(lock_dir, before)
+            for role in (None,) + REVIEWER_ROLES:
+                old_lock = lock_dir / lock_file_name(args.id, role)
+                if old_lock.exists():
                     try:
-                        old_lock.replace(renamed_lock)
+                        old_lock.replace(lock_dir / lock_file_name(new_id, role))
                     except OSError:
                         pass
         if args.kind == "agent" and lock_dir.is_dir():
@@ -6857,16 +6873,80 @@ def cmd_rename(args):
 
 
 def lock_file_name(capability_id, role=None):
-    """locks/<capability>.lock for the builder; locks/<capability>.<role>.lock for a reviewer.
+    """locks/<capability>.lock for the builder; locks/<capability>@<role>.lock for a reviewer.
 
     Reviewers of different roles review one capability in parallel (ux and security
     over the same finished domain, as the pass order documents), so each reviewer
-    role has its own lock; two reviewers of the same role still collide.
+    role has its own lock; two reviewers of the same role still collide. The '@'
+    is a character no id may hold: with a dot, the builder lock of `a.qa` and the
+    qa review lock of `a` were one file.
     """
     base = re.sub(r"[^A-Za-z0-9._-]", "_", capability_id)
     if role and role in REVIEWER_ROLES:
-        return base + "." + role + ".lock"
+        return base + "@" + role + ".lock"
     return base + ".lock"
+
+
+def lock_capability(lock_name):
+    """The capability id a lock file names (`a.b@qa.lock` and `a.b.lock` both name a.b)."""
+    stem = lock_name[: -len(".lock")] if lock_name.endswith(".lock") else lock_name
+    return stem.split("@", 1)[0]
+
+
+def lock_holder(path):
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def locks_held_by(lock_dir, agent_id):
+    """{capability id: [lock paths]} of every lock file whose content is this agent."""
+    held = {}
+    if lock_dir.is_dir():
+        for path in sorted(lock_dir.glob("*.lock")):
+            if lock_holder(path) == agent_id:
+                held.setdefault(lock_capability(path.name), []).append(path)
+    return held
+
+
+def migrate_legacy_locks(lock_dir, manifest):
+    """Rename reviewer locks of the old `<capability>.<role>.lock` form to `<capability>@<role>.lock`.
+
+    Called under the manifest lock by every command that reads locks, so a claim
+    made before the rename is honoured, never orphaned. A name that is both a
+    capability's builder lock and another's review lock (`a.qa` and `a` both
+    exist) is decided by its holder's registered role; one that cannot be
+    decided is left as it is.
+    """
+    if not lock_dir.is_dir():
+        return
+    capabilities = set(capability_index(manifest))
+    for path in sorted(lock_dir.glob("*.lock")):
+        stem = path.name[: -len(".lock")]
+        if "@" in stem:
+            continue
+        for role in REVIEWER_ROLES:
+            if not stem.endswith("." + role):
+                continue
+            prefix = stem[: -len(role) - 1]
+            holder = lock_holder(path)
+            record = find_agent(manifest, holder) if holder else None
+            holder_role = text_of(record.get("role")) if record else ""
+            if stem in capabilities and (prefix not in capabilities or holder_role != role):
+                break  # a builder lock of the dotted capability
+            if prefix not in capabilities and holder_role != role:
+                break  # names nothing known; leave it for a person
+            target = lock_dir / lock_file_name(prefix, role)
+            try:
+                if not target.exists():
+                    path.replace(target)
+                    stderr("note: renamed the lock " + path.name + " to " + target.name + " (new lock naming)")
+                elif lock_holder(target) == holder:
+                    path.unlink()
+            except OSError:
+                pass
+            break
 
 
 IMPLEMENTER_ROLES = ("implementer", "architect")
@@ -6904,7 +6984,7 @@ def manifest_holder(manifest, capability, requester, role=None):
         agent_id = text_of(agent.get("id"))
         if agent_id == requester or text_of(agent.get("status")) != "active":
             continue
-        if cid in as_list(agent.get("ownsCapabilities")):
+        if cid in str_items(agent.get("ownsCapabilities")):
             if role is None or claims_conflict(role, text_of(agent.get("role"))):
                 return agent_id
     owner = text_of(capability.get("owner"))
@@ -6947,6 +7027,23 @@ def cmd_claim(args):
                 + ". Use a different agent id for the review."
             )
             return 2
+        migrate_legacy_locks(lock_dir, manifest)
+        old_role = text_of(existing.get("role")) if existing is not None else ""
+        if (
+            old_role and old_role != args.role
+            and (old_role in REVIEWER_ROLES or args.role in REVIEWER_ROLES)
+        ):
+            # A claim records one role per agent; release-claim found locks by it,
+            # so a lock taken under the old role was never released.
+            still = sorted(set(str_items(existing.get("ownsCapabilities")))
+                           | set(locks_held_by(lock_dir, args.agent)))
+            if still:
+                stderr(
+                    "Agent '" + args.agent + "' is registered as " + old_role + " and still holds "
+                    + ", ".join(still) + "; run `release-claim --agent " + args.agent + "` first, or "
+                    "claim as " + args.role + " under another agent id."
+                )
+                return 2
         holders = {}
         for cid in args.capability:
             holder = manifest_holder(manifest, caps[cid][2], args.agent, args.role)
@@ -6978,6 +7075,16 @@ def cmd_claim(args):
                         + "'. Review starts after its release-claim."
                     )
                     return 3
+                if builder and builder != args.agent:
+                    # A steal takes the builder's lock too: left behind, it named a
+                    # builder the manifest no longer lists and blocked every claim.
+                    restore.append((builder_lock, builder))
+                    try:
+                        builder_lock.unlink()
+                    except OSError:
+                        pass
+                    if not any(taken == cid for taken, _victim in stolen):
+                        stolen.append((cid, builder))
             lock_path = lock_dir / lock_file_name(cid, args.role)
             owner = None
             try:
@@ -6985,7 +7092,7 @@ def cmd_claim(args):
                 os.write(handle, (args.agent + "\n").encode("utf-8"))
                 os.close(handle)
                 acquired.append(lock_path)
-                if args.force_steal and holders.get(cid):
+                if args.force_steal and holders.get(cid) and not any(t == cid for t, _v in stolen):
                     # No lock file (a fresh clone, locks/ cleaned) but the manifest
                     # names a holder: the steal still takes it from that holder.
                     stolen.append((cid, holders[cid]))
@@ -7061,6 +7168,10 @@ def cmd_claim(args):
                 if cid not in history:
                     history.append(cid)
                 victim_record["previouslyOwned"] = history
+            # A reviewer's steal leaves `owner` alone, so a builder victim would still
+            # be named as holding it; `implementedBy` keeps the record of who built it.
+            if victim and text_of(caps[cid][2].get("owner")) == text_of(victim):
+                caps[cid][2]["owner"] = ""
         if stolen:
             note = text_of(record.get("notes"))
             steal_note = "; ".join(
@@ -7108,32 +7219,42 @@ def cmd_release_claim(args):
     released = []
     skipped = []
     not_held = []
+    dropped = []
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
         caps = capability_index(manifest)
         record = find_agent(manifest, args.agent)
-        owned = as_list(record.get("ownsCapabilities")) if record else []
-        targets = args.capability if args.capability else list(owned)
+        migrate_legacy_locks(lock_dir, manifest)
+        # What is on disk decides, not the agent's current role: a reviewer that
+        # claimed as qa and later as security, or whose builder lock outlived a
+        # steal, left locks behind that blocked every later claimant.
+        on_disk = locks_held_by(lock_dir, args.agent)
+        raw_owned = as_list(record.get("ownsCapabilities")) if record else []
+        owned = str_items(raw_owned)
+        dropped = [item for item in raw_owned if not isinstance(item, str)]
+        if record is None and not on_disk and not args.capability:
+            stderr("Agent '" + args.agent + "' is not in agents[] and holds no lock; nothing to release. "
+                   "Check the id against agents[] in the manifest.")
+            return 3
+        targets = list(args.capability) if args.capability else list(
+            dict.fromkeys(owned + sorted(on_disk)))
         role = text_of(record.get("role")) if record else ""
         for cid in targets:
             lock_path = lock_dir / lock_file_name(cid, role)
-            owner = ""
             entry = caps.get(cid)
             held_in_manifest = cid in owned or (
                 entry is not None and text_of(entry[2].get("owner")) == args.agent
             )
-            if lock_path.exists():
-                try:
-                    owner = lock_path.read_text(encoding="utf-8").strip()
-                except OSError:
-                    owner = ""
-                if owner and owner != args.agent:
-                    skipped.append((cid, owner))
-                    continue
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
+            mine = on_disk.get(cid, [])
+            if mine:
+                for path in mine:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+            elif lock_path.exists() and lock_holder(lock_path) and lock_holder(lock_path) != args.agent:
+                skipped.append((cid, lock_holder(lock_path)))
+                continue
             elif not held_in_manifest:
                 # Releasing something this agent never held used to report
                 # "Released: <it>" and exit 0.
@@ -7155,7 +7276,11 @@ def cmd_release_claim(args):
             record["previouslyOwned"] = history
             if not remaining:
                 record["status"] = "done"
-        commit_manifest(manifest_path, manifest)
+        if record is not None or released:
+            commit_manifest(manifest_path, manifest)
+    if dropped:
+        stderr("note: dropped " + str(len(dropped)) + " entry(ies) of agents[" + args.agent
+               + "].ownsCapabilities that were not capability ids: " + json.dumps(dropped)[:200])
     for cid, owner in skipped:
         stderr("Skipped " + cid + ": lock is held by '" + owner + "'")
     for cid in not_held:
