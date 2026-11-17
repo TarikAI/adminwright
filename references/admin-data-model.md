@@ -94,8 +94,8 @@ tenant scope (partial unique index filtered on `revoked_at IS NULL`, over
 ## Scope encoding
 
 Scope answers "where does this grant apply". Encode it as one JSON document per grant with a
-fixed shape, plus a denormalized `scope_tenant_id` column for the query the console runs
-constantly.
+fixed shape, plus a denormalized `scope_tenant_id`: the one tenant `tenants` names, or `NULL`
+(several, all or none: consult `scope`). The `admin_actor_role_guard` trigger enforces that.
 
 ```text
 {
@@ -179,8 +179,8 @@ against mutable state that may since have changed.
 | Column group | Columns | Why |
 |---|---|---|
 | Identity | `id`, `event_uuid`, `chain_id`, `chain_seq` | Internal ordering, external reference, chain position |
-| Time | `occurred_at`, `recorded_at` | Backfilled and delayed events must be distinguishable |
-| Actor | `actor_id`, `actor_kind`, `effective_actor_id`, `impersonation_session_id` | Real actor and acted-as identity are different facts |
+| Time | `occurred_at`, `recorded_at` (database clock, set by the trigger) | Backfilled and delayed events must be distinguishable |
+| Actor | `actor_id`, `actor_subject` (set by the trigger), `actor_kind`, `effective_actor_id`, `impersonation_session_id` | Real actor and acted-as identity are different facts, fixed at write time |
 | Context | `tenant_id`, `environment`, `source_ip`, `user_agent` | Isolation and environment questions |
 | Action | `action`, `target_type`, `target_id` | `action` is the capability id, not a free-text sentence |
 | Justification | `reason`, `ticket_ref`, `approval_request_id` | Why this was allowed to happen |
@@ -215,7 +215,7 @@ own fields. An unspecified serialization makes verification irreproducible, so t
 schema pins it (`audit_event_hash_input()`, the `audit_event_chain_link` trigger):
 
 - **Fields**: every column except `id`, `row_hash` and `before_state` / `after_state` /
-  `redaction_policy` (the hashes stand in for the payloads); `chain_seq`, `prev_hash` are inside.
+  `redaction_policy` (the hashes stand in for the payloads); `actor_subject` is appended only when set.
 - **Encoding**: jsonb text of the array of those values in fixed column order, timestamps as UTC
   ISO-8601 with microseconds, `NULL` as JSON `null`; `row_hash` is hex SHA-256 of its UTF-8 bytes.
   An external verifier calls `audit_event_hash_input()` or replicates it.
@@ -235,7 +235,7 @@ It does not prove:
 
 - **That an event was ever written.** Nothing detects an action the code never logged. Omission
   at write time is invisible to any integrity scheme.
-- **That timestamps are true.** `occurred_at` is whatever the writer supplied.
+- **That timestamps are true.** `occurred_at` is whatever the writer supplied (`recorded_at` is the database's).
 - **Anything against an attacker with write access, absent an anchor.** Recomputing the entire
   chain after an edit is trivial. Without an external anchor the chain only detects careless
   tampering.
@@ -285,13 +285,13 @@ impersonation can never widen the real actor's authority.
 
 The reference schema enforces in the database: expiry strictly after start
 (`impersonation_bounded`), a bounded maximum duration (`impersonation_max_duration`, 8 hours — set
-your own), and at most one live session per real actor (`impersonation_session_one_live`, so a
-sweeper must end expired sessions). Ending is a state change with an `ended_reason` of
+your own), at most one live session per real actor (`impersonation_session_one_live`, so a
+sweeper must end expired sessions), and a session fixed once started (`impersonation_session_immutable`). Ending is a state change with an `ended_reason` of
 `operator_exit`, `expired`, `revoked`, or `session_lost` (`impersonation_end_state` requires one) —
 sessions that simply stop appearing are indistinguishable from sessions never closed.
 
 Every audit event produced during the session carries both `actor_id` and `effective_actor_id`,
-plus `impersonation_session_id`. That triple is what makes "show me everything support did as
+plus `impersonation_session_id` (the trigger refuses another actor's session). That triple makes "show me everything support did as
 this customer" a single query. Policy detail is in
 [security-governance.md](security-governance.md).
 
@@ -301,7 +301,7 @@ this customer" a single query. Policy detail is in
 binds the approval to exactly what was requested; without it, an approved request whose payload is
 later edited is an authorization bypass with a clean audit trail.
 
-State machine:
+State machine (the `approval_request_state` trigger enforces it; a request is never deleted):
 
 ```text
 pending ──approve(n of required)──> approved ──execute──> executed | execution_failed
@@ -381,6 +381,7 @@ is the hottest insert path in the system and every index taxes it.
 | Activity within a tenant | `(tenant_id, occurred_at DESC)` partial, `tenant_id IS NOT NULL` |
 | Occurrences of one action | `(action, occurred_at DESC)` |
 | Incident correlation | partial indexes on `correlation_id`, `request_id`, `idempotency_key` |
+| Everything done in impersonation | `(impersonation_session_id, occurred_at DESC)` partial |
 | Chain verification | unique `(chain_id, chain_seq)` |
 
 Paginate audit and other high-volume lists by keyset on `(occurred_at, id)`, not offset. Offset
@@ -397,18 +398,18 @@ operator search belongs on the domain tables, not on `audit_event`.
 |---|---|---|
 | `audit_event` | Every column | One payload drop that names the row's `audit.scrub_payload` event (`scrub_audit_payload()` writes it first); hashes kept |
 | `admin_job` | `input_summary`, `input_hash`, `initiated_by` | State, progress, result |
-| `approval_request` | Every other column, including `payload`, `payload_hash`, `requested_by`, `command_key` | `state`, `executed_at`, `execution_result` |
+| `approval_request` | Every other column, including `payload`, `payload_hash`, `requested_by`, `command_key` | `state` along its state machine, `executed_at`, `execution_result` |
 | `approval_decision` | Whole row | None; a reversal is a new request |
-| `impersonation_session` | Real actor, target, reason, `started_at` | End state and revocation |
+| `impersonation_session` | Every column, its expiry included | End state and revocation, once |
 | `export_request` | `filters`, `row_policy`, `field_policy` after generation | State, download counters |
-| `admin_actor_role` | `granted_by`, `granted_reason`, `granted_at` | Revocation fields only |
+| `admin_actor_role` | Every column, role and scope included (revoke and grant again) | Revocation fields, once |
 | `config_change`, `admin_job_failure` | Whole row | None |
 
 Deleting from any of these is a defect, not a cleanup. Retention removes whole partitions or
 whole archived segments under a stated policy. The reference schema enforces the `audit_event`,
-`approval_request` and `approval_decision` rows with triggers; `grants.sql` also takes UPDATE,
-DELETE and TRUNCATE on `audit_event`, `approval_decision`, `config_change` and `admin_job_failure`
-(job key `RESTRICT`) from the application role. The rest are application rules.
+`approval_request`, `approval_decision`, `admin_actor_role` and `impersonation_session` rows with
+triggers; `grants.sql` grants UPDATE only on their lifecycle columns, no DELETE or TRUNCATE, and
+no UPDATE on `config_change` or `admin_job_failure` (job key `RESTRICT`). The rest are application rules.
 
 ## Manifest mapping
 

@@ -20,31 +20,41 @@ import unittest
 from _core_schema_pg import (ENABLED, PSQL, SCHEMA, SKIP_REASON, PgCase, readme_verification_sql,
                              unqualified_schema_sql)
 
+def function_with(name, *replacements):
+    """The canonical CREATE FUNCTION statement for admin_core.<name>, with each (old, new) applied:
+    a control put back the way an earlier version (or an attacker's edit) had it."""
+    sql = (SCHEMA / "postgres.sql").read_text(encoding="utf-8")
+    start = sql.index("CREATE OR REPLACE FUNCTION admin_core.%s(" % name)
+    end = sql.index("$$ LANGUAGE plpgsql;", start) + len("$$ LANGUAGE plpgsql;")
+    text = sql[start:end]
+    for old, new in replacements:
+        assert old in text, "%s no longer contains %r" % (name, old)
+        text = text.replace(old, new)
+    return text + "\n"
+
+
 # The chain-link trigger as it was at d6c64a8: it hashed a payload only when one was present and
 # otherwise kept whatever before_hash / after_hash / redaction_policy the writer supplied.
-PRE_FIX_CHAIN_LINK = r"""
-CREATE OR REPLACE FUNCTION admin_core.audit_event_chain_link()
-RETURNS trigger AS $$
-DECLARE
-    last_seq  bigint;
-    last_hash text;
-BEGIN
-    PERFORM pg_advisory_xact_lock(hashtextextended('admin_core.audit_event:' || NEW.chain_id, 0));
-    SELECT a.chain_seq, a.row_hash INTO last_seq, last_hash
-      FROM admin_core.audit_event a WHERE a.chain_id = NEW.chain_id ORDER BY a.chain_seq DESC LIMIT 1;
-    NEW.chain_seq := COALESCE(last_seq, 0) + 1;
-    NEW.prev_hash := last_hash;
-    IF NEW.before_state IS NOT NULL THEN
-        NEW.before_hash := encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex');
-    END IF;
-    IF NEW.after_state IS NOT NULL THEN
-        NEW.after_hash := encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex');
-    END IF;
-    NEW.row_hash := encode(sha256(convert_to(admin_core.audit_event_hash_input(NEW), 'UTF8')), 'hex');
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-"""
+PRE_FIX_CHAIN_LINK = function_with(
+    "audit_event_chain_link",
+    ("NEW.before_hash := CASE WHEN NEW.before_state IS NULL THEN NULL", "NEW.before_hash := CASE WHEN NEW.before_state IS NULL THEN NEW.before_hash"),
+    ("NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL", "NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NEW.after_hash"),
+    ("NEW.redaction_policy := 'none';", "NULL;"),
+)
+
+# Audit 2026-11-17: the chain link kept a writer's recorded_at (T-05), had no identity snapshot
+# (T-04), and let any actor name any impersonation session (T-04, I4).
+WRITER_RECORDED_AT = function_with("audit_event_chain_link", ("NEW.recorded_at := pg_catalog.clock_timestamp();", ""))
+NO_ACTOR_SNAPSHOT = function_with(
+    "audit_event_chain_link",
+    ("    NEW.actor_subject := NULL;\n", ""),
+    ("NEW.actor_subject := (SELECT a.auth_subject FROM admin_core.admin_actor a WHERE a.id = NEW.actor_id);", "NULL;"),
+)
+ANY_SESSION = function_with("audit_event_chain_link", ("IF FOUND AND (sess.real_actor_id", "IF FALSE AND (sess.real_actor_id"))
+# T-03: a decision accepted whatever the request's state.
+DECISION_IN_ANY_STATE = function_with(
+    "enforce_separation_of_duties",
+    ("IF req.state <> 'pending' OR req.expires_at <= pg_catalog.clock_timestamp() THEN", "IF FALSE THEN"))
 
 # The update guard as it worked at d6c64a8, a user-settable flag and nothing else (made to accept
 # the id the current scrub_audit_payload() sets, so the rest of the verification still runs).
@@ -186,6 +196,7 @@ GRANT USAGE ON SCHEMA admin_core TO "%(app)s", "%(red)s";
 GRANT SELECT, INSERT, UPDATE ON admin_core.audit_event TO "%(app)s";
 GRANT USAGE ON SEQUENCE admin_core.audit_event_id_seq TO "%(app)s";
 GRANT EXECUTE ON FUNCTION admin_core.scrub_audit_payload(bigint, text, text, bigint) TO "%(red)s";
+INSERT INTO admin_core.admin_actor (auth_subject, display_name) VALUES ('scrub-requester', 'Requester');
 """ % {"app": app, "red": redactor})
         script = self.sql_file("scrub_paths.sql", r"""
 BEGIN;
@@ -233,17 +244,20 @@ INSERT INTO admin_core.audit_event (occurred_at, environment, action, target_typ
 VALUES (now(), 'production', 'user.update', 'user', 'u2', 'succeeded', '{"phone":"1"}') RETURNING id AS e1 \gset
 INSERT INTO admin_core.audit_event (occurred_at, environment, action, target_type, target_id, result, after_state)
 VALUES (now(), 'production', 'user.update', 'user', 'u3', 'succeeded', '{"phone":"2"}') RETURNING id AS e2 \gset
+SELECT id AS asker FROM admin_core.admin_actor WHERE auth_subject = 'scrub-requester' \gset
 
 BEGIN;
 SAVEPOINT nested;
 SET LOCAL ROLE "%(red)s";
-SELECT admin_core.scrub_audit_payload(:e1, 'pii-v1', 'retention window elapsed');
+SELECT admin_core.scrub_audit_payload(:e1, 'pii-v1', 'retention window elapsed', :asker);
 RELEASE SAVEPOINT nested;
 SELECT set_config('aw.e2', :'e2', true);
+SELECT set_config('aw.asker', :'asker', true);
 DO $t$
 BEGIN
     BEGIN
-        PERFORM admin_core.scrub_audit_payload(current_setting('aw.e2')::bigint, 'pii-v1', 'retention window elapsed');
+        PERFORM admin_core.scrub_audit_payload(current_setting('aw.e2')::bigint, 'pii-v1', 'retention window elapsed',
+                                               current_setting('aw.asker')::bigint);
     EXCEPTION WHEN OTHERS THEN
         RAISE EXCEPTION USING ERRCODE = 'XX000', MESSAGE = 'scrub failed inside a subtransaction: ' || SQLERRM;
     END;
@@ -368,11 +382,17 @@ DECLARE stmt text; new_id bigint;
 BEGIN
     INSERT INTO admin_core.audit_event (occurred_at, environment, action, target_type, result)
     VALUES (now(), 'production', 'grants.check', 'x', 'succeeded') RETURNING id INTO new_id;
-    IF (SELECT count(*) FROM admin_core.audit_event) <> 1 THEN
+    IF (SELECT count(*) FROM admin_core.audit_event) <> 1 THEN  -- the first insert
         RAISE EXCEPTION USING ERRCODE = 'XX000', MESSAGE = 'the application role cannot read what it wrote';
     END IF;
     IF EXISTS (SELECT 1 FROM admin_core.verify_audit_chain()) THEN
         RAISE EXCEPTION USING ERRCODE = 'XX000', MESSAGE = 'verify_audit_chain reported a problem';
+    END IF;
+    -- T-05: a writer may send recorded_at (ORMs send every column), but the database sets it
+    INSERT INTO admin_core.audit_event (occurred_at, recorded_at, environment, action, target_type, result)
+    VALUES (now(), '2020-01-01', 'production', 'grants.check', 'x', 'succeeded') RETURNING id INTO new_id;
+    IF (SELECT recorded_at FROM admin_core.audit_event WHERE id = new_id) < now() THEN
+        RAISE EXCEPTION USING ERRCODE = 'XX000', MESSAGE = 'a writer-supplied recorded_at was kept';
     END IF;
     FOREACH stmt IN ARRAY ARRAY[
         'UPDATE admin_core.audit_event SET reason = ''x''',
@@ -382,7 +402,17 @@ BEGIN
         'UPDATE admin_core.approval_decision SET reason = ''x''',
         'TRUNCATE admin_core.approval_decision',
         'DELETE FROM admin_core.config_change',
-        'SELECT admin_core.scrub_audit_payload(' || new_id || ', ''p'', ''r'')'
+        'SELECT admin_core.scrub_audit_payload(' || new_id || ', ''p'', ''r'', 1)',
+        -- audit 2026-11-17 T-06: an id ahead of the sequence blocked every later insert
+        'INSERT INTO admin_core.audit_event (id, occurred_at, environment, action, target_type, result) VALUES (999999, now(), ''p'', ''x'', ''x'', ''succeeded'')',
+        'INSERT INTO admin_core.approval_decision (id, request_id, approver_id, decision, reason) VALUES (999999, 1, 2, ''approved'', ''x'')',
+        -- T-03 / T-07: only the lifecycle columns of the guarded tables change, nothing is deleted
+        'DELETE FROM admin_core.approval_request',
+        'UPDATE admin_core.approval_request SET payload = ''{}''',
+        'UPDATE admin_core.admin_actor_role SET role_id = 1',
+        'DELETE FROM admin_core.admin_actor_role',
+        'UPDATE admin_core.impersonation_session SET target_subject_id = ''x''',
+        'TRUNCATE admin_core.approval_request CASCADE'
     ] LOOP
         BEGIN
             EXECUTE stmt;
@@ -396,12 +426,13 @@ ROLLBACK;
 
 BEGIN;
 DO $t$
-DECLARE ev bigint;
+DECLARE ev bigint; asker bigint;
 BEGIN
+    INSERT INTO admin_core.admin_actor (auth_subject, display_name) VALUES ('grants-asker', 'A') RETURNING id INTO asker;
     INSERT INTO admin_core.audit_event (occurred_at, environment, action, target_type, result, before_state)
     VALUES (now(), 'production', 'grants.check', 'x', 'succeeded', '{"a":1}') RETURNING id INTO ev;
     SET LOCAL ROLE "%(audit)s";
-    PERFORM admin_core.scrub_audit_payload(ev, 'policy-1', 'retention');
+    PERFORM admin_core.scrub_audit_payload(ev, 'policy-1', 'retention', asker);
     RESET ROLE;
     IF (SELECT before_state FROM admin_core.audit_event WHERE id = ev) IS NOT NULL
        OR NOT EXISTS (SELECT 1 FROM admin_core.audit_event WHERE action = 'audit.scrub_payload') THEN
@@ -427,6 +458,192 @@ ROLLBACK;
                 self.assertIn("pass -v app_role", result.stderr)
         self.assertEqual(self.scalar(db, "SELECT relacl IS NULL FROM pg_class WHERE oid = 'admin_core.audit_event'::regclass"),
                          "t")
+
+    # --- audit 2026-11-17: each new control, removed, makes the README verification fail -------
+
+    def test_verification_is_not_vacuous_approval_state_machine(self):
+        # T-03: a requester's side set its own request approved with no decisions
+        self.assert_verification_fails_without(
+            "DROP TRIGGER approval_request_state ON admin_core.approval_request", "approved with no approvals was allowed")
+
+    def test_verification_is_not_vacuous_decision_after_the_request_closed(self):
+        self.assert_verification_fails_without(DECISION_IN_ANY_STATE, "decision on a rejected request was allowed")
+
+    def test_verification_is_not_vacuous_request_delete(self):
+        self.assert_verification_fails_without(
+            "DROP TRIGGER approval_request_no_delete ON admin_core.approval_request",
+            "DELETE a pending approval_request was allowed")
+
+    def test_verification_is_not_vacuous_actor_snapshot(self):
+        # T-04: rewriting admin_actor re-attributed history without breaking the chain
+        self.assert_verification_fails_without(NO_ACTOR_SNAPSHOT, "actor_subject is not the acting actor's auth_subject")
+
+    def test_verification_is_not_vacuous_impersonation_session_owner(self):
+        self.assert_verification_fails_without(ANY_SESSION, "another actor's impersonation session was allowed")
+
+    def test_verification_is_not_vacuous_impersonation_session_guard(self):
+        self.assert_verification_fails_without(
+            "DROP TRIGGER impersonation_session_immutable ON admin_core.impersonation_session",
+            "retargeting a session was allowed")
+
+    def test_verification_is_not_vacuous_recorded_at(self):
+        # T-05: writers chose the database-witnessed time
+        self.assert_verification_fails_without(WRITER_RECORDED_AT, "a writer-supplied recorded_at was kept")
+
+    def test_verification_is_not_vacuous_grant_guard(self):
+        # T-07 / T-08: a grant's role could be swapped, a revocation undone, scope and tenant disagree
+        self.assert_verification_fails_without(
+            "DROP TRIGGER admin_actor_role_guard ON admin_core.admin_actor_role",
+            "tenant scope with a global scope_tenant_id was allowed")
+
+    def test_verification_is_not_vacuous_enable_always(self):
+        # T-09: an origin-mode trigger is off under session_replication_role = replica
+        self.assert_verification_fails_without(
+            "ALTER TABLE admin_core.audit_event ENABLE TRIGGER audit_event_no_delete", "are not ENABLE ALWAYS")
+
+    def test_verification_is_not_vacuous_chain_assigned_check(self):
+        # T-13: a row the chain trigger never saw inserted silently (Prisma's DB defaults)
+        self.assert_verification_fails_without(
+            "ALTER TABLE admin_core.audit_event DROP CONSTRAINT audit_event_chain_assigned", "unchained audit row was allowed")
+
+    def test_triggers_fire_under_replica_role(self):
+        # T-09: as a superuser with session_replication_role = replica, every guard still refuses.
+        db = self.new_database()
+        self.psql(db, "-c", """
+INSERT INTO admin_core.admin_actor (auth_subject, display_name) VALUES ('r-alice', 'Alice');
+INSERT INTO admin_core.admin_permission (key, resource, action) VALUES ('r.thing', 'r', 'thing');
+INSERT INTO admin_core.approval_request (command_key, payload, payload_hash, target_type, requested_by, reason, expires_at)
+SELECT 'r.thing', '{}', 'h', 'thing', id, 'r', now() + interval '1 day' FROM admin_core.admin_actor;
+INSERT INTO admin_core.audit_event (occurred_at, environment, action, target_type, result)
+VALUES (now(), 'production', 'x.y', 'x', 'succeeded'), (now(), 'production', 'x.z', 'x', 'succeeded');
+""")
+        attacks = {
+            "DELETE of the chain tail": ("DELETE FROM admin_core.audit_event WHERE chain_seq = 2", "append-only"),
+            "UPDATE of an audit row": ("UPDATE admin_core.audit_event SET action = 'rewritten' WHERE chain_seq = 1",
+                                       "append-only"),
+            "self-approval": ("INSERT INTO admin_core.approval_decision (request_id, approver_id, decision, reason) "
+                              "SELECT id, requested_by, 'approved', 'self' FROM admin_core.approval_request",
+                              "separation of duties"),
+            "approval with no decisions": ("UPDATE admin_core.approval_request SET state = 'approved'", "approvals it requires"),
+        }
+        for label, (sql, expected) in attacks.items():
+            with self.subTest(attack=label):
+                result = self.psql(db, "-c", "SET session_replication_role = replica; " + sql, check=False)
+                self.assertNotEqual(result.returncode, 0, "%s was allowed under replica" % label)
+                self.assertIn(expected, result.stderr)
+        self.assertEqual(self.scalar(db, "SELECT count(*) FROM admin_core.audit_event"), "2")
+        # and the chain trigger still owns the chain columns: forged values are replaced, not kept
+        self.psql(db, "-c", "SET session_replication_role = replica; INSERT INTO admin_core.audit_event "
+                          "(chain_seq, occurred_at, environment, action, target_type, result, row_hash) "
+                          "VALUES (2, now(), 'production', 'f', 'x', 'succeeded', repeat('0', 64))")
+        self.assertEqual(self.scalar(db, "SELECT chain_seq || ':' || (row_hash = repeat('0', 64)) FROM admin_core.audit_event "
+                                         "WHERE action = 'f'"), "3:false")
+        self.assertEqual(self.scalar(db, "SELECT count(*) FROM admin_core.verify_audit_chain()"), "0")
+
+    def test_function_overloads_cannot_stand_in_for_built_ins(self):
+        # T-01 / T-02: a role that can CREATE in public (every role on a database that started on
+        # PostgreSQL 14) created exact-type overloads that beat pg_catalog's: to_jsonb(approval_request)
+        # let it re-attribute a request and approve it, to_jsonb(audit_event) let it rewrite audit
+        # rows, and convert_to(text,text) / sha256(text) blinded verify_audit_chain(). Canonical and
+        # carrier (public) form, each attack from a fresh session of a non-owner role.
+        for schema in ("admin_core", "public"):
+            with self.subTest(schema=schema):
+                db = "aw_core_%s_%s" % (self.tag[:40], schema)
+                self.psql("postgres", "-c", 'DROP DATABASE IF EXISTS "%s"' % db)
+                self.psql("postgres", "-c", 'CREATE DATABASE "%s"' % db)
+                self.dbs.append(db)
+                if schema == "admin_core":
+                    self.psql(db, "-f", str(SCHEMA / "postgres.sql"))
+                else:
+                    self.psql(db, "-f", self.sql_file("public.sql", unqualified_schema_sql()))
+                app = "aw_shadow_%s_%s" % (self.tag[:30], schema[:2])
+                if app not in self.roles:
+                    self.roles.append(app)
+                    self.psql("postgres", "-c", "CREATE ROLE \"%s\" LOGIN PASSWORD 'pw-%s'" % (app, self.tag))
+                self.psql(db, "-c", """
+GRANT CREATE ON SCHEMA public TO PUBLIC;
+GRANT USAGE ON SCHEMA %(s)s TO "%(app)s";
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA %(s)s TO "%(app)s";
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA %(s)s TO "%(app)s";
+INSERT INTO %(s)s.admin_actor (auth_subject, display_name) VALUES ('alice', 'Alice'), ('bob', 'Bob');
+INSERT INTO %(s)s.admin_permission (key, resource, action) VALUES ('payout.release', 'payout', 'release');
+INSERT INTO %(s)s.approval_request (command_key, payload, payload_hash, target_type, requested_by, reason,
+                                   expires_at, required_approvals)
+SELECT 'payout.release', '{"amount":100}', 'h', 'payout', id, 'r', now() + interval '1 day', 2
+  FROM %(s)s.admin_actor WHERE auth_subject = 'alice';
+INSERT INTO %(s)s.audit_event (occurred_at, environment, action, target_type, target_id, result, before_state)
+VALUES (now(), 'production', 'user.delete', 'user', 'u1', 'succeeded', '{"email":"a@example.com"}');
+""" % {"s": schema, "app": app})
+                attacks = {
+                    "request rewrite behind a to_jsonb overload": (
+                        "CREATE FUNCTION public.to_jsonb(%(s)s.approval_request) RETURNS jsonb LANGUAGE sql IMMUTABLE "
+                        "AS $$ SELECT '{}'::jsonb $$; "
+                        "UPDATE %(s)s.approval_request SET requested_by = (SELECT id FROM %(s)s.admin_actor "
+                        "WHERE auth_subject = 'bob'), payload = '{\"amount\":99999999}', required_approvals = 1",
+                        "immutable except state"),
+                    "audit rewrite behind a to_jsonb overload": (
+                        "CREATE FUNCTION public.to_jsonb(%(s)s.audit_event) RETURNS jsonb LANGUAGE sql IMMUTABLE "
+                        "AS $$ SELECT '{}'::jsonb $$; "
+                        "INSERT INTO %(s)s.audit_event (occurred_at, environment, action, target_type, target_id, result) "
+                        "SELECT now(), 'production', 'audit.scrub_payload', 'audit_event', min(id)::text, 'succeeded' "
+                        "FROM %(s)s.audit_event; "
+                        "SELECT set_config('admin_core.scrub', (SELECT max(id) FROM %(s)s.audit_event)::text, false); "
+                        "UPDATE %(s)s.audit_event SET action = 'user.view', target_id = 'u2', before_state = NULL, "
+                        "redaction_policy = 'p' WHERE id = (SELECT min(id) FROM %(s)s.audit_event)",
+                        "may only drop"),
+                }
+                for label, (sql, expected) in attacks.items():
+                    result = subprocess.run(
+                        [PSQL, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-U", app, "-d", db, "-c", sql % {"s": schema}],
+                        capture_output=True, encoding="utf-8", errors="replace", timeout=300,
+                        env=dict(os.environ, PGPASSWORD="pw-%s" % self.tag),
+                    )
+                    self.assertNotEqual(result.returncode, 0, "%s was allowed (%s)" % (label, schema))
+                    self.assertIn(expected, result.stderr, label)
+                self.assertEqual(self.scalar(db, "SELECT required_approvals FROM %s.approval_request" % schema), "2")
+                self.assertEqual(self.scalar(db, "SELECT action FROM %s.audit_event ORDER BY id LIMIT 1" % schema),
+                                 "user.delete")
+                # the role leaves convert_to / sha256 overloads behind, then someone who can disable the
+                # trigger edits a row: the owner's verify_audit_chain() must still see it
+                shadows = subprocess.run(
+                    [PSQL, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-U", app, "-d", db, "-c",
+                     "CREATE FUNCTION public.convert_to(text, text) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT $1 $$; "
+                     "CREATE FUNCTION public.sha256(text) RETURNS bytea LANGUAGE sql IMMUTABLE AS $$ SELECT '\\x00'::bytea $$"],
+                    capture_output=True, encoding="utf-8", errors="replace", timeout=300,
+                    env=dict(os.environ, PGPASSWORD="pw-%s" % self.tag),
+                )
+                self.assertEqual(shadows.returncode, 0, shadows.stderr)
+                self.psql(db, "-c", """
+ALTER TABLE %(s)s.audit_event DISABLE TRIGGER audit_event_no_update;
+UPDATE %(s)s.audit_event SET action = 'tampered' WHERE id = (SELECT min(id) FROM %(s)s.audit_event);
+ALTER TABLE %(s)s.audit_event ENABLE ALWAYS TRIGGER audit_event_no_update;
+""" % {"s": schema})
+                self.assertIn("row_hash does not match", self.scalar(
+                    db, "SELECT string_agg(problem, '; ') FROM %s.verify_audit_chain()" % schema))
+
+    def test_grants_sql_refuses_an_app_role_that_can_switch_the_controls_off(self):
+        # T-01: grants.sql said the application role must not own the tables, and nothing checked;
+        # a role that can CREATE in the schema is refused too. Nothing is granted when it stops.
+        app = "aw_app_%s" % self.tag
+        self.roles.append(app)
+        self.psql("postgres", "-c", 'CREATE ROLE "%s" NOLOGIN' % app)
+        for label, setup, expected in (
+            ("owns a table", 'ALTER TABLE admin_core.audit_event OWNER TO "%s"' % app, "can disable the triggers"),
+            ("can create in the schema", "GRANT CREATE ON SCHEMA admin_core TO PUBLIC", "can create objects"),
+        ):
+            with self.subTest(case=label):
+                db = self.new_database()
+                self.psql(db, "-c", setup)
+                result = subprocess.run(
+                    [PSQL, "-X", "-q", "-d", db, "-v", "app_role=" + app, "-f", str(SCHEMA / "grants.sql")],
+                    capture_output=True, encoding="utf-8", errors="replace", timeout=300,
+                )
+                self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+                self.assertIn(expected, result.stderr)
+                self.assertEqual(self.scalar(
+                    db, "SELECT has_table_privilege('%s', 'admin_core.approval_decision', 'INSERT')" % app), "f")
+                self.dbs.remove(db)
+                self.psql("postgres", "-c", 'DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % db)
 
     def test_concurrent_writers_produce_a_gap_free_chain(self):
         db = self.new_database()

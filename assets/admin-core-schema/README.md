@@ -20,13 +20,16 @@ whose reason is not obvious, but not the reasoning behind the model.
 
 The raw statements are written out in full: Prisma and Django keep them in the companion
 `.sql` file, Laravel and Rails carry them inline, and Drizzle needs the Integrity section of
-`postgres.sql` appended to its generated migration. Do not drop them when adapting.
+`postgres.sql` appended to its generated migration. Do not drop them when adapting. The copies
+in the four carriers are `postgres.sql`'s text with `admin_core.` replaced by `public.`.
 
 `tests/test_core_schema.py` parses all six files and compares, without a database: the tables;
 the columns and their type families; the CHECK constraints (names, enum value sets, and the
 expressions, by logical equivalence); the indexes and named unique constraints (names, UNIQUE,
 the ordered key columns and expressions, the `WHERE` predicate); foreign-key `ON DELETE`
-actions; and the function and trigger text. A change to `postgres.sql` that a variant misses in
+actions; each column's NOT NULL and database default; and the function and trigger text (every
+function pins its `search_path` and names what it calls with a schema). A change to
+`postgres.sql` that a variant misses in
 any of those fails CI. It cannot see what a tool adds or changes at migration time, so CI also
 builds the Django, Prisma and Drizzle variants on a real PostgreSQL and runs the verification
 SQL at the end of this file against each, and against `postgres.sql` itself. Laravel and Rails
@@ -51,7 +54,10 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f postgres.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v app_role=admin_app [-v audit_admin_role=audit_admin] -f grants.sql
 ```
 
-Requires PostgreSQL 14+. The script runs `CREATE EXTENSION IF NOT EXISTS citext` (into
+Requires PostgreSQL 14+. PostgreSQL 14 reached end of life on 2026-11-12: it stays the floor,
+but plan the upgrade, and note that a database created on 14 (or restored from it) keeps
+`CREATE` on `public` for every role; `grants.sql` refuses to run until the application role has
+lost it. The script runs `CREATE EXTENSION IF NOT EXISTS citext` (into
 `public`) for the actor email column; drop that line and change the column to `text` with a
 lowercase unique index if you would rather not add the extension. UUID defaults use the
 built-in `gen_random_uuid()` and the hash chain uses the built-in `sha256()`.
@@ -62,18 +68,39 @@ Django 6 on PostgreSQL 16 and 18.
 
 The script creates an `admin_core` schema. Rename it, or drop the schema statement and let the
 tables land in `public`, to match project convention (then pass `-v schema=public` to
-`grants.sql`). Either way change the `admin_core.` qualifiers and every
-`SET search_path = admin_core, pg_temp` line with it, keeping `pg_temp` last: that pin is what
-stops a session's temporary tables standing in for the real ones inside the triggers.
+`grants.sql`). Either way change the `admin_core.` qualifiers with it. Keep every function's
+`SET search_path = pg_catalog, pg_temp` and its `pg_catalog.` qualifiers: a trigger otherwise runs
+with the caller's `search_path`, where a temporary table or an overload the caller created (such
+as `public.to_jsonb(approval_request)`) stands in for the real one.
 
 The database owns the audit hash chain: leave `chain_seq`, `prev_hash`, `row_hash` and the
-payload hashes out of your `INSERT`s and read the doc's hash-chain section for the encoding.
+payload hashes out of your `INSERT`s and read the doc's hash-chain section for the encoding. It
+also sets `recorded_at` (the database clock) and `actor_subject` (the actor's `auth_subject` at
+write time, so rewriting `admin_actor` later cannot re-attribute the row) whatever a writer sends.
 `SELECT * FROM admin_core.verify_audit_chain()` returns one row per problem and nothing when
 the stored chain is consistent. Drop an audit payload with `admin_core.scrub_audit_payload(...)`:
 it writes an `audit.scrub_payload` event first and then drops the payload, once. The update
 trigger refuses any payload drop that does not name such an event for that row, so setting the
 `admin_core.scrub` flag yourself is not enough, and `verify_audit_chain()` reports a payload
-that disappeared without one (for example with the trigger disabled).
+that disappeared without one (for example with the trigger disabled). The scrub needs the
+`admin_actor` who asked for it and records the calling database role.
+
+What the triggers keep as written: an `approval_request` moves only along its state machine
+(`approved` needs `required_approvals` distinct approvers other than the requester, no
+rejection, and an unexpired request; final states do not change; write `state`, `executed_at`
+and `execution_result` in one `UPDATE`) and is cancelled, never deleted; a grant changes only
+by being revoked, once, and its `scope_tenant_id` must be the single tenant its `scope` names (or
+NULL); an impersonation session changes only by ending, once; and an audit row may name only its
+own actor's impersonation session. Run approval writes in READ COMMITTED (the default) or
+SERIALIZABLE: under REPEATABLE READ a decision and the move to `approved` can miss each other.
+
+What a trigger cannot stop: a superuser, the owner of the tables or of the functions (they can
+drop, disable or replace them), or anyone with file access. The triggers are `ENABLE ALWAYS`, so
+`session_replication_role = replica` (a superuser setting that managed services and PostgreSQL
+15+ `GRANT SET ON PARAMETER` can hand out) does not switch them off; on a logical-replication
+subscriber, set them back to plain `ENABLE`, because its apply worker runs as replica and the
+publisher already enforced them. `grants.sql` refuses an application role that owns the
+tables or functions, is a superuser, or can create objects in the schema.
 
 ## Adapting it
 
@@ -117,13 +144,15 @@ database regardless of which stack owns the migrations:
    and `TRUNCATE` all raise. ORM-level hooks are bypassed by raw queries, console sessions,
    and other services.
 2. **The hash chain and payload scrub**: the `BEFORE INSERT` trigger that assigns
-   `chain_seq`, `prev_hash` and `row_hash`, `verify_audit_chain()`, and
+   `chain_seq`, `prev_hash`, `row_hash`, `recorded_at` and `actor_subject`, `verify_audit_chain()`, and
    `scrub_audit_payload()`, the sanctioned `UPDATE` (the update trigger admits a payload drop
    only when it names the `audit.scrub_payload` event recording it).
-3. **The separation-of-duties trigger** on `approval_decision`, and the trigger that keeps an
-   `approval_request` as written (only `state`, `executed_at` and `execution_result` change),
-   without which a requester re-attributes the request and approves it. Enforcing either only
-   in application code means the control is absent for anything that writes the table directly.
+3. **The separation-of-duties trigger** on `approval_decision`, the triggers that keep an
+   `approval_request` as written (only `state`, `executed_at` and `execution_result` change) and
+   on its state machine, and the guards that keep a grant and an impersonation session as
+   issued. Without them a requester re-attributes the request and approves it, or marks it
+   approved outright. Enforcing any of them only in application code means the control is
+   absent for anything that writes the table directly. Every trigger is `ENABLE ALWAYS`.
 4. **Partial and expression unique indexes** — the live-grant uniqueness on
    `admin_actor_role`, the idempotency uniqueness on `admin_job`, the one-live-session
    index, and the `(key, environment, tenant)` uniqueness on `config_setting` and
@@ -185,21 +214,32 @@ END $f$;
 
 DO $verify$
 DECLARE
-    alice bigint; bob bigint; carol bigint; ev1 bigint; ev2 bigint;
-    ev3 bigint; req bigint; role bigint; sess bigint; job bigint; dsr bigint; n bigint;
+    alice bigint; bob bigint; carol bigint; ev1 bigint; ev2 bigint; ev3 bigint;
+    req bigint; req2 bigint; req3 bigint; role bigint; role2 bigint; grant1 bigint;
+    sess bigint; job bigint; dsr bigint; n bigint;
 BEGIN
+    -- 0. every trigger on the pack's tables fires under session_replication_role = replica too.
+    SELECT count(*) INTO n FROM pg_trigger t
+     WHERE NOT t.tgisinternal AND t.tgenabled <> 'A'
+       AND t.tgrelid IN ('audit_event'::regclass, 'approval_decision'::regclass, 'approval_request'::regclass,
+                         'admin_actor_role'::regclass, 'impersonation_session'::regclass);
+    IF n <> 0 THEN
+        RAISE EXCEPTION 'VERIFY FAILED: % trigger(s) are not ENABLE ALWAYS', n USING ERRCODE = 'XX000';
+    END IF;
+
     INSERT INTO admin_actor (auth_subject, display_name) VALUES ('verify-alice', 'Alice') RETURNING id INTO alice;
     INSERT INTO admin_actor (auth_subject, display_name) VALUES ('verify-bob', 'Bob') RETURNING id INTO bob;
     INSERT INTO admin_actor (auth_subject, display_name) VALUES ('verify-carol', 'Carol') RETURNING id INTO carol;
 
-    -- 1. audit chain: the database assigns chain_seq / prev_hash / row_hash.
-    INSERT INTO audit_event (chain_id, occurred_at, actor_id, environment, action, target_type,
+    -- 1. audit chain: the database assigns chain_seq / prev_hash / row_hash, the time it
+    --    recorded the row, and who actor_id was at that moment.
+    INSERT INTO audit_event (chain_id, occurred_at, recorded_at, actor_id, environment, action, target_type,
                              target_id, result, before_state, after_state)
-    VALUES ('verify', now(), alice, 'production', 'user.suspend', 'user', 'u1', 'succeeded',
+    VALUES ('verify', now(), '2020-01-01', alice, 'production', 'user.suspend', 'user', 'u1', 'succeeded',
             '{"status":"active"}', '{"status":"suspended"}') RETURNING id INTO ev1;
-    INSERT INTO audit_event (chain_id, occurred_at, actor_id, environment, action, target_type,
+    INSERT INTO audit_event (chain_id, occurred_at, actor_id, actor_subject, environment, action, target_type,
                              target_id, result)
-    VALUES ('verify', now(), alice, 'production', 'user.restore', 'user', 'u1', 'succeeded')
+    VALUES ('verify', now(), alice, 'someone-else', 'production', 'user.restore', 'user', 'u1', 'succeeded')
     RETURNING id INTO ev2;
     SELECT count(*) INTO n FROM audit_event WHERE chain_id = 'verify';
     IF n <> 2 THEN RAISE EXCEPTION 'VERIFY FAILED: expected 2 audit rows, found %', n USING ERRCODE = 'XX000'; END IF;
@@ -208,6 +248,18 @@ BEGIN
           (SELECT row_hash FROM audit_event WHERE id = ev1) THEN
         RAISE EXCEPTION 'VERIFY FAILED: chain_seq / prev_hash not linked' USING ERRCODE = 'XX000';
     END IF;
+    IF (SELECT recorded_at FROM audit_event WHERE id = ev1) < now() THEN
+        RAISE EXCEPTION 'VERIFY FAILED: a writer-supplied recorded_at was kept' USING ERRCODE = 'XX000';
+    END IF;
+    IF (SELECT actor_subject FROM audit_event WHERE id = ev2) IS DISTINCT FROM 'verify-alice' THEN
+        RAISE EXCEPTION 'VERIFY FAILED: actor_subject is not the acting actor''s auth_subject' USING ERRCODE = 'XX000';
+    END IF;
+    -- Rewriting the actor row afterwards does not re-attribute the event.
+    UPDATE admin_actor SET auth_subject = 'verify-mallory', display_name = 'Mallory' WHERE id = alice;
+    IF (SELECT actor_subject FROM audit_event WHERE id = ev2) <> 'verify-alice' THEN
+        RAISE EXCEPTION 'VERIFY FAILED: rewriting admin_actor re-attributed an audit row' USING ERRCODE = 'XX000';
+    END IF;
+    UPDATE admin_actor SET auth_subject = 'verify-alice', display_name = 'Alice' WHERE id = alice;
     IF EXISTS (SELECT 1 FROM verify_audit_chain('verify')) THEN
         RAISE EXCEPTION 'VERIFY FAILED: a healthy chain reported problems' USING ERRCODE = 'XX000';
     END IF;
@@ -224,6 +276,10 @@ BEGIN
     END IF;
     -- Enum-like columns hold only their listed values (a CHECK; a native enum in Prisma, 22P02).
     PERFORM pg_temp.expect_refused('unknown audit result', 'INSERT INTO audit_event (occurred_at, environment, action, target_type, result) VALUES (now(), ''production'', ''x'', ''x'', ''bogus'')', '23514|22P02');
+    -- Only the chain trigger makes a row valid: without it, placeholder chain values fail.
+    ALTER TABLE audit_event DISABLE TRIGGER audit_event_chain_link;
+    PERFORM pg_temp.expect_refused('unchained audit row', 'INSERT INTO audit_event (chain_id, chain_seq, occurred_at, environment, action, target_type, result, row_hash) VALUES (''verify-unchained'', 0, now(), ''production'', ''x'', ''x'', ''succeeded'', '''')', '23514');
+    ALTER TABLE audit_event ENABLE ALWAYS TRIGGER audit_event_chain_link;
 
     -- 2. audit_event is append-only, and the rows are still there afterwards.
     PERFORM pg_temp.expect_refused('UPDATE audit_event', 'UPDATE audit_event SET reason = ''x'' WHERE id = ' || ev1, 'P0001');
@@ -234,17 +290,19 @@ BEGIN
 
     -- 3. the sanctioned payload drop: scrub_audit_payload() records an audit.scrub_payload
     --    event in the row's chain first; the hashes and the chain are kept.
+    PERFORM pg_temp.expect_refused('scrub without an actor', format('SELECT scrub_audit_payload(%s, ''pii-v1'', ''r'', NULL)', ev1), 'P0001');
     PERFORM scrub_audit_payload(ev1, 'pii-v1', 'retention window elapsed', alice);
     IF (SELECT before_state FROM audit_event WHERE id = ev1) IS NOT NULL
        OR (SELECT before_hash FROM audit_event WHERE id = ev1) IS NULL
        OR (SELECT redaction_policy FROM audit_event WHERE id = ev1) <> 'pii-v1'
        OR NOT EXISTS (SELECT 1 FROM audit_event WHERE chain_id = 'verify' AND action = 'audit.scrub_payload'
-                                                  AND target_id = ev1::text)
+                                                  AND target_id = ev1::text AND actor_id = alice
+                                                  AND user_agent LIKE '%database role%')
        OR EXISTS (SELECT 1 FROM verify_audit_chain('verify')) THEN
         RAISE EXCEPTION 'VERIFY FAILED: scrub dropped the hashes, broke the chain, or was not audited' USING ERRCODE = 'XX000';
     END IF;
     PERFORM pg_temp.expect_refused('direct payload UPDATE', 'UPDATE audit_event SET after_state = NULL WHERE id = ' || ev1, 'P0001');
-    PERFORM pg_temp.expect_refused('second scrub of one payload', format('SELECT scrub_audit_payload(%s, ''p2'', ''again'')', ev1), 'P0001');
+    PERFORM pg_temp.expect_refused('second scrub of one payload', format('SELECT scrub_audit_payload(%s, ''p2'', ''again'', %s)', ev1, alice), 'P0001');
     -- Anyone can set the admin_core.scrub flag the function uses, so by itself it proves
     -- nothing: a payload drop must name the audit.scrub_payload event of that very row.
     INSERT INTO audit_event (chain_id, occurred_at, actor_id, environment, action, target_type,
@@ -262,22 +320,29 @@ BEGIN
     END IF;
 
     -- 4. tampering by someone who can disable the trigger is detected by the verifier:
-    --    an edited row, and a payload dropped with no audit.scrub_payload event.
+    --    an edited row, a rewritten actor_subject, and a payload dropped with no
+    --    audit.scrub_payload event.
     ALTER TABLE audit_event DISABLE TRIGGER audit_event_no_update;
     UPDATE audit_event SET action = 'tampered' WHERE id = ev2;
+    UPDATE audit_event SET actor_subject = 'verify-mallory' WHERE id = ev1;
     UPDATE audit_event SET before_state = NULL WHERE id = ev3;
-    ALTER TABLE audit_event ENABLE TRIGGER audit_event_no_update;
+    ALTER TABLE audit_event ENABLE ALWAYS TRIGGER audit_event_no_update;
     IF NOT EXISTS (SELECT 1 FROM verify_audit_chain('verify') v
                     WHERE v.problem LIKE 'payload dropped%'
                       AND v.chain_seq = (SELECT e.chain_seq FROM audit_event e WHERE e.id = ev3)) THEN
         RAISE EXCEPTION 'VERIFY FAILED: verify_audit_chain missed a payload dropped without a scrub event' USING ERRCODE = 'XX000';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM verify_audit_chain('verify') WHERE problem LIKE 'row_hash%') THEN
+    IF NOT EXISTS (SELECT 1 FROM verify_audit_chain('verify') v WHERE v.problem LIKE 'row_hash%'
+                      AND v.chain_seq = (SELECT e.chain_seq FROM audit_event e WHERE e.id = ev2)) THEN
         RAISE EXCEPTION 'VERIFY FAILED: verify_audit_chain missed an edited row' USING ERRCODE = 'XX000';
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM verify_audit_chain('verify') v WHERE v.problem LIKE 'row_hash%'
+                      AND v.chain_seq = (SELECT e.chain_seq FROM audit_event e WHERE e.id = ev1)) THEN
+        RAISE EXCEPTION 'VERIFY FAILED: verify_audit_chain missed a rewritten actor_subject' USING ERRCODE = 'XX000';
+    END IF;
 
-    -- 5. approvals: separation of duties, a request stays as written, and
-    --    approval_decision is append-only.
+    -- 5. approvals: separation of duties, a request stays as written, the state machine,
+    --    and approval_decision is append-only.
     INSERT INTO admin_permission (key, resource, action) VALUES ('verify.thing', 'verify', 'thing');
     INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason,
                                   expires_at, required_approvals)
@@ -286,25 +351,62 @@ BEGIN
     PERFORM pg_temp.expect_refused('re-attributing a request', format('UPDATE approval_request SET requested_by = %s WHERE id = %s', bob, req), 'P0001');
     PERFORM pg_temp.expect_refused('lowering required_approvals', 'UPDATE approval_request SET required_approvals = 1 WHERE id = ' || req, 'P0001');
     PERFORM pg_temp.expect_refused('rewriting a request payload', 'UPDATE approval_request SET payload = ''{"amount": 1}'' WHERE id = ' || req, 'P0001');
+    PERFORM pg_temp.expect_refused('approved with no approvals', 'UPDATE approval_request SET state = ''approved'' WHERE id = ' || req, 'P0001');
     INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (req, bob, 'rejected', 'r');
     PERFORM pg_temp.expect_refused('second vote by one approver', format('INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (%s, %s, ''approved'', ''r'')', req, bob), '23505');
     PERFORM pg_temp.expect_refused('UPDATE approval_decision', 'UPDATE approval_decision SET decision = ''approved'' WHERE request_id = ' || req, 'P0001');
     PERFORM pg_temp.expect_refused('DELETE approval_decision', 'DELETE FROM approval_decision WHERE request_id = ' || req, 'P0001');
     PERFORM pg_temp.expect_refused('TRUNCATE approval_decision CASCADE', 'TRUNCATE approval_decision CASCADE', 'P0001');
-    -- PostgreSQL 18 reports an ON DELETE RESTRICT refusal as 23001 (restrict_violation);
-    -- older versions, and NO ACTION keys such as Django's, report 23503.
-    PERFORM pg_temp.expect_refused('DELETE approval_request with decisions', 'DELETE FROM approval_request WHERE id = ' || req, '23503|23001');
-    SELECT count(*) INTO n FROM approval_decision WHERE request_id = req;
-    IF n <> 1 THEN RAISE EXCEPTION 'VERIFY FAILED: the rejection did not survive (% rows)', n USING ERRCODE = 'XX000'; END IF;
+    PERFORM pg_temp.expect_refused('approved over a rejection', format('INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (%s, %s, ''approved'', ''r''); UPDATE approval_request SET state = ''approved'' WHERE id = %s', req, carol, req), 'P0001');
     UPDATE approval_request SET state = 'rejected' WHERE id = req;  -- the lifecycle columns still change
+    PERFORM pg_temp.expect_refused('decision on a rejected request', format('INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (%s, %s, ''approved'', ''late'')', req, carol), 'P0001');
+    PERFORM pg_temp.expect_refused('rejected back to pending', 'UPDATE approval_request SET state = ''pending'' WHERE id = ' || req, 'P0001');
+    -- Two distinct approvers make it approved; then it runs once and stays executed.
+    INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason,
+                                  expires_at, required_approvals)
+    VALUES ('verify.thing', '{}', 'h', 'thing', alice, 'r', now() + interval '1 day', 2) RETURNING id INTO req2;
+    INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (req2, bob, 'approved', 'r');
+    PERFORM pg_temp.expect_refused('approved with too few approvals', 'UPDATE approval_request SET state = ''approved'' WHERE id = ' || req2, 'P0001');
+    INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (req2, carol, 'approved', 'r');
+    UPDATE approval_request SET state = 'approved' WHERE id = req2;
+    PERFORM pg_temp.expect_refused('executed without executed_at', 'UPDATE approval_request SET state = ''executed'' WHERE id = ' || req2, 'P0001');
+    UPDATE approval_request SET state = 'executed', executed_at = now(), execution_result = 'ok' WHERE id = req2;
+    PERFORM pg_temp.expect_refused('executed back to pending', 'UPDATE approval_request SET state = ''pending'', executed_at = NULL WHERE id = ' || req2, 'P0001');
+    -- A request is born pending and unexpired, and an expired one takes no decision.
+    PERFORM pg_temp.expect_refused('request inserted executed', format('INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason, expires_at, state) VALUES (''verify.thing'', ''{}'', ''h'', ''thing'', %s, ''r'', now() + interval ''1 day'', ''executed'')', alice), 'P0001');
+    PERFORM pg_temp.expect_refused('request inserted approved', format('INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason, expires_at, state) VALUES (''verify.thing'', ''{}'', ''h'', ''thing'', %s, ''r'', now() + interval ''1 day'', ''approved'')', alice), 'P0001');
+    PERFORM pg_temp.expect_refused('request inserted already expired', format('INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason, expires_at) VALUES (''verify.thing'', ''{}'', ''h'', ''thing'', %s, ''r'', now() - interval ''1 day'')', alice), 'P0001');
+    INSERT INTO approval_request (command_key, payload, payload_hash, target_type, requested_by, reason, expires_at)
+    VALUES ('verify.thing', '{}', 'h', 'thing', alice, 'r', clock_timestamp() + interval '200 milliseconds') RETURNING id INTO req3;
+    PERFORM pg_sleep(0.3);
+    PERFORM pg_temp.expect_refused('decision on an expired request', format('INSERT INTO approval_decision (request_id, approver_id, decision, reason) VALUES (%s, %s, ''approved'', ''late'')', req3, bob), 'P0001');
+    -- A request is a record of what was asked: a pending one is cancelled, never deleted.
+    PERFORM pg_temp.expect_refused('DELETE a pending approval_request', 'DELETE FROM approval_request WHERE id = ' || req3, 'P0001');
+    PERFORM pg_temp.expect_refused('TRUNCATE approval_request', 'TRUNCATE approval_request CASCADE', 'P0001');
+    -- With the delete trigger off, the decision's RESTRICT key still refuses. PostgreSQL 18
+    -- reports an ON DELETE RESTRICT refusal as 23001 (restrict_violation); older versions,
+    -- and NO ACTION keys such as Django's, report 23503.
+    ALTER TABLE approval_request DISABLE TRIGGER approval_request_no_delete;
+    PERFORM pg_temp.expect_refused('DELETE approval_request with decisions', 'DELETE FROM approval_request WHERE id = ' || req, '23503|23001');
+    ALTER TABLE approval_request ENABLE ALWAYS TRIGGER approval_request_no_delete;
+    SELECT count(*) INTO n FROM approval_decision WHERE request_id = req AND decision = 'rejected';
+    IF n <> 1 THEN RAISE EXCEPTION 'VERIFY FAILED: the rejection did not survive (% rows)', n USING ERRCODE = 'XX000'; END IF;
 
-    -- 6. live-grant uniqueness, including the global (NULL tenant) grant.
+    -- 6. grants: live-grant uniqueness (including the global, NULL tenant, grant), no
+    --    self-grant, a grant is never rewritten or un-revoked, and scope_tenant_id agrees
+    --    with scope.
     INSERT INTO admin_role (key, name) VALUES ('verify-role', 'Verify') RETURNING id INTO role;
-    INSERT INTO admin_actor_role (actor_id, role_id, granted_by, granted_reason) VALUES (alice, role, carol, 'r');
+    INSERT INTO admin_role (key, name) VALUES ('verify-super', 'Verify super') RETURNING id INTO role2;
+    INSERT INTO admin_actor_role (actor_id, role_id, granted_by, granted_reason) VALUES (alice, role, carol, 'r') RETURNING id INTO grant1;
     PERFORM pg_temp.expect_refused('duplicate live global grant', format('INSERT INTO admin_actor_role (actor_id, role_id, granted_by, granted_reason) VALUES (%s, %s, %s, ''r'')', alice, role, carol), '23505');
-    INSERT INTO admin_actor_role (actor_id, role_id, scope_tenant_id, granted_by, granted_reason) VALUES (alice, role, 't1', carol, 'r');
-    PERFORM pg_temp.expect_refused('duplicate live tenant grant', format('INSERT INTO admin_actor_role (actor_id, role_id, scope_tenant_id, granted_by, granted_reason) VALUES (%s, %s, ''t1'', %s, ''r'')', alice, role, carol), '23505');
+    INSERT INTO admin_actor_role (actor_id, role_id, scope, scope_tenant_id, granted_by, granted_reason) VALUES (alice, role, '{"tenants":["t1"]}', 't1', carol, 'r');
+    PERFORM pg_temp.expect_refused('duplicate live tenant grant', format('INSERT INTO admin_actor_role (actor_id, role_id, scope, scope_tenant_id, granted_by, granted_reason) VALUES (%s, %s, ''{"tenants":["t1"]}'', ''t1'', %s, ''r'')', alice, role, carol), '23505');
     PERFORM pg_temp.expect_refused('self-grant', format('INSERT INTO admin_actor_role (actor_id, role_id, granted_by, granted_reason) VALUES (%s, %s, %s, ''r'')', bob, role, bob), '23514');
+    PERFORM pg_temp.expect_refused('tenant scope with a global scope_tenant_id', format('INSERT INTO admin_actor_role (actor_id, role_id, scope, granted_by, granted_reason) VALUES (%s, %s, ''{"tenants":["t2"]}'', %s, ''r'')', bob, role, carol), 'P0001');
+    PERFORM pg_temp.expect_refused('scope_tenant_id outside the scope', format('INSERT INTO admin_actor_role (actor_id, role_id, scope, scope_tenant_id, granted_by, granted_reason) VALUES (%s, %s, ''{"tenants":["t2","t3"]}'', ''t2'', %s, ''r'')', bob, role, carol), 'P0001');
+    PERFORM pg_temp.expect_refused('rewriting a grant''s role', format('UPDATE admin_actor_role SET role_id = %s, expires_at = NULL WHERE id = %s', role2, grant1), 'P0001');
+    UPDATE admin_actor_role SET revoked_at = now(), revoked_by = carol, revoke_reason = 'left' WHERE id = grant1;
+    PERFORM pg_temp.expect_refused('un-revoking a grant', 'UPDATE admin_actor_role SET revoked_at = NULL, revoked_by = NULL, revoke_reason = NULL WHERE id = ' || grant1, 'P0001');
 
     -- 7. configuration keys are unique per (key, environment, tenant), not per key.
     INSERT INTO feature_flag (key, environment) VALUES ('verify.flag', 'production'), ('verify.flag', 'staging');
@@ -317,7 +419,8 @@ BEGIN
     PERFORM pg_temp.expect_refused('duplicate config_setting scope', 'INSERT INTO config_setting (key, value, value_type, environment) VALUES (''verify.setting'', ''2'', ''number'', ''production'')', '23505');
     PERFORM pg_temp.expect_refused('secret value stored inline', 'INSERT INTO config_setting (key, value, value_type, is_secret, environment) VALUES (''k'', ''"s3cret"'', ''string'', true, ''production'')', '23514');
 
-    -- 8. impersonation: one live session, bounded duration, an end reason.
+    -- 8. impersonation: one live session, bounded duration, an end reason, fixed once
+    --    started, and only the acting actor's own session can be named in its audit rows.
     INSERT INTO impersonation_session (real_actor_id, target_subject_id, reason, expires_at)
     VALUES (alice, 'customer-1', 'support ticket', now() + interval '1 hour') RETURNING id INTO sess;
     IF NOT (SELECT read_only FROM impersonation_session WHERE id = sess) THEN
@@ -325,8 +428,15 @@ BEGIN
     END IF;
     PERFORM pg_temp.expect_refused('second live session', format('INSERT INTO impersonation_session (real_actor_id, target_subject_id, reason, expires_at) VALUES (%s, ''c2'', ''r'', now() + interval ''1 hour'')', alice), '23505');
     PERFORM pg_temp.expect_refused('nine-hour session', format('INSERT INTO impersonation_session (real_actor_id, target_subject_id, reason, expires_at) VALUES (%s, ''c2'', ''r'', now() + interval ''9 hours'')', bob), '23514');
+    INSERT INTO audit_event (occurred_at, actor_id, effective_actor_id, impersonation_session_id, environment, action, target_type, result)
+    VALUES (now(), alice, 'customer-1', sess, 'production', 'order.view', 'order', 'succeeded');
+    PERFORM pg_temp.expect_refused('another actor''s impersonation session', format('INSERT INTO audit_event (occurred_at, actor_id, effective_actor_id, impersonation_session_id, environment, action, target_type, result) VALUES (now(), %s, ''customer-1'', %s, ''production'', ''x'', ''x'', ''succeeded'')', carol, sess), 'P0001');
+    PERFORM pg_temp.expect_refused('acted-as subject other than the session''s', format('INSERT INTO audit_event (occurred_at, actor_id, effective_actor_id, impersonation_session_id, environment, action, target_type, result) VALUES (now(), %s, ''customer-9'', %s, ''production'', ''x'', ''x'', ''succeeded'')', alice, sess), 'P0001');
+    PERFORM pg_temp.expect_refused('retargeting a session', 'UPDATE impersonation_session SET target_subject_id = ''customer-2'', read_only = false WHERE id = ' || sess, 'P0001');
+    PERFORM pg_temp.expect_refused('sliding a session''s window', 'UPDATE impersonation_session SET started_at = started_at + interval ''7 hours'', expires_at = expires_at + interval ''7 hours'' WHERE id = ' || sess, 'P0001');
     PERFORM pg_temp.expect_refused('ending without a reason', 'UPDATE impersonation_session SET ended_at = now() WHERE id = ' || sess, '23514');
     UPDATE impersonation_session SET ended_at = now(), ended_reason = 'operator_exit' WHERE id = sess;
+    PERFORM pg_temp.expect_refused('reopening an ended session', 'UPDATE impersonation_session SET ended_at = NULL, ended_reason = NULL WHERE id = ' || sess, 'P0001');
     PERFORM pg_temp.expect_refused('acted-as subject without a session', format('INSERT INTO audit_event (occurred_at, actor_id, effective_actor_id, environment, action, target_type, result) VALUES (now(), %s, ''customer-1'', ''production'', ''x'', ''x'', ''succeeded'')', alice), '23514');
 
     -- 9. jobs: a repeated idempotency key is refused, and deleting a job cannot take its

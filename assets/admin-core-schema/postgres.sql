@@ -90,7 +90,9 @@ CREATE TABLE admin_role_permission (
 );
 
 -- A grant, not a join row: it carries where it applies, when it expires, who
--- granted it and why, and how it was revoked.
+-- granted it and why, and how it was revoked. Only the revocation columns change
+-- later, once, and scope_tenant_id must agree with scope (admin_actor_role_guard in
+-- the Integrity section).
 CREATE TABLE admin_actor_role (
     id               bigserial PRIMARY KEY,
     actor_id         bigint      NOT NULL REFERENCES admin_actor(id),
@@ -143,7 +145,8 @@ CREATE TABLE admin_policy_version (
 -- Append-only. See the Integrity section below for enforcement.
 -- The database owns the chain columns: writers leave chain_seq, prev_hash and
 -- row_hash out of the INSERT (the audit_event_chain_link trigger assigns them),
--- and before_hash / after_hash are derived from before_state / after_state.
+-- before_hash / after_hash are derived from before_state / after_state, and
+-- recorded_at and actor_subject are set by the same trigger whatever the writer sends.
 CREATE TABLE audit_event (
     id                      bigserial PRIMARY KEY,
     event_uuid              uuid        NOT NULL DEFAULT gen_random_uuid() UNIQUE,
@@ -151,12 +154,15 @@ CREATE TABLE audit_event (
     chain_seq               bigint      NOT NULL,   -- assigned by trigger
 
     occurred_at             timestamptz NOT NULL,
-    recorded_at             timestamptz NOT NULL DEFAULT now(),
+    recorded_at             timestamptz NOT NULL DEFAULT now(),  -- set by trigger
 
     actor_id                bigint      NULL REFERENCES admin_actor(id),
     actor_kind              text        NOT NULL DEFAULT 'human'
                             CONSTRAINT audit_event_actor_kind_check
                             CHECK (actor_kind IN ('human', 'service', 'agent', 'system')),
+    -- admin_actor.auth_subject as it was when the row was written (set by trigger,
+    -- covered by row_hash), so rewriting the actor row later cannot re-attribute it.
+    actor_subject           text        NULL,
     -- NULL unless impersonating. Never overwrite actor_id with the impersonated
     -- identity: that is the most common way impersonation audit is destroyed.
     -- The acted-as subject is usually a customer, not an admin_actor, so this is
@@ -202,7 +208,11 @@ CREATE TABLE audit_event (
     hash_algorithm          text        NOT NULL DEFAULT 'sha256',
 
     CONSTRAINT audit_event_effective_actor_requires_session
-        CHECK (effective_actor_id IS NULL OR impersonation_session_id IS NOT NULL)
+        CHECK (effective_actor_id IS NULL OR impersonation_session_id IS NOT NULL),
+    -- Only the chain trigger produces these values, so a row inserted without it
+    -- (a migration that left the trigger out) fails here instead of chaining nothing.
+    CONSTRAINT audit_event_chain_assigned
+        CHECK (chain_seq >= 1 AND row_hash ~ '^[0-9a-f]{64}$')
 );
 
 -- Chain position must be unique and gap-detectable.
@@ -218,6 +228,9 @@ CREATE INDEX audit_event_action      ON audit_event (action, occurred_at DESC);
 CREATE INDEX audit_event_correlation ON audit_event (correlation_id) WHERE correlation_id IS NOT NULL;
 CREATE INDEX audit_event_request     ON audit_event (request_id) WHERE request_id IS NOT NULL;
 CREATE INDEX audit_event_idempotency ON audit_event (idempotency_key) WHERE idempotency_key IS NOT NULL;
+-- "Everything support did as this customer", and the key check when a session row goes.
+CREATE INDEX audit_event_impersonation ON audit_event (impersonation_session_id, occurred_at DESC)
+    WHERE impersonation_session_id IS NOT NULL;
 
 -- Paginate by keyset on (occurred_at, id). Offset pagination on an append-heavy
 -- table shifts rows under the operator and degrades linearly.
@@ -226,6 +239,7 @@ CREATE INDEX audit_event_idempotency ON audit_event (idempotency_key) WHERE idem
 -- Impersonation
 -- ---------------------------------------------------------------------------
 
+-- Fixed when it starts; only ending it is a later change (impersonation_session_immutable).
 CREATE TABLE impersonation_session (
     id                 bigserial PRIMARY KEY,
     session_uuid       uuid        NOT NULL DEFAULT gen_random_uuid() UNIQUE,
@@ -273,6 +287,8 @@ ALTER TABLE audit_event
 -- Approvals and separation of duties
 -- ---------------------------------------------------------------------------
 
+-- The state machine (approval_request_state), immutability (approval_request_immutable)
+-- and no-delete triggers are in the Integrity section: a request is cancelled, not deleted.
 CREATE TABLE approval_request (
     id              bigserial PRIMARY KEY,
     request_uuid    uuid        NOT NULL DEFAULT gen_random_uuid() UNIQUE,
@@ -523,63 +539,93 @@ CREATE INDEX data_subject_request_queue ON data_subject_request (state, due_at);
 -- ---------------------------------------------------------------------------
 
 -- Caveats, stated plainly:
---   * A trigger stops ordinary application paths. It does not stop a superuser,
---     anyone who can DROP the trigger, or direct file access.
+--   * A trigger stops ordinary application paths. It does not stop a superuser, the
+--     owner of the tables or of these functions (who can DROP, DISABLE or replace
+--     them), or direct file access.
+--   * Every trigger here is ENABLE ALWAYS, so session_replication_role = replica does
+--     not switch it off. That setting needs a superuser, but managed services often
+--     grant it to an admin role, and PostgreSQL 15+ can hand it out with GRANT SET ON
+--     PARAMETER. On a logical-replication subscriber, whose apply worker runs as
+--     replica, set the triggers back to plain ENABLE: the publisher already enforced
+--     them, and ALWAYS would re-chain the replicated rows and refuse a replicated scrub.
 --   * Real tamper evidence needs the hash chain anchored somewhere outside this
 --     database (an append-only log, a WORM bucket, periodic external attestation).
 --     See the hash-chaining section of references/admin-data-model.md for what a
 --     chain does and does not prove.
 --   * At regulated profile, pair this with grants.sql: revoked UPDATE / DELETE /
 --     TRUNCATE for a separate application role.
---   * Every function that reads a table pins SET search_path = <schema>, pg_temp.
---     A trigger runs with the caller's search_path, where the caller's own temporary
---     tables come first: in the unqualified copies (Django, Prisma, Laravel, Rails) a
---     session could otherwise CREATE TEMP TABLE approval_request and approve its own
---     request. Listing pg_temp last is what stops that.
+--   * Every function pins SET search_path = pg_catalog, pg_temp and names each table,
+--     type and function it uses with its schema. A trigger otherwise runs with the
+--     caller's search_path, where the caller's temporary tables come first and an
+--     overload the caller created in a writable schema (public, on a database that
+--     started before PostgreSQL 15) beats the built-in it shadows: a session could
+--     re-attribute an approval request, rewrite audit rows, or blind
+--     verify_audit_chain(). pg_temp last keeps temporary tables out; functions and
+--     operators are never looked up there.
 
 -- Canonical hash input for one audit_event row: the JSON array (jsonb canonical
 -- text form) of the values below, in this order; timestamps as UTC ISO-8601 with
--- microseconds, the address without a netmask, SQL NULL as JSON null. Excluded on
--- purpose: id (storage detail), row_hash (the output), and before_state /
--- after_state / redaction_policy (a scrub changes them; before_hash / after_hash
--- stand in for the payloads, which is what lets a payload be scrubbed without
--- breaking the chain). row_hash = hex(sha256(utf8(this text))).
+-- microseconds, the address without a netmask, SQL NULL as JSON null; then
+-- actor_subject as one more element when it is not NULL (rows written before the
+-- column existed hash as they did). Excluded on purpose: id (storage detail),
+-- row_hash (the output), and before_state / after_state / redaction_policy (a scrub
+-- changes them; before_hash / after_hash stand in for the payloads, which is what
+-- lets a payload be scrubbed without breaking the chain).
+-- row_hash = hex(sha256(utf8(this text))).
 CREATE OR REPLACE FUNCTION admin_core.audit_event_hash_input(e admin_core.audit_event)
 RETURNS text
-LANGUAGE sql STABLE AS $$
-    SELECT jsonb_build_array(
+LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+    SELECT (pg_catalog.jsonb_build_array(
         e.event_uuid, e.chain_id, e.chain_seq,
-        to_char(e.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-        to_char(e.recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+        pg_catalog.to_char(e.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+        pg_catalog.to_char(e.recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
         e.actor_id, e.actor_kind, e.effective_actor_id, e.impersonation_session_id,
-        e.tenant_id, e.environment, host(e.source_ip), e.user_agent,
+        e.tenant_id, e.environment, pg_catalog.host(e.source_ip), e.user_agent,
         e.action, e.target_type, e.target_id,
         e.reason, e.ticket_ref, e.approval_request_id,
         e.request_id, e.correlation_id, e.idempotency_key,
         e.result, e.error_code, e.before_hash, e.after_hash,
         e.policy_version, e.prev_hash, e.hash_algorithm
-    )::text
+    ) || CASE WHEN e.actor_subject IS NULL THEN '[]'::jsonb
+              ELSE pg_catalog.jsonb_build_array(e.actor_subject) END)::text
 $$;
 
--- Assigns chain_seq, prev_hash, the payload hashes and row_hash. The advisory lock
--- serializes writers within one chain_id (released at commit), which is what makes
--- chain_seq gap-free; use several chain_ids to shard write throughput. Under
--- REPEATABLE READ or SERIALIZABLE a stale snapshot can pick an already-used
--- chain_seq: the unique index then rejects the insert and the writer retries.
--- The payload hashes are derived, never taken from the writer: a hash without its
--- payload is what a scrubbed row looks like, so an INSERT must not be able to forge
--- one. A row inserted with no payload at all records redaction_policy 'none', since
--- no policy was applied to anything.
+-- Assigns chain_seq, prev_hash, recorded_at, actor_subject, the payload hashes and
+-- row_hash. The advisory lock serializes writers within one chain_id (released at
+-- commit), which is what makes chain_seq gap-free and recorded_at non-decreasing
+-- along it; use several chain_ids to shard write throughput. Under REPEATABLE READ or
+-- SERIALIZABLE a stale snapshot can pick an already-used chain_seq: the unique index
+-- then rejects the insert and the writer retries.
+-- Nothing here is taken from the writer: a hash without its payload is what a
+-- scrubbed row looks like, recorded_at is the database-witnessed time, and
+-- actor_subject is who actor_id was at the time. A row inserted with no payload at
+-- all records redaction_policy 'none', since no policy was applied to anything. An
+-- impersonation_session_id must be the acting actor's own session, and an acted-as
+-- subject must be that session's target.
 CREATE OR REPLACE FUNCTION admin_core.audit_event_chain_link()
-RETURNS trigger SET search_path = admin_core, pg_temp AS $$
+RETURNS trigger SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
     last_seq  bigint;
     last_hash text;
+    sess      admin_core.impersonation_session%ROWTYPE;
 BEGIN
     IF NEW.hash_algorithm IS DISTINCT FROM 'sha256' THEN
         RAISE EXCEPTION 'audit_event: only sha256 is implemented, got %', NEW.hash_algorithm;
     END IF;
-    PERFORM pg_advisory_xact_lock(hashtextextended('admin_core.audit_event:' || NEW.chain_id, 0));
+    NEW.actor_subject := NULL;
+    IF NEW.actor_id IS NOT NULL THEN
+        NEW.actor_subject := (SELECT a.auth_subject FROM admin_core.admin_actor a WHERE a.id = NEW.actor_id);
+    END IF;
+    IF NEW.impersonation_session_id IS NOT NULL THEN
+        SELECT * INTO sess FROM admin_core.impersonation_session s WHERE s.id = NEW.impersonation_session_id;
+        IF FOUND AND (sess.real_actor_id IS DISTINCT FROM NEW.actor_id
+                      OR NEW.effective_actor_id <> sess.target_subject_id) THEN
+            RAISE EXCEPTION 'audit_event: impersonation_session % is actor % acting as %; this row names actor % acting as %',
+                sess.id, sess.real_actor_id, sess.target_subject_id, NEW.actor_id, NEW.effective_actor_id;
+        END IF;
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('admin_core.audit_event:' || NEW.chain_id, 0));
     SELECT a.chain_seq, a.row_hash INTO last_seq, last_hash
       FROM admin_core.audit_event a
      WHERE a.chain_id = NEW.chain_id
@@ -587,15 +633,16 @@ BEGIN
      LIMIT 1;
     NEW.chain_seq := COALESCE(last_seq, 0) + 1;
     NEW.prev_hash := last_hash;
+    NEW.recorded_at := pg_catalog.clock_timestamp();
     NEW.before_hash := CASE WHEN NEW.before_state IS NULL THEN NULL
-        ELSE encode(sha256(convert_to(NEW.before_state::text, 'UTF8')), 'hex') END;
+        ELSE pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(NEW.before_state::text, 'UTF8')), 'hex') END;
     NEW.after_hash := CASE WHEN NEW.after_state IS NULL THEN NULL
-        ELSE encode(sha256(convert_to(NEW.after_state::text, 'UTF8')), 'hex') END;
+        ELSE pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(NEW.after_state::text, 'UTF8')), 'hex') END;
     IF NEW.before_state IS NULL AND NEW.after_state IS NULL THEN
         NEW.redaction_policy := 'none';
     END IF;
-    NEW.row_hash := encode(
-        sha256(convert_to(admin_core.audit_event_hash_input(NEW), 'UTF8')), 'hex');
+    NEW.row_hash := pg_catalog.encode(
+        pg_catalog.sha256(pg_catalog.convert_to(admin_core.audit_event_hash_input(NEW), 'UTF8')), 'hex');
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -614,7 +661,7 @@ CREATE TRIGGER audit_event_chain_link
 -- event names the row, which catches a drop made with the update trigger disabled.
 CREATE OR REPLACE FUNCTION admin_core.verify_audit_chain(p_chain_id text DEFAULT NULL)
 RETURNS TABLE (chain_id text, chain_seq bigint, problem text)
-LANGUAGE plpgsql STABLE SET search_path = admin_core, pg_temp AS $$
+LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
     r         admin_core.audit_event%ROWTYPE;
     cur_chain text;
@@ -642,18 +689,18 @@ BEGIN
             problem := 'prev_hash does not match the previous row_hash';
             RETURN NEXT;
         END IF;
-        IF r.row_hash IS DISTINCT FROM encode(
-               sha256(convert_to(admin_core.audit_event_hash_input(r), 'UTF8')), 'hex') THEN
+        IF r.row_hash IS DISTINCT FROM pg_catalog.encode(
+               pg_catalog.sha256(pg_catalog.convert_to(admin_core.audit_event_hash_input(r), 'UTF8')), 'hex') THEN
             problem := 'row_hash does not match the row content';
             RETURN NEXT;
         END IF;
         IF r.before_state IS NOT NULL AND r.before_hash IS DISTINCT FROM
-               encode(sha256(convert_to(r.before_state::text, 'UTF8')), 'hex') THEN
+               pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(r.before_state::text, 'UTF8')), 'hex') THEN
             problem := 'before_hash does not match before_state';
             RETURN NEXT;
         END IF;
         IF r.after_state IS NOT NULL AND r.after_hash IS DISTINCT FROM
-               encode(sha256(convert_to(r.after_state::text, 'UTF8')), 'hex') THEN
+               pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(r.after_state::text, 'UTF8')), 'hex') THEN
             problem := 'after_hash does not match after_state';
             RETURN NEXT;
         END IF;
@@ -678,21 +725,27 @@ $$;
 -- UPDATE then runs with admin_core.scrub set to that event's id: the update guard
 -- below accepts a payload drop only when that setting names such an event for the
 -- row, so no payload leaves without its own audit record, whoever issues the UPDATE.
+-- The event names the admin_actor who asked (required) and, in user_agent, the
+-- database role of the session that called the function (session_user: inside a
+-- SECURITY DEFINER function current_user is the owner).
 -- Runs as the function owner so the application role needs no UPDATE grant
 -- (grants.sql). Register 'audit.scrub_payload' as a permission and grant EXECUTE only
 -- to the role that may redact.
 CREATE OR REPLACE FUNCTION admin_core.scrub_audit_payload(
-    p_event_id bigint, p_policy text, p_reason text, p_actor_id bigint DEFAULT NULL)
+    p_event_id bigint, p_policy text, p_reason text, p_actor_id bigint)
 RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = admin_core, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
     ev       admin_core.audit_event%ROWTYPE;
     scrub_id bigint;
 BEGIN
+    IF p_actor_id IS NULL THEN
+        RAISE EXCEPTION 'scrub_audit_payload needs the admin_actor id of whoever asked for the scrub';
+    END IF;
     IF p_policy IS NULL OR p_policy IN ('', 'none') THEN
         RAISE EXCEPTION 'scrub_audit_payload needs a named redaction policy';
     END IF;
-    IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+    IF p_reason IS NULL OR pg_catalog.btrim(p_reason) = '' THEN
         RAISE EXCEPTION 'scrub_audit_payload needs a reason';
     END IF;
     SELECT * INTO ev FROM admin_core.audit_event WHERE id = p_event_id FOR UPDATE;
@@ -704,17 +757,18 @@ BEGIN
     END IF;
     -- actor_kind is 'system': the database performed the write; actor_id is who asked.
     INSERT INTO admin_core.audit_event
-        (chain_id, occurred_at, actor_id, actor_kind, tenant_id, environment,
+        (chain_id, occurred_at, actor_id, actor_kind, tenant_id, environment, user_agent,
          action, target_type, target_id, reason, result)
     VALUES
-        (ev.chain_id, now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
+        (ev.chain_id, pg_catalog.now(), p_actor_id, 'system', ev.tenant_id, ev.environment,
+         'scrub_audit_payload, database role ' || session_user::text,
          'audit.scrub_payload', 'audit_event', ev.id::text, p_reason, 'succeeded')
     RETURNING id INTO scrub_id;
-    PERFORM set_config('admin_core.scrub', scrub_id::text, true);
+    PERFORM pg_catalog.set_config('admin_core.scrub', scrub_id::text, true);
     UPDATE admin_core.audit_event
        SET before_state = NULL, after_state = NULL, redaction_policy = p_policy
      WHERE id = p_event_id;
-    PERFORM set_config('admin_core.scrub', '', true);
+    PERFORM pg_catalog.set_config('admin_core.scrub', '', true);
 END;
 $$;
 
@@ -722,16 +776,32 @@ REVOKE ALL ON FUNCTION admin_core.scrub_audit_payload(bigint, text, text, bigint
 
 -- Separation of duties: the requester may not approve their own request. Enforced
 -- here rather than in application code because it is the whole point of the control.
+-- A decision is also refused once the request has left pending or has expired, and it
+-- is stamped with the database time. The per-request advisory lock is shared with
+-- approval_request_guard_state, so a decision and the move to approved cannot pass
+-- each other unseen (READ COMMITTED, the default; under REPEATABLE READ a waiting
+-- transaction keeps its old snapshot, so run approval writes in READ COMMITTED or
+-- SERIALIZABLE).
 CREATE OR REPLACE FUNCTION admin_core.enforce_separation_of_duties()
-RETURNS trigger SET search_path = admin_core, pg_temp AS $$
+RETURNS trigger SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    req admin_core.approval_request%ROWTYPE;
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM admin_core.approval_request r
-        WHERE r.id = NEW.request_id AND r.requested_by = NEW.approver_id
-    ) THEN
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('admin_core.approval_request:' || NEW.request_id::text, 0));
+    SELECT * INTO req FROM admin_core.approval_request r WHERE r.id = NEW.request_id;
+    IF NOT FOUND THEN
+        RETURN NEW;  -- the foreign key refuses it
+    END IF;
+    IF req.requested_by = NEW.approver_id THEN
         RAISE EXCEPTION 'separation of duties: requester % may not approve request %',
             NEW.approver_id, NEW.request_id;
     END IF;
+    IF req.state <> 'pending' OR req.expires_at <= pg_catalog.clock_timestamp() THEN
+        RAISE EXCEPTION 'approval_request % is % and expires at %: it takes no more decisions',
+            NEW.request_id, req.state, req.expires_at;
+    END IF;
+    NEW.decided_at := pg_catalog.clock_timestamp();
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -745,10 +815,10 @@ CREATE TRIGGER approval_decision_sod
 -- check above, and rewriting the payload, its hash, the target or required_approvals
 -- would change what the approvals were given for.
 CREATE OR REPLACE FUNCTION admin_core.approval_request_guard_update()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-    IF (to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
-       IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
+    IF (pg_catalog.to_jsonb(NEW) - 'state' - 'executed_at' - 'execution_result')
+       IS DISTINCT FROM (pg_catalog.to_jsonb(OLD) - 'state' - 'executed_at' - 'execution_result') THEN
         RAISE EXCEPTION 'approval_request % is immutable except state, executed_at and execution_result', OLD.id;
     END IF;
     RETURN NEW;
@@ -759,9 +829,70 @@ CREATE TRIGGER approval_request_immutable
     BEFORE UPDATE ON admin_core.approval_request
     FOR EACH ROW EXECUTE FUNCTION admin_core.approval_request_guard_update();
 
--- Append-only enforcement.
+-- The state machine of references/admin-data-model.md, in the database:
+--   pending  -> approved | rejected | expired | cancelled
+--   approved -> executed | execution_failed | expired
+-- A request starts pending, unexpired and unexecuted. It becomes approved only with
+-- required_approvals distinct approving decisions by people other than the requester,
+-- no rejection, and before it expires. executed_at is set exactly in executed and
+-- execution_failed, and a request in a final state does not change again (write
+-- state, executed_at and execution_result in one UPDATE).
+CREATE OR REPLACE FUNCTION admin_core.approval_request_guard_state()
+RETURNS trigger SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    approvals bigint;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.state <> 'pending' OR NEW.executed_at IS NOT NULL OR NEW.execution_result IS NOT NULL THEN
+            RAISE EXCEPTION 'approval_request: a new request starts pending, with nothing executed';
+        END IF;
+        IF NEW.expires_at <= pg_catalog.clock_timestamp() THEN
+            RAISE EXCEPTION 'approval_request: expires_at % is already past', NEW.expires_at;
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF NEW.state = OLD.state THEN
+        IF OLD.state NOT IN ('pending', 'approved')
+           AND (NEW.executed_at IS DISTINCT FROM OLD.executed_at
+                OR NEW.execution_result IS DISTINCT FROM OLD.execution_result) THEN
+            RAISE EXCEPTION 'approval_request % is % and does not change any more', OLD.id, OLD.state;
+        END IF;
+    ELSIF NOT ((OLD.state = 'pending' AND NEW.state IN ('approved', 'rejected', 'expired', 'cancelled'))
+               OR (OLD.state = 'approved' AND NEW.state IN ('executed', 'execution_failed', 'expired'))) THEN
+        RAISE EXCEPTION 'approval_request %: % to % is not a permitted transition', OLD.id, OLD.state, NEW.state;
+    END IF;
+    IF (NEW.executed_at IS NOT NULL) <> (NEW.state IN ('executed', 'execution_failed')) THEN
+        RAISE EXCEPTION 'approval_request %: executed_at is set exactly when the state is executed or execution_failed', OLD.id;
+    END IF;
+    IF NEW.state = 'approved' AND OLD.state = 'pending' THEN
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended('admin_core.approval_request:' || NEW.id::text, 0));
+        IF NEW.expires_at <= pg_catalog.clock_timestamp() THEN
+            RAISE EXCEPTION 'approval_request % expired at %', OLD.id, NEW.expires_at;
+        END IF;
+        IF EXISTS (SELECT 1 FROM admin_core.approval_decision d
+                    WHERE d.request_id = NEW.id AND d.decision = 'rejected') THEN
+            RAISE EXCEPTION 'approval_request % has a rejection and cannot be approved', OLD.id;
+        END IF;
+        SELECT pg_catalog.count(DISTINCT d.approver_id) INTO approvals
+          FROM admin_core.approval_decision d
+         WHERE d.request_id = NEW.id AND d.decision = 'approved' AND d.approver_id <> NEW.requested_by;
+        IF approvals < NEW.required_approvals THEN
+            RAISE EXCEPTION 'approval_request % has % of the % approvals it requires', OLD.id, approvals,
+                NEW.required_approvals;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER approval_request_state
+    BEFORE INSERT OR UPDATE ON admin_core.approval_request
+    FOR EACH ROW EXECUTE FUNCTION admin_core.approval_request_guard_state();
+
+-- Append-only enforcement, and a request is never deleted (a pending one is cancelled).
 CREATE OR REPLACE FUNCTION admin_core.deny_audit_mutation()
-RETURNS trigger AS $$
+RETURNS trigger SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
     RAISE EXCEPTION '% is append-only; % is not permitted', TG_TABLE_NAME, TG_OP;
 END;
@@ -775,16 +906,16 @@ $$ LANGUAGE plpgsql;
 -- the audit record. A session that sets it to 'on', or at another row's event, is
 -- refused.
 CREATE OR REPLACE FUNCTION admin_core.audit_event_guard_update()
-RETURNS trigger SET search_path = admin_core, pg_temp AS $$
+RETURNS trigger SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
-    scrub_event text := current_setting('admin_core.scrub', true);
+    scrub_event text := pg_catalog.current_setting('admin_core.scrub', true);
 BEGIN
     IF scrub_event IS NULL OR scrub_event !~ '^[0-9]{1,18}$' THEN
         RAISE EXCEPTION 'audit_event is append-only; UPDATE is not permitted (scrub payloads with scrub_audit_payload)';
     END IF;
     IF NEW.before_state IS NOT NULL OR NEW.after_state IS NOT NULL
-       OR (to_jsonb(NEW) - 'before_state' - 'after_state' - 'redaction_policy')
-          IS DISTINCT FROM (to_jsonb(OLD) - 'before_state' - 'after_state' - 'redaction_policy') THEN
+       OR (pg_catalog.to_jsonb(NEW) - 'before_state' - 'after_state' - 'redaction_policy')
+          IS DISTINCT FROM (pg_catalog.to_jsonb(OLD) - 'before_state' - 'after_state' - 'redaction_policy') THEN
         RAISE EXCEPTION 'audit_event scrub may only drop before_state / after_state and set redaction_policy';
     END IF;
     IF OLD.before_state IS NULL AND OLD.after_state IS NULL THEN
@@ -829,6 +960,95 @@ CREATE TRIGGER approval_decision_no_delete
 CREATE TRIGGER approval_decision_no_truncate
     BEFORE TRUNCATE ON admin_core.approval_decision
     FOR EACH STATEMENT EXECUTE FUNCTION admin_core.deny_audit_mutation();
+
+CREATE TRIGGER approval_request_no_delete
+    BEFORE DELETE ON admin_core.approval_request
+    FOR EACH ROW EXECUTE FUNCTION admin_core.deny_audit_mutation();
+
+CREATE TRIGGER approval_request_no_truncate
+    BEFORE TRUNCATE ON admin_core.approval_request
+    FOR EACH STATEMENT EXECUTE FUNCTION admin_core.deny_audit_mutation();
+
+-- A grant is issued once: its role, scope, window and origin story never change (revoke
+-- it and grant again), and a revoked grant stays revoked. scope_tenant_id is the
+-- hot-path copy of a scope whose "tenants" names exactly one tenant, and NULL otherwise
+-- (several tenants, all of them, or none named: consult scope), so the two cannot
+-- describe different grants.
+CREATE OR REPLACE FUNCTION admin_core.admin_actor_role_guard()
+RETURNS trigger SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    tenants jsonb := NEW.scope -> 'tenants';
+    single  text;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.revoked_at IS NOT NULL
+           AND pg_catalog.to_jsonb(NEW) IS DISTINCT FROM pg_catalog.to_jsonb(OLD) THEN
+            RAISE EXCEPTION 'admin_actor_role % is revoked, and a revoked grant stays revoked (grant again instead)', OLD.id;
+        END IF;
+        IF (pg_catalog.to_jsonb(NEW) - 'revoked_at' - 'revoked_by' - 'revoke_reason')
+           IS DISTINCT FROM (pg_catalog.to_jsonb(OLD) - 'revoked_at' - 'revoked_by' - 'revoke_reason') THEN
+            RAISE EXCEPTION 'admin_actor_role % is immutable except revoked_at, revoked_by and revoke_reason (revoke it and grant again)', OLD.id;
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF pg_catalog.jsonb_typeof(tenants) = 'array' THEN
+        IF pg_catalog.jsonb_array_length(tenants) = 1 AND pg_catalog.jsonb_typeof(tenants -> 0) = 'string' THEN
+            single := tenants ->> 0;
+        END IF;
+    END IF;
+    IF single = '*' THEN
+        single := NULL;
+    END IF;
+    IF NEW.scope_tenant_id IS DISTINCT FROM single THEN
+        RAISE EXCEPTION 'admin_actor_role: scope % needs scope_tenant_id %, not %', NEW.scope,
+            COALESCE(single, 'NULL'), COALESCE(NEW.scope_tenant_id, 'NULL');
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER admin_actor_role_guard
+    BEFORE INSERT OR UPDATE ON admin_core.admin_actor_role
+    FOR EACH ROW EXECUTE FUNCTION admin_core.admin_actor_role_guard();
+
+-- An impersonation session is fixed when it starts: who, as whom, why, its limits and
+-- its expiry. Only ending it (ended_at, ended_reason, revoked_by) is a later change, and
+-- an ended session does not change again, so it can neither be pointed at another
+-- subject after audit rows name it nor be extended past its cap.
+CREATE OR REPLACE FUNCTION admin_core.impersonation_session_guard_update()
+RETURNS trigger SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF OLD.ended_at IS NOT NULL
+       AND pg_catalog.to_jsonb(NEW) IS DISTINCT FROM pg_catalog.to_jsonb(OLD) THEN
+        RAISE EXCEPTION 'impersonation_session % has ended and does not change any more', OLD.id;
+    END IF;
+    IF (pg_catalog.to_jsonb(NEW) - 'ended_at' - 'ended_reason' - 'revoked_by')
+       IS DISTINCT FROM (pg_catalog.to_jsonb(OLD) - 'ended_at' - 'ended_reason' - 'revoked_by') THEN
+        RAISE EXCEPTION 'impersonation_session % is immutable except ended_at, ended_reason and revoked_by', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER impersonation_session_immutable
+    BEFORE UPDATE ON admin_core.impersonation_session
+    FOR EACH ROW EXECUTE FUNCTION admin_core.impersonation_session_guard_update();
+
+-- Every trigger above fires under session_replication_role = replica too (see the caveats).
+ALTER TABLE admin_core.audit_event ENABLE ALWAYS TRIGGER audit_event_chain_link;
+ALTER TABLE admin_core.audit_event ENABLE ALWAYS TRIGGER audit_event_no_update;
+ALTER TABLE admin_core.audit_event ENABLE ALWAYS TRIGGER audit_event_no_delete;
+ALTER TABLE admin_core.audit_event ENABLE ALWAYS TRIGGER audit_event_no_truncate;
+ALTER TABLE admin_core.approval_decision ENABLE ALWAYS TRIGGER approval_decision_sod;
+ALTER TABLE admin_core.approval_decision ENABLE ALWAYS TRIGGER approval_decision_no_update;
+ALTER TABLE admin_core.approval_decision ENABLE ALWAYS TRIGGER approval_decision_no_delete;
+ALTER TABLE admin_core.approval_decision ENABLE ALWAYS TRIGGER approval_decision_no_truncate;
+ALTER TABLE admin_core.approval_request ENABLE ALWAYS TRIGGER approval_request_immutable;
+ALTER TABLE admin_core.approval_request ENABLE ALWAYS TRIGGER approval_request_state;
+ALTER TABLE admin_core.approval_request ENABLE ALWAYS TRIGGER approval_request_no_delete;
+ALTER TABLE admin_core.approval_request ENABLE ALWAYS TRIGGER approval_request_no_truncate;
+ALTER TABLE admin_core.admin_actor_role ENABLE ALWAYS TRIGGER admin_actor_role_guard;
+ALTER TABLE admin_core.impersonation_session ENABLE ALWAYS TRIGGER impersonation_session_immutable;
 
 -- Grant shape for the application role: see grants.sql.
 

@@ -23,7 +23,8 @@ import subprocess
 import sys
 import unittest
 
-from _core_schema_pg import ENABLED, SCHEMA, SKIP_REASON, PgCase, canonical_check_names, readme_verification_sql
+from _core_schema_pg import (ENABLED, REQUIRED, SCHEMA, SKIP_REASON, PgCase, canonical_check_names,
+                             readme_verification_sql)
 
 
 def django_ready():
@@ -104,8 +105,8 @@ import django
 
 django.setup()
 from django.utils import timezone
-from admin_core.models import (AdminActor, AdminActorRole, AdminPermission, AdminRole, ApprovalRequest,
-                               DataSubjectRequest)
+from admin_core.models import (AdminActor, AdminActorRole, AdminPermission, AdminRole, ApprovalDecision,
+                               ApprovalRequest, DataSubjectRequest)
 
 alice = AdminActor.objects.create(auth_subject="orm-alice", display_name="Alice")
 carol = AdminActor.objects.create(auth_subject="orm-carol", display_name="Carol")
@@ -129,11 +130,13 @@ now_grant = AdminActorRole.objects.create(actor=alice, role=role2, granted_by=ca
 now_grant.refresh_from_db()
 assert abs(timezone.now() - now_grant.starts_at) < datetime.timedelta(minutes=5), now_grant.starts_at
 
-# the approval_request trigger lets Django's ordinary full save() change the lifecycle columns
+# the approval_request triggers let Django's ordinary full save() change the lifecycle columns, once
+# an approver other than the requester has approved (the state machine refuses it before)
 AdminPermission.objects.create(key="orm.thing", resource="orm", action="thing")
 request = ApprovalRequest.objects.create(command_key_id="orm.thing", payload={"amount": 10, "note": "x"},
                                          payload_hash="h", target_type="thing", requested_by=alice,
                                          reason="r", expires_at=timezone.now() + datetime.timedelta(days=1))
+ApprovalDecision.objects.create(request=request, approver=carol, decision="approved", reason="ok")
 request = ApprovalRequest.objects.get(pk=request.pk)
 request.state = "approved"
 request.save()
@@ -142,7 +145,8 @@ print("orm probe ok")
 """
 
 
-@unittest.skipUnless(ENABLED and django_ready(), SKIP_REASON + "; needs django>=5.1 and psycopg importable")
+@unittest.skipUnless(ENABLED and (django_ready() or REQUIRED),
+                     SKIP_REASON + "; needs django>=5.1 and psycopg importable")
 class TestDjangoTranslationOnPostgres(PgCase):
     def dj(self, project, env, *args):
         return subprocess.run(
@@ -151,6 +155,8 @@ class TestDjangoTranslationOnPostgres(PgCase):
         )
 
     def setUp(self):
+        if not django_ready():  # only reachable with ADMINWRIGHT_REQUIRE_DB=1 (T-15)
+            self.fail("ADMINWRIGHT_REQUIRE_DB=1, but Django >= 5.1 or psycopg is not importable")
         super().setUp()
         import django
 
