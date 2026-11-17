@@ -10,7 +10,7 @@ and at the location that harness discovers agents today. Standard library only.
 Usage:
 
     python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <dir>
-        [--skill-dir <dir>] [--append-pointer]
+        [--skill-dir <dir>] [--append-pointer] [--dry-run] [--force]
 
 Harnesses. Native agent locations and required fields were verified against each
 harness's official documentation on 2026-09-24; the URLs sit beside the HARNESSES
@@ -50,13 +50,29 @@ references/multi-agent.md. Codex, Antigravity and Pi all read AGENTS.md, so the
 block carries one marked section per harness installed into that file, and a
 reinstall in any order keeps every section. `--append-pointer` writes the block
 into the instruction file and replaces it in place on a reinstall; without the
-flag the block is printed for manual paste. Cursor's rule file is a dedicated
-document and is rewritten on every install.
+flag the block is printed for manual paste, and an instruction file the
+installer cannot merge (not UTF-8, damaged markers) only earns a warning.
+Cursor's rule file is a dedicated document and is rewritten on every install.
 
-Exit codes: 0 success, 2 usage or IO failure.
+Re-running is safe on a project someone edited. Every write is planned and
+checked before the first one happens: a target reached through a symlink or
+junction that leads out of the project root is refused, and so is a target
+that cannot be written; either way nothing is written. The agent files and
+Cursor's rule are recorded in .adminwright/installed.json (path -> sha256 of
+the LF text written; commit it with them). A reinstall overwrites such a file
+only while it still holds what the installer wrote, so a local edit (a Codex
+`model`, a note in a prompt) is refused, naming the file, unless --force.
+--dry-run prints every file a run would create, update, keep or refuse, and
+writes nothing. The installer never deletes: a recorded file this version no
+longer writes is named in a note. Codex loads .codex/agents/ only in a trusted
+project, which the install output says.
+
+Exit codes: 0 success, 2 usage or IO failure, or a refused write (nothing written;
+--dry-run exits 2 when the real run would refuse).
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -318,7 +334,11 @@ def frontmatter_fields(block):
 
 def load_agent(path, skill_text):
     """Read one source agent file, name the skill, split it into parts."""
-    text = path.read_text(encoding="utf-8")  # universal newlines: always "\n" here
+    try:
+        text = path.read_text(encoding="utf-8")  # universal newlines: always "\n" here
+    except UnicodeDecodeError as exc:
+        raise InstallError(str(path) + " is not valid UTF-8 (byte " + str(exc.start)
+                           + "); re-save it as UTF-8 and rerun")
     if text.startswith("\ufeff"):
         text = text[1:]
     text = text.replace(TOKEN, skill_text)
@@ -404,11 +424,179 @@ def render_native(native_format, agent):
     raise InstallError("unknown native format: " + repr(native_format))
 
 
-def write_text(path, text):
-    """UTF-8 with LF line endings on every platform, never the OS default."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(str(path), "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
+# --- planned writes -------------------------------------------------------------
+#
+# Every file the installer writes is planned first, then checked (no link out of
+# the project, no file a user edited, every target writable), and only then
+# written. A refusal therefore changes nothing, and --dry-run prints the plan the
+# real run would carry out.
+
+# One planned file: its project-relative path (forward slashes), absolute path,
+# the exact bytes to write, whether the install record tracks it (the agent
+# files and Cursor's rule, which the installer owns outright), what writing it
+# means (create, update or unchanged), and the record hash of what is on disk.
+Write = namedtuple("Write", "rel path data tracked action current")
+
+
+def _real(path):
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def _within(path, root):
+    """Both from _real: True when path is root or lies below it."""
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # another drive
+        return False
+
+
+def safe_target(project_root, rel):
+    """project_root/rel, or InstallError when writing there would leave the project.
+
+    A checked-out repository can hold a symlink or a Windows junction where the
+    installer writes (`.claude/agents`, `.gitignore`, `.adminwright/skill-dir`);
+    writing through one would truncate or plant files anywhere the repository's
+    author chose. Each existing component is compared with where it really
+    leads; a link that stays inside the project is followed, one that leaves it
+    is refused by name.
+    """
+    root = _real(project_root)
+    current = Path(project_root)
+    for part in rel.split("/"):
+        parent = os.path.realpath(str(current))
+        current = current / part
+        if not os.path.lexists(str(current)):
+            break
+        leads_to = os.path.realpath(str(current))
+        if os.path.normcase(leads_to) != os.path.normcase(os.path.join(parent, part)) \
+                and not _within(os.path.normcase(leads_to), root):
+            raise InstallError(
+                "refusing to write " + rel + ": " + str(current) + " is a link (symlink or "
+                "junction) to " + leads_to + ", outside the project root " + str(project_root)
+                + "; nothing was written. Remove the link, or install into a project you trust")
+    path = Path(project_root).joinpath(*rel.split("/"))
+    if not _within(_real(path), root):
+        raise InstallError("refusing to write " + rel + ": it resolves to " + os.path.realpath(str(path))
+                           + ", outside the project root " + str(project_root) + "; nothing was written")
+    return path
+
+
+def record_hash(data):
+    """What the install record keeps for a file: sha256 of its bytes with LF line
+    endings, so a checkout that turned them into CRLF (core.autocrlf) still matches."""
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def plan_write(project_root, rel, text, tracked, newline="\n"):
+    """A Write for `text` (LF newlines) at rel, written with `newline` line endings."""
+    path = safe_target(project_root, rel)
+    data = (text.replace("\n", newline) if newline != "\n" else text).encode("utf-8")
+    if not os.path.lexists(str(path)):
+        return Write(rel, path, data, tracked, "create", None)
+    if path.is_dir():
+        raise InstallError(str(path) + " is a directory, where the installer writes a file; "
+                           "nothing was written")
+    current = path.read_bytes()
+    if current == data or (tracked and record_hash(current) == record_hash(data)):
+        action = "unchanged"
+    else:
+        action = "update"
+    return Write(rel, path, data, tracked, action, record_hash(current))
+
+
+def check_writable(write):
+    """InstallError now, before anything is written, if `write` would fail later."""
+    path = write.path
+    if path.exists():
+        try:
+            with open(str(path), "r+b"):
+                pass
+        except OSError as exc:
+            raise InstallError("cannot write " + str(path) + " (" + exc.__class__.__name__ + ": "
+                               + str(exc.strerror or exc) + "); nothing was written")
+        return
+    ancestor = path.parent
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    if not ancestor.is_dir():
+        raise InstallError("cannot write " + str(path) + ": " + str(ancestor)
+                           + " is a file, not a directory; nothing was written")
+    if not os.access(str(ancestor), os.W_OK):
+        raise InstallError("cannot write " + str(path) + ": " + str(ancestor)
+                           + " is not writable; nothing was written")
+
+
+def execute(writes):
+    """Write every planned file that changes. A failure part-way (a disk filling
+    up after the checks passed) names what was already written."""
+    done = []
+    for write in writes:
+        if write.action == "unchanged":
+            continue
+        try:
+            write.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(str(write.path), "wb") as handle:
+                handle.write(write.data)
+        except OSError as exc:
+            listing = "".join("\n  " + str(path) for path in done) or " none"
+            raise InstallError("could not write " + str(write.path) + ": " + str(exc)
+                               + "\nAlready written before the failure:" + listing
+                               + "\nRerun once the cause is fixed; files already written are "
+                               "recognised as the installer's own.")
+        done.append(write.path)
+    return done
+
+
+# --- the install record ---------------------------------------------------------
+#
+# .adminwright/installed.json keeps, for every agent file and rule the installer
+# wrote, the hash of what it wrote. A reinstall overwrites a file only while it
+# still holds exactly that; a file someone edited (a Codex `model`, a local note)
+# is refused unless --force. The record is committed with the agent files, so a
+# teammate's reinstall knows them too. It holds no machine path.
+
+RECORD_FILE = ".adminwright/installed.json"
+RECORD_NOTE = ("Written by adminwright's install_agents.py: the sha256 (of the LF text) of each "
+               "file it last wrote. A reinstall leaves a file that no longer matches alone unless "
+               "--force is given. Commit this file with the agent files.")
+
+
+def read_record(project_root):
+    """{relative path: hash} from the install record; {} when there is none."""
+    path = project_root / RECORD_FILE
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        files = data.get("files") if isinstance(data, dict) else None
+    except (OSError, ValueError, RecursionError):
+        files = None
+    if not isinstance(files, dict):
+        print("WARNING: " + str(path) + " is not a readable install record; every installed "
+              "file that differs from this version is treated as edited", file=sys.stderr)
+        return {}
+    return {str(key): str(value) for key, value in files.items()}
+
+
+def record_text(files):
+    return json.dumps({"note": RECORD_NOTE, "files": dict(sorted(files.items()))},
+                      indent=2, ensure_ascii=False) + "\n"
+
+
+def conflicts(writes, record):
+    """Tracked files that would be overwritten although they are not what the
+    installer last wrote: (write, why) pairs."""
+    found = []
+    for write in writes:
+        if not write.tracked or write.action != "update":
+            continue
+        recorded = record.get(write.rel)
+        if recorded == write.current:
+            continue
+        found.append((write, "edited since the installer wrote it" if recorded else
+                      "not in the install record (edited, or written before " + RECORD_FILE
+                      + " existed)"))
+    return found
 
 
 # --- this machine's skill path --------------------------------------------------
@@ -450,83 +638,62 @@ def durable_skill_dir(skill_dir):
     return resolved, None
 
 
-def record_machine_path(project_root, skill_dir):
-    """Write this machine's absolute skill path to MACHINE_PATH_FILE.
+def plan_machine_path(project_root, skill_dir, needed):
+    """(writes, messages) that keep MACHINE_PATH_FILE current and git-ignored.
 
-    One line, forward slashes, so an agent (or a shell) can read it as is.
-    Returns True when the file changed.
+    Written whenever the committed files name PLACEHOLDER (`needed`); refreshed,
+    never left stale, when an earlier install wrote it and the skill now lives
+    inside the project. One line, forward slashes, so an agent (or a shell) can
+    read it as is. Each message is (stream, text, the Write it reports or None),
+    printed only when that write happens. The .gitignore gains the entry once;
+    one that is CRLF throughout stays CRLF, everything already in it is kept,
+    and one that is not UTF-8 is left alone with a warning.
     """
     path = project_root / MACHINE_PATH_FILE
-    text = portable(skill_dir) + "\n"
-    if path.is_file():
-        try:
-            if path.read_text(encoding="utf-8") == text:
-                return False
-        except UnicodeDecodeError:
-            pass
-    write_text(path, text)
-    return True
+    if not needed and not os.path.lexists(str(path)):
+        return [], []
+    writes, messages = [], []
+    recorded, message = durable_skill_dir(skill_dir)
+    if message:
+        messages.append((sys.stderr if message.startswith("WARNING") else sys.stdout, message, None))
+    machine = plan_write(project_root, MACHINE_PATH_FILE, portable(recorded) + "\n", False)
+    writes.append(machine)
+    if needed:
+        messages.append((sys.stdout, "Wrote this machine's skill path to " + str(path) + "; the "
+                         "agent files name the skill " + PLACEHOLDER + " and read the path from "
+                         "there", machine))
+    else:
+        messages.append((sys.stdout, "Refreshed this machine's skill path in " + str(path), machine))
 
-
-def ignore_machine_path(project_root):
-    """Make the project's .gitignore ignore MACHINE_PATH_FILE.
-
-    Returns "created", "added", "present", or "unreadable" for a .gitignore that
-    is not UTF-8, which is left untouched for the caller to warn about. A file
-    that is CRLF throughout stays CRLF; everything already in it is kept.
-    """
-    path = project_root / ".gitignore"
-    if not path.exists():
-        write_text(path, GITIGNORE_COMMENT + "\n" + GITIGNORE_ENTRY + "\n")
-        return "created"
+    gitignore = project_root / ".gitignore"
+    if not os.path.lexists(str(gitignore)):
+        write = plan_write(project_root, ".gitignore", GITIGNORE_COMMENT + "\n" + GITIGNORE_ENTRY + "\n",
+                           False)
+        writes.append(write)
+        messages.append((sys.stdout, "Created " + str(gitignore) + " ignoring " + GITIGNORE_ENTRY
+                         + " (a machine's path must not be committed)", write))
+        return writes, messages
+    safe_target(project_root, ".gitignore")
     try:
-        existing, newline = read_instruction_file(path)
+        existing, newline = read_instruction_file(gitignore)
     except InstallError:
-        return "unreadable"
+        messages.append((sys.stderr, "WARNING: " + str(gitignore) + " is not valid UTF-8, so it was "
+                         "not modified; add " + GITIGNORE_ENTRY + " to it by hand so this "
+                         "machine's path is never committed", None))
+        return writes, messages
     entries = {line.strip() for line in existing.split("\n")}
     if GITIGNORE_ENTRY in entries or MACHINE_PATH_FILE in entries:
-        return "present"
+        return writes, messages
     if existing and not existing.endswith("\n"):
         existing += "\n"
     if existing.strip():
         existing += "\n"
-    merged = existing + GITIGNORE_COMMENT + "\n" + GITIGNORE_ENTRY + "\n"
-    with open(str(path), "w", encoding="utf-8", newline="") as handle:
-        handle.write(merged.replace("\n", newline) if newline != "\n" else merged)
-    return "added"
-
-
-def report_machine_path(project_root, skill_dir, needed):
-    """Keep MACHINE_PATH_FILE current and git-ignored.
-
-    Written whenever the committed files name PLACEHOLDER (`needed`); refreshed,
-    never left stale, when an earlier install wrote it and the skill now lives
-    inside the project.
-    """
-    path = project_root / MACHINE_PATH_FILE
-    if not needed and not path.exists():
-        return
-    recorded, message = durable_skill_dir(skill_dir)
-    if message:
-        print(message, file=sys.stderr if message.startswith("WARNING") else sys.stdout)
-    if record_machine_path(project_root, recorded):
-        if needed:
-            print("Wrote this machine's skill path to " + str(path) + "; the agent files name "
-                  "the skill " + PLACEHOLDER + " and read the path from there")
-        else:
-            print("Refreshed this machine's skill path in " + str(path))
-    status = ignore_machine_path(project_root)
-    gitignore = project_root / ".gitignore"
-    if status == "created":
-        print("Created " + str(gitignore) + " ignoring " + GITIGNORE_ENTRY
-              + " (a machine's path must not be committed)")
-    elif status == "added":
-        print("Added " + GITIGNORE_ENTRY + " to " + str(gitignore)
-              + " (a machine's path must not be committed)")
-    elif status == "unreadable":
-        print("WARNING: " + str(gitignore) + " is not valid UTF-8, so it was not modified; add "
-              + GITIGNORE_ENTRY + " to it by hand so this machine's path is never committed",
-              file=sys.stderr)
+    write = plan_write(project_root, ".gitignore",
+                       existing + GITIGNORE_COMMENT + "\n" + GITIGNORE_ENTRY + "\n", False, newline)
+    writes.append(write)
+    messages.append((sys.stdout, "Added " + GITIGNORE_ENTRY + " to " + str(gitignore)
+                     + " (a machine's path must not be committed)", write))
+    return writes, messages
 
 
 # --- pointer block --------------------------------------------------------------
@@ -552,9 +719,11 @@ HARNESS_NOTES = {
         "finish, with its exit condition checked, before starting one the order above puts",
         "after it. Subagents inherit this session's sandbox, so a read-only sandbox stops",
         "every pass (each one writes the manifest). Where subagents are off (`[agents]",
-        "enabled = false`), run the passes sequentially in this session instead and announce",
-        "each switch in one line (role, agent id, exit condition), so the transcript shows",
-        "where one role's authority ended.",
+        "enabled = false`), or the custom agents are missing because the project is not",
+        "trusted (Codex loads project `.codex/` layers only for a trusted project), run the",
+        "passes sequentially in this session instead and announce each switch in one line",
+        "(role, agent id, exit condition), so the transcript shows where one role's authority",
+        "ended.",
     ],
     "gemini": [
         "Gemini note: dispatch each pass to the subagent of the same name; subagents cannot",
@@ -743,7 +912,7 @@ def read_instruction_file(path):
     return raw, "\n"
 
 
-def plan_pointer(spec, harness, project_root, skill_rel):
+def plan_pointer(spec, harness, project_root, skill_rel, strict=True):
     """Everything about the pointer decided before any file is written, so a
     refusal (unbalanced markers, an undecodable file) leaves the project as it
     was. None for a harness with no instruction file.
@@ -752,40 +921,124 @@ def plan_pointer(spec, harness, project_root, skill_rel):
     wholesale on every install. A shared file (AGENTS.md, GEMINI.md) keeps
     everything outside the marked block untouched, and the block keeps the
     section of every other harness installed into the same file.
+
+    `strict` is --append-pointer: only then is a shared file written, so only
+    then does a file the installer cannot merge (not UTF-8, damaged markers)
+    refuse the install. Otherwise the plan carries `unmergeable`, the reason,
+    and the block is printed for pasting by hand.
     """
     if not spec.instruction_file:
         return None
     path = project_root / spec.instruction_file
     dedicated = spec.instruction_file in DEDICATED_RULE_FILES
     existing, newline = ("", "\n")
-    if not dedicated and path.exists():
-        existing, newline = read_instruction_file(path)
-    names = {harness} if dedicated else pointer_harnesses(
-        harness, spec.instruction_file, existing)
-    block = pointer_block(NEUTRAL_DIR, skill_rel, names)
-    plan = {"path": path, "name": spec.instruction_file, "block": block,
-            "dedicated": dedicated, "has_block": False}
-    if not dedicated:
-        merged, status = merge_pointer(existing, block)
-        plan.update(merged=merged, status=status, newline=newline,
-                    has_block=bool(adminwright_text(existing)))
+    try:
+        if not dedicated and path.exists():
+            existing, newline = read_instruction_file(path)
+        names = {harness} if dedicated else pointer_harnesses(
+            harness, spec.instruction_file, existing)
+        block = pointer_block(NEUTRAL_DIR, skill_rel, names)
+        plan = {"path": path, "name": spec.instruction_file, "block": block,
+                "dedicated": dedicated, "has_block": False, "unmergeable": None}
+        if not dedicated:
+            merged, status = merge_pointer(existing, block)
+            plan.update(merged=merged, status=status, newline=newline,
+                        has_block=bool(adminwright_text(existing)))
+    except InstallError as exc:
+        if strict:
+            raise
+        plan = {"path": path, "name": spec.instruction_file, "dedicated": False,
+                "block": pointer_block(NEUTRAL_DIR, skill_rel, [harness]),
+                "has_block": False, "unmergeable": str(exc)}
     return plan
 
 
-def write_pointer(plan):
-    """Carry out a planned --append-pointer (or a dedicated rule); returns the status."""
+def plan_pointer_write(plan, project_root, append_pointer):
+    """(Write or None, status) for a planned pointer: the dedicated rule file
+    always, a shared instruction file only with --append-pointer."""
+    if plan is None or plan["unmergeable"]:
+        return None, None
     if plan["dedicated"]:
-        write_text(plan["path"], MDC_FRONTMATTER + plan["block"])
-        return "appended"
-    if plan["status"] != "unchanged":
-        merged, newline = plan["merged"], plan["newline"]
-        plan["path"].parent.mkdir(parents=True, exist_ok=True)
-        with open(str(plan["path"]), "w", encoding="utf-8", newline="") as handle:
-            handle.write(merged.replace("\n", newline) if newline != "\n" else merged)
-    return plan["status"]
+        return plan_write(project_root, plan["name"], MDC_FRONTMATTER + plan["block"], True), "appended"
+    if not append_pointer:
+        return None, None
+    if plan["status"] == "unchanged":
+        return None, "unchanged"
+    return plan_write(project_root, plan["name"], plan["merged"], False, plan["newline"]), plan["status"]
 
 
-# --- main -----------------------------------------------------------------------
+def report_pointer(plan, status, append_pointer):
+    """What the install did with the pointer block, or what the user should do."""
+    where = str(plan["path"])
+    if plan["unmergeable"]:
+        print("WARNING: " + plan["unmergeable"] + "; the agents were installed, but "
+              + plan["name"] + " was not read for the pointer block. Paste this block into it "
+              "by hand:\n", file=sys.stderr)
+        print(plan["block"])
+    elif append_pointer or plan["dedicated"]:
+        # A dedicated rule file is ours alone, so writing it is not the
+        # intrusion that changing someone's AGENTS.md would be.
+        if status == "unchanged":
+            print("Pointer block already present in " + where + " and current; unchanged")
+        elif status == "updated":
+            print("Updated pointer block in " + where)
+        elif status == "migrated":
+            print("Replaced an older unmarked adminwright section in " + where
+                  + " with the marked pointer block")
+        else:
+            print("Wrote pointer block to " + where)
+    elif plan["has_block"]:
+        if plan["status"] == "unchanged":
+            print("Pointer block already present in " + where + " and current; unchanged")
+        else:
+            print(where + " has an out-of-date adminwright pointer block; "
+                  "rerun with --append-pointer to replace it in place, or paste this one:\n")
+            print(plan["block"])
+    else:
+        print("\nAdd this to " + plan["name"] + " (or rerun with --append-pointer):\n")
+        print(plan["block"])
+
+
+# Printed after an install into these harnesses: what the files alone cannot
+# make true. Each states a documented behavior of that harness.
+AFTER_INSTALL = {
+    # "For security, Codex loads project .codex/ layers only when you trust the
+    # project" (https://learn.chatgpt.com/docs/config-file/config-basic).
+    "codex": "Codex loads a project's .codex/ layers, these custom agents included, only when "
+             "you trust the project; in an untrusted project the agents are silently missing, "
+             "and the passes then run sequentially in the main session.",
+    # Since 2026-06-18 Gemini CLI is replaced by Antigravity CLI for unpaid-tier
+    # and Google One users (https://geminicli.com/docs/core/subagents/).
+    "gemini": "Gemini CLI was replaced by Antigravity CLI for unpaid-tier and Google One "
+              "users on 2026-06-18; if that is you, install with --harness antigravity instead.",
+}
+
+
+def stale_entries(record, writes, harness_dirs, project_root):
+    """Recorded files in the directories this install writes to that this
+    version no longer writes and that still exist (a renamed or removed role)."""
+    planned = {write.rel for write in writes}
+    return sorted(
+        rel for rel in record
+        if rel not in planned and any(rel.startswith(folder + "/") for folder in harness_dirs)
+        and (project_root / rel).is_file()
+    )
+
+
+def print_dry_run(writes, refused, pointer, append_pointer):
+    print("Dry run: nothing was written. A real run would:")
+    refused_rels = {write.rel for write, _why in refused}
+    for write in writes:
+        if write.rel in refused_rels:
+            verb = "refuse"
+        else:
+            verb = {"create": "create", "update": "update", "unchanged": "keep"}[write.action]
+        print("  " + verb.ljust(7) + write.rel + ("" if write.action == "unchanged"
+                                                  else " (" + str(len(write.data)) + " bytes)"))
+    if pointer is not None and not pointer["dedicated"] and not append_pointer:
+        print("  print  the pointer block for " + pointer["name"]
+              + " (it is written only with --append-pointer)")
+
 
 def run_install(args):
     skill_dir = Path(args.skill_dir).resolve() if args.skill_dir else Path(__file__).resolve().parent.parent
@@ -794,8 +1047,10 @@ def run_install(args):
 
     if not (skill_dir / "SKILL.md").exists():
         return fail("no SKILL.md in " + str(skill_dir) + "; pass --skill-dir explicitly")
-    if not project_root.is_dir():
+    if not project_root.exists():
         return fail("project root does not exist: " + str(project_root))
+    if not project_root.is_dir():
+        return fail("project root is not a directory: " + str(project_root))
 
     sources = [source_dir / (name + ".md") for name in AGENT_ORDER]
     missing = [str(p) for p in sources if not p.exists()]
@@ -806,56 +1061,71 @@ def run_install(args):
     skill_text, skill_rel = skill_reference(skill_dir, project_root)
     agents = [load_agent(source, skill_text) for source in sources]
     native = [render_native(spec.native_format, agent) for agent in agents] if spec.native_format else []
-    pointer = plan_pointer(spec, args.harness, project_root, skill_rel)
+    pointer = plan_pointer(spec, args.harness, project_root, skill_rel, strict=args.append_pointer)
 
-    if spec.native_format:
+    # Plan every write.
+    native_writes = [plan_write(project_root, spec.native_dir + "/" + relative, text, True)
+                     for relative, text in native]
+    neutral_writes = [plan_write(project_root, NEUTRAL_DIR + "/" + agent.stem + ".md", agent.text, True)
+                      for agent in agents] if spec.neutral_copy else []
+    machine_writes, machine_messages = plan_machine_path(project_root, skill_dir, skill_rel is None)
+    pointer_write, pointer_status = plan_pointer_write(pointer, project_root, args.append_pointer)
+    writes = native_writes + neutral_writes + machine_writes + ([pointer_write] if pointer_write else [])
+
+    record = read_record(project_root)
+    updated = dict(record)
+    for write in writes:
+        if write.tracked:
+            updated[write.rel] = record_hash(write.data)
+    if updated != record or not (project_root / RECORD_FILE).is_file():
+        writes.append(plan_write(project_root, RECORD_FILE, record_text(updated), False))
+
+    # Check before writing anything.
+    refused = [] if args.force else conflicts(writes, record)
+    if args.dry_run:
+        print_dry_run(writes, refused, pointer, args.append_pointer)
+        if refused:
+            print("The real run would refuse: " + str(len(refused)) + " file(s) differ from what "
+                  "the installer last wrote (rerun with --force to overwrite them).")
+        return 2 if refused else 0
+    if refused:
+        lines = "".join("\n  " + str(write.path) + ": " + why for write, why in refused)
+        return fail("these files differ from what the installer last wrote, so nothing was "
+                    "written:" + lines + "\nKeep your changes by moving them elsewhere (for "
+                    "example a project rule), or rerun with --force to overwrite them; "
+                    "--dry-run shows every file a run would write.")
+    for write in writes:
+        if write.action != "unchanged":
+            check_writable(write)
+
+    execute(writes)
+
+    if native_writes:
         native_dir = project_root / spec.native_dir
-        for relative, text in native:
-            write_text(native_dir / relative, text)
         print("Installed " + str(len(native)) + " agents to " + str(native_dir))
         for relative, _text in native:
             print("  " + relative)
-
-    neutral_dir = project_root / NEUTRAL_DIR
-    if spec.neutral_copy:
-        for agent in agents:
-            write_text(neutral_dir / (agent.stem + ".md"), agent.text)
+    if neutral_writes:
         label = "harness-neutral copies" if spec.native_format else "agents"
-        print("Installed " + str(len(agents)) + " " + label + " to " + str(neutral_dir))
+        print("Installed " + str(len(agents)) + " " + label + " to " + str(project_root / NEUTRAL_DIR))
         if not spec.native_format:
             for agent in agents:
                 print("  " + agent.stem + ".md")
-
-    report_machine_path(project_root, skill_dir, skill_rel is None)
-
+    for stream, text, write in machine_messages:
+        if write is None or write.action != "unchanged":
+            print(text, file=stream)
     if pointer is not None:
-        where = str(pointer["path"])
-        if args.append_pointer or pointer["dedicated"]:
-            # A dedicated rule file is ours alone, so writing it is not the
-            # intrusion that changing someone's AGENTS.md would be.
-            status = write_pointer(pointer)
-            if status == "unchanged":
-                print("Pointer block already present in " + where + " and current; unchanged")
-            elif status == "updated":
-                print("Updated pointer block in " + where)
-            elif status == "migrated":
-                print("Replaced an older unmarked adminwright section in " + where
-                      + " with the marked pointer block")
-            else:
-                print("Wrote pointer block to " + where)
-        elif pointer["has_block"]:
-            if pointer["status"] == "unchanged":
-                print("Pointer block already present in " + where + " and current; unchanged")
-            else:
-                print(where + " has an out-of-date adminwright pointer block; "
-                      "rerun with --append-pointer to replace it in place, or paste this one:\n")
-                print(pointer["block"])
-        else:
-            print("\nAdd this to " + pointer["name"] + " (or rerun with --append-pointer):\n")
-            print(pointer["block"])
+        report_pointer(pointer, pointer_status, args.append_pointer)
     elif args.harness == "generic":
         print("\nPoint your harness at the installed files; dispatch order is in each name:")
         print(pointer_block(NEUTRAL_DIR, skill_rel))
+    folders = [folder for folder in (spec.native_dir, NEUTRAL_DIR if spec.neutral_copy else None)
+               if folder]
+    for rel in stale_entries(record, writes, folders, project_root):
+        print("note: " + rel + " was installed by an earlier version and is no longer written; "
+              "delete it if that role is gone (the installer does not delete files)")
+    if args.harness in AFTER_INSTALL:
+        print("\nNote: " + AFTER_INSTALL[args.harness])
     return 0
 
 
@@ -869,6 +1139,12 @@ def main(argv=None):
     parser.add_argument("--append-pointer", action="store_true",
                         help="write the pointer block into the harness's instruction file "
                              "(replaces an existing block in place)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print every file the install would create, update or keep, and "
+                             "any it would refuse; write nothing (exit 2 when it would refuse)")
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite agent files that differ from what the installer last "
+                             "wrote (" + RECORD_FILE + "), discarding those edits")
     args = parser.parse_args(argv)
     try:
         return run_install(args)
@@ -877,6 +1153,8 @@ def main(argv=None):
     except OSError as exc:
         return fail("could not read or write " + str(getattr(exc, "filename", None) or "a file")
                     + ": " + str(exc))
+    except Exception as exc:  # noqa: BLE001 - exit codes are a contract: 0 or 2, never a traceback
+        return fail("internal error: " + exc.__class__.__name__ + ": " + str(exc)[:500])
 
 
 if __name__ == "__main__":
