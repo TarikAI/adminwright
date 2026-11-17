@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -414,10 +415,11 @@ class TestNativeFiles(InstallBase):
                 code, out, err = run("--harness", harness, "--project-root", project)
                 self.assertEqual(code, 0, out + err)
                 self.assertFalse((project / ".adminwright" / "agents").exists())
-                # the skill (this repository) is outside the project, so the one
-                # thing under .adminwright is this machine's skill path
+                # the skill (this repository) is outside the project, so under
+                # .adminwright there is only this machine's skill path and the
+                # install record (S-07)
                 self.assertEqual(sorted(p.name for p in (project / ".adminwright").iterdir()),
-                                 ["skill-dir"])
+                                 ["installed.json", "skill-dir"])
 
     def test_pi_and_generic_have_no_native_location_and_invent_none(self):
         # Pi documents no agents concept ("build your own with extensions"), so
@@ -1190,6 +1192,255 @@ class TestLineEndingsAndConsole(InstallBase):
         self.assertEqual(code, 2)
         self.assertNotIn(b"Traceback", err)
         self.assertIn("nächste".encode("utf-8"), err)
+
+
+def snapshot(root):
+    """{relative path: bytes} of every file under root."""
+    root = Path(root)
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def directory_link(link, target):
+    """A directory symlink, or on Windows without the privilege a junction (which
+    needs none). Returns False when neither can be made here."""
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                              capture_output=True)
+        return proc.returncode == 0
+    return False
+
+
+class TestLinksOutOfTheProject(InstallBase):
+    """S-04: never write through a symlink or junction that leaves the project."""
+
+    def test_a_linked_agents_directory_that_leaves_the_project_is_refused(self):
+        outside = self.scratch()
+        (outside / "keep.txt").write_text("user data\n", encoding="utf-8")
+        (self.project / ".claude").mkdir()
+        if not directory_link(self.project / ".claude" / "agents", outside):
+            self.skipTest("cannot create a directory link here")
+        before = snapshot(outside)
+        code, out, err = run("--harness", "claude-code", "--project-root", self.project)
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("link", err)
+        self.assertIn(str(self.project / ".claude" / "agents"), err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(snapshot(outside), before, "nothing may land outside the project")
+        self.assertFalse((self.project / ".adminwright").exists(), "nothing is written on refusal")
+
+    def test_a_link_that_stays_inside_the_project_is_followed(self):
+        shared = self.project / "shared-agents"
+        shared.mkdir()
+        (self.project / ".claude").mkdir()
+        if not directory_link(self.project / ".claude" / "agents", shared):
+            self.skipTest("cannot create a directory link here")
+        code, out, err = run("--harness", "claude-code", "--project-root", self.project)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(len(list(shared.glob("adminwright-*.md"))), len(ia.AGENT_ORDER))
+
+    def test_file_symlinks_to_victims_outside_are_refused(self):
+        victims = self.scratch()
+        for relative in (".adminwright/skill-dir", ".gitignore"):
+            with self.subTest(link=relative):
+                project = self.scratch()
+                victim = victims / (relative.replace("/", "_") + ".txt")
+                victim.write_text("IMPORTANT USER FILE\n", encoding="utf-8")
+                link = project.joinpath(*relative.split("/"))
+                link.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.symlink(str(victim), str(link))
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest("cannot create a file symlink here: " + str(exc))
+                code, out, err = run("--harness", "pi", "--project-root", project)
+                self.assertEqual(code, 2, out + err)
+                self.assertIn("outside the project root", err)
+                self.assertEqual(victim.read_text(encoding="utf-8"), "IMPORTANT USER FILE\n")
+                self.assertFalse((project / ".adminwright" / "agents").exists())
+
+
+class TestEditedFiles(InstallBase):
+    """S-07: a reinstall never silently discards a user's edit; --dry-run tells the truth."""
+
+    QA = (".codex", "agents", "adminwright-qa.toml")
+
+    def install(self, *extra, harness="codex"):
+        return run("--harness", harness, "--project-root", self.project, *extra)
+
+    def edit(self, *parts, text='model = "gpt-5-codex"\n'):
+        path = self.project.joinpath(*parts)
+        with open(str(path), "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        return path
+
+    def test_an_edited_agent_file_is_refused_and_kept_unless_forced(self):
+        self.assertEqual(self.install()[0], 0)
+        native = self.edit(*self.QA)
+        neutral = self.edit(".adminwright", "agents", "adminwright-qa.md", text="\nLOCAL NOTE\n")
+        before = snapshot(self.project)
+        code, out, err = self.install()
+        self.assertEqual(code, 2, out + err)
+        self.assertIn(str(native), err)
+        self.assertIn(str(neutral), err)
+        self.assertIn("--force", err)
+        self.assertEqual(snapshot(self.project), before, "a refused reinstall writes nothing")
+        code, out, err = self.install("--force")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("gpt-5-codex", native.read_text(encoding="utf-8"))
+        self.assertNotIn("LOCAL NOTE", neutral.read_text(encoding="utf-8"))
+        self.assertEqual(self.install()[0], 0, "after --force the record matches again")
+
+    def test_an_unmodified_reinstall_and_a_crlf_checkout_are_not_edits(self):
+        self.assertEqual(self.install()[0], 0)
+        native = self.project.joinpath(*self.QA)
+        native.write_bytes(native.read_bytes().replace(b"\n", b"\r\n"))  # core.autocrlf
+        code, out, err = self.install()
+        self.assertEqual(code, 0, out + err)
+
+    def test_files_without_a_record_are_refused_only_when_they_differ(self):
+        self.assertEqual(self.install()[0], 0)
+        record = self.project / ".adminwright" / "installed.json"
+        record.unlink()  # as left by an installer older than the record
+        self.assertEqual(self.install()[0], 0, "identical files need no record")
+        self.assertTrue(record.is_file(), "and the record is written again")
+        record.unlink()
+        self.edit(*self.QA)
+        code, _out, err = self.install()
+        self.assertEqual(code, 2)
+        self.assertIn("not in the install record", err)
+
+    def test_the_record_holds_relative_paths_and_hashes_only(self):
+        self.assertEqual(self.install()[0], 0)
+        data = json.loads((self.project / ".adminwright" / "installed.json").read_text(encoding="utf-8"))
+        self.assertIn(".codex/agents/adminwright-qa.toml", data["files"])
+        self.assertIn(".adminwright/agents/adminwright-qa.md", data["files"])
+        for rel, digest in data["files"].items():
+            self.assertFalse(os.path.isabs(rel), rel)
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertNotIn(".adminwright/skill-dir", data["files"], "the machine file is not tracked")
+
+    def test_dry_run_writes_nothing_and_lists_what_a_real_run_writes(self):
+        code, out, err = self.install("--dry-run", "--append-pointer")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(snapshot(self.project), {}, "a dry run writes nothing")
+        listed = set(re.findall(r"^  create (\S+)", out, re.MULTILINE))
+        self.assertEqual(self.install("--append-pointer")[0], 0)
+        self.assertEqual(listed, set(snapshot(self.project)))
+
+    def test_dry_run_reports_a_refusal_with_exit_two(self):
+        self.assertEqual(self.install()[0], 0)
+        self.edit(*self.QA)
+        before = snapshot(self.project)
+        code, out, _err = self.install("--dry-run")
+        self.assertEqual(code, 2)
+        self.assertIn("refuse .codex/agents/adminwright-qa.toml", out)
+        self.assertEqual(snapshot(self.project), before)
+
+    def test_a_recorded_file_this_version_no_longer_writes_is_named(self):
+        self.assertEqual(self.install(harness="gemini")[0], 0)
+        old = self.project / ".gemini" / "agents" / "adminwright-old-role.md"
+        old.write_text("---\nname: adminwright-old-role\ndescription: x\n---\nold\n", encoding="utf-8")
+        record = self.project / ".adminwright" / "installed.json"
+        data = json.loads(record.read_text(encoding="utf-8"))
+        data["files"][".gemini/agents/adminwright-old-role.md"] = ia.record_hash(old.read_bytes())
+        record.write_text(json.dumps(data), encoding="utf-8")
+        code, out, err = self.install(harness="gemini")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(".gemini/agents/adminwright-old-role.md", out)
+        self.assertIn("no longer written", out)
+        self.assertTrue(old.exists(), "the installer never deletes")
+
+
+class TestUnmergeableInstructionFile(InstallBase):
+    """S-08: without --append-pointer, AGENTS.md is never written, so it cannot block the agents."""
+
+    CASES = (
+        ("cp1252", "# Proje kurallar\xfd\n".encode("cp1252")),
+        ("unbalanced", b"# Rules\n<!-- adminwright-agents:start -->\nold\n"),
+    )
+
+    def test_the_agents_install_and_the_file_is_untouched(self):
+        for label, data in self.CASES:
+            with self.subTest(case=label):
+                project = self.scratch()
+                (project / "AGENTS.md").write_bytes(data)
+                code, out, err = run("--harness", "codex", "--project-root", project)
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(len(list((project / ".codex" / "agents").glob("*.toml"))),
+                                 len(ia.AGENT_ORDER))
+                self.assertEqual((project / "AGENTS.md").read_bytes(), data)
+                self.assertIn("WARNING", err)
+                self.assertIn(ia.MARKER_START, out, "the block is printed for pasting")
+
+    def test_with_the_flag_it_still_refuses_and_writes_nothing(self):
+        for label, data in self.CASES:
+            with self.subTest(case=label):
+                project = self.scratch()
+                (project / "AGENTS.md").write_bytes(data)
+                code, _out, err = run("--harness", "codex", "--project-root", project,
+                                      "--append-pointer")
+                self.assertEqual(code, 2)
+                self.assertFalse((project / ".codex").exists())
+                self.assertEqual((project / "AGENTS.md").read_bytes(), data)
+
+
+class TestFailuresAreClean(InstallBase):
+    """S-10, S-14: errors exit 2 with a message, and leave no half install."""
+
+    def test_a_source_agent_that_is_not_utf8_is_named(self):
+        skill = make_skill(self.scratch() / "skill")
+        with open(str(skill / "agents" / "adminwright-qa.md"), "ab") as handle:
+            handle.write(b"\xff\xfe")
+        code, _out, err = run("--harness", "codex", "--project-root", self.project,
+                              "--skill-dir", skill)
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR:", err)
+        self.assertIn("adminwright-qa.md", err)
+        self.assertIn("not valid UTF-8", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_an_unwritable_target_stops_the_install_before_anything_is_written(self):
+        gemini_md = self.project / "GEMINI.md"
+        gemini_md.write_text("# rules\n", encoding="utf-8")
+        os.chmod(str(gemini_md), stat.S_IREAD)
+        self.addCleanup(os.chmod, str(gemini_md), stat.S_IREAD | stat.S_IWRITE)
+        if os.access(str(gemini_md), os.W_OK):
+            self.skipTest("read-only files are writable here (running as root?)")
+        code, out, err = run("--harness", "gemini", "--project-root", self.project,
+                             "--append-pointer")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("GEMINI.md", err)
+        self.assertIn("nothing was written", err)
+        self.assertFalse((self.project / ".gemini").exists())
+        self.assertFalse((self.project / ".adminwright").exists())
+
+    def test_a_project_root_that_is_a_file_is_named_as_such(self):
+        not_a_dir = self.project / "file.txt"
+        not_a_dir.write_text("x", encoding="utf-8")
+        code, _out, err = run("--harness", "codex", "--project-root", not_a_dir)
+        self.assertEqual(code, 2)
+        self.assertIn("is not a directory", err)
+
+
+class TestHarnessCaveats(InstallBase):
+    """S-15, S-16: what the files alone cannot make true is said at install time."""
+
+    def test_codex_says_the_project_must_be_trusted(self):
+        code, out, err = run("--harness", "codex", "--project-root", self.project, "--append-pointer")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("only when you trust the project", out)
+        block = " ".join((self.project / "AGENTS.md").read_text(encoding="utf-8").split())
+        self.assertIn("the project is not trusted (Codex loads project `.codex/` layers only for "
+                      "a trusted project)", block)
+
+    def test_gemini_points_retired_tier_users_at_antigravity(self):
+        code, out, err = run("--harness", "gemini", "--project-root", self.project)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("--harness antigravity", out)
 
 
 if __name__ == "__main__":
