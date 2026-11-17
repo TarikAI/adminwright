@@ -52,7 +52,7 @@ Exit codes: 0 clean; 1 the manifest was read and has findings at error severity;
 
 Keys the schema does not declare are reported as `unknown-field`; prefix a key with `x-` to keep project-specific data without the finding. Backslashes in evidence paths are stored as `/`.
 
-`remove --kind <kind> --id <id>` is refused while anything still refers to the item, and the message lists every reference, including ones no rule checks, such as a research source's `appliedTo` or a gap's `capability`. `rename --kind <kind> --id <old> --to <new>` changes the id and every reference to it, lock files included. Never edit `manifest.json` by hand: a whole-file write discards every change another agent made since you read it.
+`remove --kind <kind> --id <id>` is refused while anything still refers to the item, and the message lists every reference, including ones no rule checks, such as a research source's `appliedTo`, a gap's `capability` or a held claim lock; removing an entity checks the references to each of its capabilities too. `rename --kind <kind> --id <old> --to <new>` changes the id and every reference to it, lock files included. Never edit `manifest.json` by hand: a whole-file write discards every change another agent made since you read it.
 
 ## Shell-safe forms
 
@@ -93,18 +93,18 @@ python <skill-dir>/scripts/admin_console_manifest.py release-claim --manifest <p
 
 - The first claim registers the agent.
 - A builder's claim (`implementer`, `architect`) writes `locks/<capability>.lock` and sets `owner`. It also sets `implementedBy` when that is empty; an implementer's claim replaces an architect's.
-- A reviewer's claim writes `locks/<capability>.<role>.lock` and changes neither field.
+- A reviewer's claim writes `locks/<capability>@<role>.lock` and changes neither field. A lock of the older form `<capability>.<role>.lock` is renamed to this one by the next claim or release.
 - A builder excludes everyone: nothing is reviewed while it is being built. Reviewers of different roles review one capability in parallel; two reviewers of the same role do not.
-- An id that has built something cannot claim as a reviewer.
+- An id that has built something cannot claim as a reviewer, and an id that still holds a claim cannot claim under another reviewer role; release first.
 - Exit 3 names the holder, from the lock file or from `agents[]` (lock files are git-ignored, so the manifest is checked too).
 
-`release-claim` without `--capability` releases everything the agent holds. It blanks `owner`, moves the capability to the agent's `previouslyOwned`, and sets the agent `done` when nothing is left. `implementedBy` is never cleared. `claim --force-steal --reason '<why>'` takes a capability from an agent that stalled. It is recorded on both agents; never steal from an agent that may still be writing.
+`release-claim` without `--capability` releases everything the agent holds: what `agents[]` lists and every lock file that names it. It blanks `owner`, moves the capability to the agent's `previouslyOwned`, and sets the agent `done` when nothing is left. `implementedBy` is never cleared. An id that is not in `agents[]` and holds no lock exits 3 and writes nothing. `claim --force-steal --reason '<why>'` takes a capability from an agent that stalled, its lock included (a reviewer's steal from a builder removes the builder's lock). It is recorded on both agents; never steal from an agent that may still be writing.
 
 | Lock | Where | Freed by |
 |---|---|---|
 | Write lock | `.admin-console/.lock`, held for milliseconds by each write | the operating system, when the holding process exits. A write that waits 30 seconds exits 2 naming the holder's pid. The file itself stays; deleting it frees nothing. On a filesystem without OS locks, `.lock.soft` is used instead. It is removed on release; delete one left by a crashed process by hand, once that process is gone |
 | Builder claim | `locks/<capability>.lock` | `release-claim`, or `--force-steal` |
-| Reviewer claim | `locks/<capability>.<role>.lock` | the same |
+| Reviewer claim | `locks/<capability>@<role>.lock` | the same |
 | Manifest claim | `agents[].ownsCapabilities` of an `active` agent, and `owner` | `release-claim`, the holder's status set to `done` or `handed-off`, or `--force-steal` |
 
 A claim is refused on either of the last rows. Deleting a lock file does not free a capability the manifest still assigns to an active agent.
@@ -115,19 +115,21 @@ Tool restrictions on reviewers are advisory in Claude Code and absent in other h
 
 <!-- doc-test: skip -->
 ```text
-python <skill-dir>/scripts/admin_console_manifest.py review-scope --manifest <project-root>/.admin-console/manifest.json --agent <reviewer-id> --start
+python <skill-dir>/scripts/admin_console_manifest.py review-scope --manifest <project-root>/.admin-console/manifest.json --agent <reviewer-id> --role <role> --start
 python <skill-dir>/scripts/admin_console_manifest.py review-scope --manifest <project-root>/.admin-console/manifest.json --agent <reviewer-id>
 ```
 
-- Run `--start` when the pass is dispatched. It records what was already uncommitted, so another agent's unfinished work is not blamed on the reviewer.
+- Run `--start` when the pass is dispatched. The reviewer registers itself during its pass, so `--role` (`ux-reviewer`, `qa` or `security`) names the write surface; it is recorded with the starting point. `--start` records what was already uncommitted, so another agent's unfinished work is not blamed on the reviewer, and what the manifest cites as evidence at that moment.
+- A second `--start` for the same id is refused. `--start --restart` replaces the starting point, and every later check reports how many times it was restarted, so a restart you did not make is visible.
 - Run the check when the pass returns. A reviewer may change:
   - the manifest and the tool's working files;
-  - its own worklog;
-  - files the manifest cites as evidence (logs, reports, screenshots; never source or project configuration);
+  - its own worklog; the worklogs of other registered reviewers are not counted against it, and are named;
+  - files the manifest cited as evidence when the pass began (logs, reports, screenshots; never source or project configuration), and files the pass created and cited that are logs, reports or images;
   - `docs/admin-*.md`;
   - for `qa` only, test files that did not exist when the pass began.
+- Git-ignored files are checked only when their names mark them as configuration (`.env*`, `*.local*`, `*.ini`, `*.conf`, `*.toml`, `*.yaml`, `*config*.json` and similar); other ignored files, such as build output, are not.
 - Exit 1 lists everything else. Revert it, or have an implementer adopt it under a claim, and file the gaps.
-- `--base <commit>` compares with a commit instead of `--start`. `--ignore <glob>` excuses paths a concurrently running builder changed. `--role` names the pass when the agent is not in `agents[]`.
+- `--base <commit>` compares with a commit instead of `--start` (evidence is read from the manifest at that commit; ignored files are not checked). `--ignore <glob>` excuses paths a concurrently running builder changed.
 
 ## Files, commits and monorepos
 

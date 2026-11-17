@@ -4462,6 +4462,29 @@ def cell(value):
     return " ".join(text.split()) or "-"
 
 
+def is_not_applicable(capability):
+    return capability.get("status") == "not-applicable"
+
+
+def not_applicable_section(manifest):
+    """Lines listing not-applicable capabilities, so a document never presents them as live."""
+    absent = [capability for _p, _e, capability in iter_capabilities(manifest) if is_not_applicable(capability)]
+    if not absent:
+        return []
+    decisions = {}
+    for _path, decision in iter_named(manifest, "decisions"):
+        if decision_kind(decision) == "not-applicable":
+            for target in str_items(decision.get("appliesTo")):
+                decisions.setdefault(target, text_of(decision.get("id")))
+    lines = ["", "## Not applicable", "",
+             "Recorded as not applicable; they do not exist in this console.", ""]
+    for capability in absent:
+        cid = text_of(capability.get("id"))
+        lines.append("- `" + cid + "`: not applicable" + (
+            " (decision " + decisions[cid] + ")" if decisions.get(cid) else ""))
+    return lines
+
+
 def emit_authz_matrix(manifest):
     roles = {text_of(role.get("id")): role for _p, role in iter_named(manifest, "roles")}
     lines = ["# Authorization matrix", ""]
@@ -4469,6 +4492,8 @@ def emit_authz_matrix(manifest):
     lines.append("|---|---|---|---|---|---|---|---|")
     rows = 0
     for _path, entity, capability in iter_capabilities(manifest):
+        if is_not_applicable(capability):
+            continue
         obligations = []
         obligations.extend(as_list(capability.get("auditEvents")))
         obligations.extend(as_list(capability.get("safeguards")))
@@ -4498,13 +4523,14 @@ def emit_authz_matrix(manifest):
     orphans = [
         text_of(capability.get("id"))
         for _p, _e, capability in iter_capabilities(manifest)
-        if not as_list(capability.get("roles"))
+        if not as_list(capability.get("roles")) and not is_not_applicable(capability)
     ]
     lines.extend(["", "## Capabilities with no actor role", ""])
     if orphans:
         lines.extend("- " + item for item in orphans)
     else:
         lines.append("- none")
+    lines.extend(not_applicable_section(manifest))
     lines.extend(["", "## Denied-by-default expectation", ""])
     lines.append("Any role absent from a capability row must be rejected by the server, not hidden in the UI.")
     return "\n".join(lines) + "\n"
@@ -4521,8 +4547,9 @@ def emit_test_plan(manifest):
             lines.append("- [ ] fixtures exist for every lifecycle state: " + ", ".join(str(s) for s in states))
         if entity.get("tenantScoped") is True:
             lines.append("- [ ] cross-tenant read and write of " + eid + " is rejected server-side")
-        capabilities = [cap for cap in as_list(entity.get("capabilities")) if isinstance(cap, dict)]
-        if not capabilities:
+        modeled = [cap for cap in as_list(entity.get("capabilities")) if isinstance(cap, dict)]
+        capabilities = [cap for cap in modeled if not is_not_applicable(cap)]
+        if not modeled:
             lines.append("- [ ] no capability modeled; entity is unmanaged")
         for capability in capabilities:
             cid = text_of(capability.get("id"))
@@ -4551,6 +4578,7 @@ def emit_test_plan(manifest):
                 lines.append("- [ ] precondition: the operation is rejected from states outside " + cell(entity_states.get("from")))
             if nonempty(capability.get("concurrency")):
                 lines.append("- [ ] concurrency: " + cell(capability.get("concurrency")))
+    lines.extend(not_applicable_section(manifest))
     lines.extend(["", "## screens", ""])
     for _path, screen in iter_named(manifest, "screens"):
         route = text_of(screen.get("route"))
@@ -4668,6 +4696,8 @@ def emit_operator_handbook(manifest):
     lines = ["# Operator handbook", ""]
     caps_by_role = {}
     for _path, entity, capability in iter_capabilities(manifest):
+        if is_not_applicable(capability):
+            continue  # listed once, at the end: an operator cannot do what does not exist
         for role_id in str_items(capability.get("roles")):
             caps_by_role.setdefault(role_id, []).append((entity, capability))
     screens_by_role = {}
@@ -4698,11 +4728,12 @@ def emit_operator_handbook(manifest):
         if not entries:
             lines.append("| - | - | - | - | - | - |")
         for entity, capability in entries:
+            built = capability.get("status") == "implemented"
             lines.append(
                 "| "
                 + " | ".join(
                     [
-                        cell(capability.get("id")),
+                        cell(text_of(capability.get("id")) + ("" if built else " (not built yet)")),
                         cell(entity.get("id")),
                         cell(capability.get("kind")),
                         cell(capability.get("risk")),
@@ -4728,6 +4759,7 @@ def emit_operator_handbook(manifest):
                     + "; recover with "
                     + cell(capability.get("recovery"))
                 )
+    lines.extend(not_applicable_section(manifest))
     return "\n".join(lines) + "\n"
 
 
@@ -4738,24 +4770,30 @@ def emit_gap_report(manifest, profile):
     recorded = list(iter_named(manifest, "gaps"))
     if not recorded:
         lines.append("- none recorded")
-    for severity in GAP_SEVERITIES:
-        rows = [gap for _p, gap in recorded if gap.get("severity") == severity]
+    # A gap whose severity is not one of the four (a hand-written "Critical", none
+    # at all) used to vanish from the one document a stakeholder reads.
+    unclassified = [gap for _p, gap in recorded if gap.get("severity") not in GAP_SEVERITIES]
+    if unclassified:
+        lines.append(str(len(unclassified)) + " gap(s) have no valid severity (one of "
+                     + ", ".join(GAP_SEVERITIES) + "); they are listed under 'unclassified severity'.")
+    for severity in GAP_SEVERITIES + ("unclassified severity",):
+        if severity in GAP_SEVERITIES:
+            rows = [gap for _p, gap in recorded if gap.get("severity") == severity]
+        else:
+            rows = unclassified
         if not rows:
             continue
-        lines.extend(["", "### " + severity, "", "| Gap | Status | Description | Rationale |", "|---|---|---|---|"])
+        unsorted = severity not in GAP_SEVERITIES
+        lines.extend(["", "### " + severity, "",
+                      "| Gap | " + ("Severity as recorded | " if unsorted else "")
+                      + "Status | Description | Rationale |",
+                      "|---|---|---|---|" + ("---|" if unsorted else "")])
         for gap in rows:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        cell(gap.get("id")),
-                        cell(gap.get("status")),
-                        cell(gap.get("description")),
-                        cell(gap.get("rationale")),
-                    ]
-                )
-                + " |"
-            )
+            values = [cell(gap.get("id"))]
+            if unsorted:
+                values.append(cell(label(gap.get("severity"), "none")))
+            values.extend([cell(gap.get("status")), cell(gap.get("description")), cell(gap.get("rationale"))])
+            lines.append("| " + " | ".join(values) + " |")
     lines.extend(["", "## Declared static", ""])
     entries = list(iter_named(manifest, "declaredStatic"))
     if not entries:
@@ -5479,7 +5517,13 @@ def coerce_value(raw, current):
         return raw
     if stripped[:1] in ("{", "["):
         try:
-            return json.loads(stripped)
+            # Bounded like every other JSON this tool reads: an unbounded value
+            # was written, and then no command -- `set --delete` included -- could
+            # load the manifest again.
+            return loads_bounded(stripped)
+        except RecursionError:
+            raise ManifestError("--value is nested too deeply to store safely (more than "
+                                + str(MAX_JSON_DEPTH) + " levels); nothing was written.")
         except ValueError as exc:
             raise ManifestError(
                 "--value starts with '" + stripped[:1] + "', so it must be valid JSON: " + str(exc)
@@ -5495,6 +5539,14 @@ def coerce_value(raw, current):
             "field is an object; pass it as JSON, e.g. --value '{\"from\": [\"a\"], \"to\": []}', "
             "or put the JSON in a file and use --value-file. " + VALUE_POWERSHELL_HINT
         )
+    if isinstance(current, float):
+        try:
+            number = float(stripped)
+        except ValueError:
+            number = None
+        if number is None or number != number or number in (float("inf"), float("-inf")):
+            raise ManifestError("field is a number; --value must be a finite number such as 3.5")
+        return number
     if isinstance(current, int):
         try:
             return int(raw)
@@ -5804,7 +5856,63 @@ def observation_key(record):
     return text_of(record.get("id")) or observation_fingerprint(record)
 
 
-def merge_observation_files(*paths):
+def parse_observation_lines(text):
+    """(records, numbers of the lines that are not wholly observation records).
+
+    Split on LF only: a record written with ensure_ascii=False may hold U+2028,
+    which str.splitlines() treats as a line break and so cut one record in two.
+    Each line is decoded object by object, so two records glued onto one line
+    (an append onto a file that did not end in a newline) are both recovered.
+    A line that holds anything else -- a list, a string, a typo, a truncated
+    record -- is reported by number; what could be read from it still counts.
+    """
+    decoder = json.JSONDecoder()
+    records, bad = [], []
+    for number, line in enumerate(text.split("\n"), 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        position, whole = 0, True
+        while position < len(stripped):
+            try:
+                value, end = decoder.raw_decode(stripped, position)
+            except (ValueError, RecursionError):
+                whole = False
+                break
+            if not isinstance(value, dict):
+                whole = False
+                break
+            records.append(value)
+            position = end
+            while position < len(stripped) and stripped[position] in " \t":
+                position += 1
+        if not whole:
+            bad.append(number)
+    return records, bad
+
+
+def read_observation_file(path):
+    """(records, unreadable line numbers) of one observations file; empty when it is absent."""
+    if not path.exists():
+        return [], []
+    return parse_observation_lines(decode_text_bytes(path.read_bytes(), path))
+
+
+def describe_lines(numbers, limit=12):
+    shown = ", ".join(str(number) for number in numbers[:limit])
+    return ("line " if len(numbers) == 1 else "lines ") + shown + (" ..." if len(numbers) > limit else "")
+
+
+def warn_unreadable(path, bad):
+    if bad:
+        stderr(
+            "WARN: " + str(path) + " has " + str(len(bad)) + " line(s) that are not observation "
+            "records (" + describe_lines(bad) + "). They were skipped here and are kept in the file; "
+            "fix or delete them by hand, then run `store status` to check."
+        )
+
+
+def merge_observation_records(*record_lists):
     """Union of observation records by id, in canonical (sorted) order.
 
     observations.jsonl is append-only, so a sync conflict is never a real
@@ -5815,19 +5923,8 @@ def merge_observation_files(*paths):
     the same bytes, so a later merge never has anything to disagree about.
     """
     merged = {}
-    for path in paths:
-        if not path.exists():
-            continue
-        for line in decode_text_bytes(path.read_bytes(), path).splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict):
-                continue
+    for records in record_lists:
+        for record in records:
             merged.setdefault(observation_key(record), record)
     return [merged[key] for key in sorted(merged)]
 
@@ -6046,9 +6143,24 @@ def read_community_observations(skill_root=None):
             stderr("NOTE: skipped community bundle " + str(path)
                    + ": not a bundle written by `promote --export` (no observations list)")
             continue
-        for index, record in enumerate(payload["observations"]):
-            if not isinstance(record, dict):
+        malformed = 0
+        for index, raw in enumerate(payload["observations"]):
+            # Reduced to the bundle schema, typed: an object among the archetypes
+            # or a number among the evidence crashed promote for every bundle and
+            # for the local store with it.
+            observation = text_of(raw.get("observation")) if isinstance(raw, dict) else ""
+            if not observation:
+                malformed += 1
                 continue
+            record = {
+                "category": text_of(raw.get("category")),
+                "scope": text_of(raw.get("scope")),
+                "observation": observation,
+                "proposedChange": text_of(raw.get("proposedChange")),
+                "archetypes": str_items(raw.get("archetypes")),
+                "stacks": str_items(raw.get("stacks")),
+                "projects": str_items(raw.get("projects")),
+            }
             record["community"] = True
             # Recompute rather than trust the bundle's own fingerprint. A stale
             # or hand-edited value would either fail to group with matching local
@@ -6059,37 +6171,48 @@ def read_community_observations(skill_root=None):
             # The bundle's `projects` list cannot be verified, so it may not
             # multiply one contribution into several sightings, and a projectKey
             # written into the bundle is never believed.
-            record.pop("projectKey", None)
-            contributors = as_list(record.get("projects"))
+            contributors = record["projects"]
             record["project"] = (
                 (text_of(contributors[0]) if contributors else "")
                 or "community:" + path.stem + ":" + str(index)
             )
             records.append(record)
+        if malformed:
+            stderr("NOTE: skipped " + str(malformed) + " record(s) in community bundle " + str(path)
+                   + ": not an object with observation text")
     return records
 
 
-def read_observations(store):
+def read_observations(store, warn=True):
+    """The store's records (objects only). Unreadable lines are reported, never removed."""
     path = store / "observations.jsonl"
-    records = []
-    if not path.exists():
-        return records
-    for line in decode_text_bytes(path.read_bytes(), path).splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    records, bad = read_observation_file(path)
+    if warn:
+        warn_unreadable(path, bad)
     return records
 
 
 def append_observations(store, records):
+    """Append under the store lock, always starting on a new line.
+
+    A file that did not end in a newline (a hand fix saved by an editor, an
+    append cut short) used to get the next record glued onto its last line,
+    which then parsed as neither.
+    """
     store.mkdir(parents=True, exist_ok=True)
     path = store / "observations.jsonl"
     with FileLock(store / ".lock"):
+        lead = ""
+        try:
+            with open(str(path), "rb") as existing:
+                existing.seek(0, os.SEEK_END)
+                if existing.tell():
+                    existing.seek(-1, os.SEEK_END)
+                    lead = "" if existing.read(1) == b"\n" else "\n"
+        except FileNotFoundError:
+            pass
         with open(str(path), "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(lead)
             for record in records:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -6185,14 +6308,19 @@ def rebuild_lesson_index(lessons_dir):
     index_path = lessons_dir / "index.md"
     consolidation = "unknown"
     if index_path.exists():
-        found = re.search(r"^Last consolidation:\s*(.+)$", index_path.read_text(encoding="utf-8"), re.M)
+        try:
+            previous = decode_text_bytes(index_path.read_bytes(), index_path, allow_utf16=True)
+        except (OSError, ManifestError):
+            previous = ""  # an unreadable index is rebuilt; only its consolidation date is lost
+        found = re.search(r"^Last consolidation:\s*(.+)$", previous, re.M)
         if found:
             consolidation = found.group(1).strip()
     rows = []
     adopted = []
     for path in lesson_files(lessons_dir):
         fields = read_lesson_frontmatter(path)
-        lesson_id = fields.get("id") or path.name[:4]
+        # A hand-edited frontmatter can hold a list where a string belongs.
+        lesson_id = text_of(fields.get("id")) or path.name[:4]
         if fields.get("status") == "adopted":
             adopted.append(lesson_id)
         platforms = fields.get("platforms")
@@ -6233,6 +6361,13 @@ def resolve_manifest_path(value):
     path = Path(value).resolve()
     if not path.exists():
         raise ManifestError("Manifest not found: " + str(path))
+    if path.is_dir():
+        # `--manifest .admin-console` is a common slip; on Windows it used to fail
+        # as "Permission denied", which sent agents to check permissions.
+        inside = path / "manifest.json"
+        if inside.is_file():
+            return inside
+        raise ManifestError(str(path) + " is a folder; pass the manifest file, e.g. " + str(inside))
     return path
 
 
@@ -6297,12 +6432,17 @@ def write_working_gitignore(target_dir):
 
 def cmd_init(args):
     project_root = Path(args.project_root).resolve()
+    if not text_of(args.name):
+        raise ManifestError("--name is blank; give the platform's name, e.g. --name \"Acme Billing\"")
     if args.manifest:
         target = Path(args.manifest).resolve()
         target_dir = target.parent
     else:
         target_dir = project_root / ".admin-console"
         target = target_dir / "manifest.json"
+    if target.is_dir():
+        raise ManifestError("--manifest " + str(target) + " is a folder; pass the manifest file to "
+                            "create, e.g. " + str(target / "manifest.json"))
     if target.exists() and not args.force:
         stderr("Manifest already exists: " + str(target))
         stderr(
@@ -6323,9 +6463,10 @@ def cmd_init(args):
     manifest["platform"]["name"] = args.name
     # A stable handle for the cross-project store: the promotion bar counts
     # distinct projects, and a display name is not one.
-    manifest["platform"]["id"] = (
-        slugify(args.name)[:32].rstrip("-") + "-" + os.urandom(3).hex()
-    )
+    # slugify falls back to "lesson" for a name with no ASCII letters ("!!!", a CJK
+    # or Cyrillic name); a platform id says "console" instead.
+    slug = re.sub(r"[^a-z0-9]+", "-", args.name.lower()).strip("-")[:32].rstrip("-") or "console"
+    manifest["platform"]["id"] = slug + "-" + os.urandom(3).hex()
     archetypes = []
     for raw in args.archetype or []:
         # --archetype a,b used to store the single string "a,b", which resolved to
@@ -6636,11 +6777,74 @@ def cmd_coverage(args):
     return 1 if findings.errors else 0
 
 
+def comparable_path(path):
+    """A spelling of a path that two names of one file share (case on Windows, links, ..)."""
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def path_within(path, folder):
+    """Whether comparable path `path` is `folder` or inside it."""
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+# Files the tool itself keeps beside a manifest; reports (`*.md`) may sit there too.
+OWNED_BESIDE_MANIFEST = frozenset((".gitignore", ".lock", ".lock.soft"))
+
+
+def refuse_protected_output(raw, flag, manifest_path=None, store=None):
+    """The resolved output path, or a refusal when it would overwrite what the tool keeps.
+
+    `emit --out <manifest>` replaced the manifest with Markdown, and `promote --export`
+    given the store's own file replaced every observation with one bundle; one
+    mistyped path destroyed the record the skill exists to keep. Refused: the
+    manifest; the files the tool keeps beside it (`*.json` such as the schema copy
+    and ocr records, `.gitignore`, the lock files, `*.tmp`, and everything under
+    `locks/` and `worklog/`), in the manifest's folder or in any `.admin-console`
+    folder; and any file in the observation store.
+    """
+    out_path = Path(raw).resolve()
+    target = comparable_path(out_path)
+    reason = None
+    if manifest_path is not None and target == comparable_path(manifest_path):
+        reason = "is the manifest"
+    folders = [Path(manifest_path).resolve().parent] if manifest_path is not None else []
+    folders.extend(parent for parent in out_path.parents if parent.name.lower() == ".admin-console")
+    for folder in folders:
+        if reason:
+            break
+        base = comparable_path(folder)
+        if not path_within(target, base) or target == base:
+            continue
+        inside = target[len(base.rstrip(os.sep)) + 1:].split(os.sep)
+        name = inside[-1]
+        if inside[0] in MANIFEST_WORKING_DIRS:
+            reason = "is in the tool's " + inside[0] + "/ folder"
+        elif len(inside) == 1 and (
+            name in OWNED_BESIDE_MANIFEST or name.endswith((".json", ".tmp"))
+        ):
+            reason = "is a file the tool keeps beside the manifest"
+    if not reason and store is not None and path_within(target, comparable_path(store)):
+        reason = "is inside the observation store " + str(store)
+    if reason:
+        raise ManifestError(
+            flag + " " + str(out_path) + " " + reason + "; nothing was written. Write the output "
+            "somewhere else, e.g. docs/admin-<name>.md or a bundle file outside the store."
+        )
+    return out_path
+
+
+def default_store_or_none():
+    try:
+        return global_store_dir()
+    except ManifestError:
+        return None
+
+
 def cmd_emit(args):
     if args.format == "rule-matrix":
         text = emit_rule_matrix()
         if args.out:
-            out_path = Path(args.out).resolve()
+            out_path = refuse_protected_output(args.out, "--out", store=default_store_or_none())
             write_text_file(out_path, text)
             print("Wrote " + str(out_path))
         else:
@@ -6649,6 +6853,9 @@ def cmd_emit(args):
     if not args.manifest:
         raise ManifestError("--manifest is required for --format " + args.format)
     manifest_path = resolve_manifest_path(args.manifest)
+    out_path = None
+    if args.out:
+        out_path = refuse_protected_output(args.out, "--out", manifest_path, default_store_or_none())
     manifest = load_json(manifest_path)
     profile = active_profile(manifest, None)[0]
     # Surface manifest health on every emit. Field-tested: an audit session
@@ -6687,8 +6894,7 @@ def cmd_emit(args):
             + " warning(s) at release validation." + caveat + "\n",
             1,
         )
-    if args.out:
-        out_path = Path(args.out).resolve()
+    if out_path is not None:
         write_text_file(out_path, text)
         print("Wrote " + str(out_path))
     else:
@@ -6756,6 +6962,7 @@ def cmd_add(args):
                 )
             batch_ids.add(entry_id)
         collection.extend(entries)
+        refuse_too_deep(manifest)
         introduced, warned = new_findings(
             before, manifest, project_root_of(manifest_path, manifest), manifest_path
         )
@@ -6827,6 +7034,18 @@ def sync_profile_decision(manifest, old, new):
         "id": new_id, "kind": "profile", "decision": text, "reason": reason, "appliesTo": ["*"],
     }))
     return "recorded the assumed decision " + new_id + ": '" + text + "'"
+
+
+def refuse_too_deep(manifest):
+    """Refuse a write `load_json` could not read back: a value shallow on its own can
+    still land deep enough to push the manifest past MAX_JSON_DEPTH."""
+    try:
+        loads_bounded(json.dumps(manifest))
+    except RecursionError:
+        raise ManifestError(
+            "Refusing to write: the manifest would be nested more than " + str(MAX_JSON_DEPTH)
+            + " levels deep, and no command could read it again; nothing was written."
+        )
 
 
 def read_value_argument(args):
@@ -6927,6 +7146,7 @@ def cmd_set(args):
             and isinstance(value, str) and previous != value
         ):
             renamed = (segments[-2][0], previous, value)
+        refuse_too_deep(manifest)
         introduced, warned = new_findings(
             before, manifest, project_root_of(manifest_path, manifest), manifest_path,
             renamed=renamed,
@@ -7003,6 +7223,21 @@ def references_to(manifest, kind, item_id, lock_dir=None):
             found.append(path)
 
     walk(manifest, probe, "")
+    if kind == "entity":
+        # Removing an entity removes its capabilities: whatever names them dangles too.
+        inside = "entities[" + item_id + "]"
+        for _path, entity, capability in iter_capabilities(manifest):
+            cid = text_of(capability.get("id"))
+            if cid and text_of(entity.get("id")) == item_id:
+                found.extend(
+                    where for where in references_to(manifest, "capability", cid, lock_dir)
+                    if not where.startswith(inside) and where not in found
+                )
+    if kind == "capability" and lock_dir is not None and lock_dir.is_dir():
+        for role in (None,) + REVIEWER_ROLES:
+            lock = lock_dir / lock_file_name(item_id, role)
+            if lock.exists() and lock_holder(lock):
+                found.append("locks/" + lock.name + " (held by " + lock_holder(lock) + ")")
     # An agent's history of what it once held is a record, not a dependency.
     found = [where for where in found if ".previouslyOwned[" not in where]
     if kind == "agent":
@@ -7165,14 +7400,15 @@ def cmd_rename(args):
         commit_manifest(manifest_path, manifest)
         lock_dir = manifest_path.parent / "locks"
         if args.kind == "capability" and lock_dir.is_dir():
-            # The implementer's lock and every reviewer's lock move with the id.
-            prefix = lock_file_name(args.id)[: -len(".lock")]
-            for old_lock in sorted(lock_dir.glob("*.lock")):
-                stem = old_lock.name[: -len(".lock")]
-                if stem == prefix or stem.startswith(prefix + "."):
-                    renamed_lock = lock_dir / (lock_file_name(new_id)[: -len(".lock")] + stem[len(prefix):] + ".lock")
+            # The implementer's lock and every reviewer's lock move with the id --
+            # exactly those names: a prefix match also moved `<id>.bulk.lock`, the
+            # builder lock of another capability.
+            migrate_legacy_locks(lock_dir, before)
+            for role in (None,) + REVIEWER_ROLES:
+                old_lock = lock_dir / lock_file_name(args.id, role)
+                if old_lock.exists():
                     try:
-                        old_lock.replace(renamed_lock)
+                        old_lock.replace(lock_dir / lock_file_name(new_id, role))
                     except OSError:
                         pass
         if args.kind == "agent" and lock_dir.is_dir():
@@ -7193,16 +7429,80 @@ def cmd_rename(args):
 
 
 def lock_file_name(capability_id, role=None):
-    """locks/<capability>.lock for the builder; locks/<capability>.<role>.lock for a reviewer.
+    """locks/<capability>.lock for the builder; locks/<capability>@<role>.lock for a reviewer.
 
     Reviewers of different roles review one capability in parallel (ux and security
     over the same finished domain, as the pass order documents), so each reviewer
-    role has its own lock; two reviewers of the same role still collide.
+    role has its own lock; two reviewers of the same role still collide. The '@'
+    is a character no id may hold: with a dot, the builder lock of `a.qa` and the
+    qa review lock of `a` were one file.
     """
     base = re.sub(r"[^A-Za-z0-9._-]", "_", capability_id)
     if role and role in REVIEWER_ROLES:
-        return base + "." + role + ".lock"
+        return base + "@" + role + ".lock"
     return base + ".lock"
+
+
+def lock_capability(lock_name):
+    """The capability id a lock file names (`a.b@qa.lock` and `a.b.lock` both name a.b)."""
+    stem = lock_name[: -len(".lock")] if lock_name.endswith(".lock") else lock_name
+    return stem.split("@", 1)[0]
+
+
+def lock_holder(path):
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def locks_held_by(lock_dir, agent_id):
+    """{capability id: [lock paths]} of every lock file whose content is this agent."""
+    held = {}
+    if lock_dir.is_dir():
+        for path in sorted(lock_dir.glob("*.lock")):
+            if lock_holder(path) == agent_id:
+                held.setdefault(lock_capability(path.name), []).append(path)
+    return held
+
+
+def migrate_legacy_locks(lock_dir, manifest):
+    """Rename reviewer locks of the old `<capability>.<role>.lock` form to `<capability>@<role>.lock`.
+
+    Called under the manifest lock by every command that reads locks, so a claim
+    made before the rename is honoured, never orphaned. A name that is both a
+    capability's builder lock and another's review lock (`a.qa` and `a` both
+    exist) is decided by its holder's registered role; one that cannot be
+    decided is left as it is.
+    """
+    if not lock_dir.is_dir():
+        return
+    capabilities = set(capability_index(manifest))
+    for path in sorted(lock_dir.glob("*.lock")):
+        stem = path.name[: -len(".lock")]
+        if "@" in stem:
+            continue
+        for role in REVIEWER_ROLES:
+            if not stem.endswith("." + role):
+                continue
+            prefix = stem[: -len(role) - 1]
+            holder = lock_holder(path)
+            record = find_agent(manifest, holder) if holder else None
+            holder_role = text_of(record.get("role")) if record else ""
+            if stem in capabilities and (prefix not in capabilities or holder_role != role):
+                break  # a builder lock of the dotted capability
+            if prefix not in capabilities and holder_role != role:
+                break  # names nothing known; leave it for a person
+            target = lock_dir / lock_file_name(prefix, role)
+            try:
+                if not target.exists():
+                    path.replace(target)
+                    stderr("note: renamed the lock " + path.name + " to " + target.name + " (new lock naming)")
+                elif lock_holder(target) == holder:
+                    path.unlink()
+            except OSError:
+                pass
+            break
 
 
 IMPLEMENTER_ROLES = ("implementer", "architect")
@@ -7240,7 +7540,7 @@ def manifest_holder(manifest, capability, requester, role=None):
         agent_id = text_of(agent.get("id"))
         if agent_id == requester or text_of(agent.get("status")) != "active":
             continue
-        if cid in as_list(agent.get("ownsCapabilities")):
+        if cid in str_items(agent.get("ownsCapabilities")):
             if role is None or claims_conflict(role, text_of(agent.get("role"))):
                 return agent_id
     owner = text_of(capability.get("owner"))
@@ -7283,6 +7583,23 @@ def cmd_claim(args):
                 + ". Use a different agent id for the review."
             )
             return 2
+        migrate_legacy_locks(lock_dir, manifest)
+        old_role = text_of(existing.get("role")) if existing is not None else ""
+        if (
+            old_role and old_role != args.role
+            and (old_role in REVIEWER_ROLES or args.role in REVIEWER_ROLES)
+        ):
+            # A claim records one role per agent; release-claim found locks by it,
+            # so a lock taken under the old role was never released.
+            still = sorted(set(str_items(existing.get("ownsCapabilities")))
+                           | set(locks_held_by(lock_dir, args.agent)))
+            if still:
+                stderr(
+                    "Agent '" + args.agent + "' is registered as " + old_role + " and still holds "
+                    + ", ".join(still) + "; run `release-claim --agent " + args.agent + "` first, or "
+                    "claim as " + args.role + " under another agent id."
+                )
+                return 2
         holders = {}
         for cid in args.capability:
             holder = manifest_holder(manifest, caps[cid][2], args.agent, args.role)
@@ -7314,6 +7631,16 @@ def cmd_claim(args):
                         + "'. Review starts after its release-claim."
                     )
                     return 3
+                if builder and builder != args.agent:
+                    # A steal takes the builder's lock too: left behind, it named a
+                    # builder the manifest no longer lists and blocked every claim.
+                    restore.append((builder_lock, builder))
+                    try:
+                        builder_lock.unlink()
+                    except OSError:
+                        pass
+                    if not any(taken == cid for taken, _victim in stolen):
+                        stolen.append((cid, builder))
             lock_path = lock_dir / lock_file_name(cid, args.role)
             owner = None
             try:
@@ -7321,7 +7648,7 @@ def cmd_claim(args):
                 os.write(handle, (args.agent + "\n").encode("utf-8"))
                 os.close(handle)
                 acquired.append(lock_path)
-                if args.force_steal and holders.get(cid):
+                if args.force_steal and holders.get(cid) and not any(t == cid for t, _v in stolen):
                     # No lock file (a fresh clone, locks/ cleaned) but the manifest
                     # names a holder: the steal still takes it from that holder.
                     stolen.append((cid, holders[cid]))
@@ -7397,6 +7724,10 @@ def cmd_claim(args):
                 if cid not in history:
                     history.append(cid)
                 victim_record["previouslyOwned"] = history
+            # A reviewer's steal leaves `owner` alone, so a builder victim would still
+            # be named as holding it; `implementedBy` keeps the record of who built it.
+            if victim and text_of(caps[cid][2].get("owner")) == text_of(victim):
+                caps[cid][2]["owner"] = ""
         if stolen:
             note = text_of(record.get("notes"))
             steal_note = "; ".join(
@@ -7444,32 +7775,42 @@ def cmd_release_claim(args):
     released = []
     skipped = []
     not_held = []
+    dropped = []
     with FileLock(manifest_path.parent / ".lock"):
         manifest = load_json(manifest_path)
         caps = capability_index(manifest)
         record = find_agent(manifest, args.agent)
-        owned = as_list(record.get("ownsCapabilities")) if record else []
-        targets = args.capability if args.capability else list(owned)
+        migrate_legacy_locks(lock_dir, manifest)
+        # What is on disk decides, not the agent's current role: a reviewer that
+        # claimed as qa and later as security, or whose builder lock outlived a
+        # steal, left locks behind that blocked every later claimant.
+        on_disk = locks_held_by(lock_dir, args.agent)
+        raw_owned = as_list(record.get("ownsCapabilities")) if record else []
+        owned = str_items(raw_owned)
+        dropped = [item for item in raw_owned if not isinstance(item, str)]
+        if record is None and not on_disk and not args.capability:
+            stderr("Agent '" + args.agent + "' is not in agents[] and holds no lock; nothing to release. "
+                   "Check the id against agents[] in the manifest.")
+            return 3
+        targets = list(args.capability) if args.capability else list(
+            dict.fromkeys(owned + sorted(on_disk)))
         role = text_of(record.get("role")) if record else ""
         for cid in targets:
             lock_path = lock_dir / lock_file_name(cid, role)
-            owner = ""
             entry = caps.get(cid)
             held_in_manifest = cid in owned or (
                 entry is not None and text_of(entry[2].get("owner")) == args.agent
             )
-            if lock_path.exists():
-                try:
-                    owner = lock_path.read_text(encoding="utf-8").strip()
-                except OSError:
-                    owner = ""
-                if owner and owner != args.agent:
-                    skipped.append((cid, owner))
-                    continue
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
+            mine = on_disk.get(cid, [])
+            if mine:
+                for path in mine:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+            elif lock_path.exists() and lock_holder(lock_path) and lock_holder(lock_path) != args.agent:
+                skipped.append((cid, lock_holder(lock_path)))
+                continue
             elif not held_in_manifest:
                 # Releasing something this agent never held used to report
                 # "Released: <it>" and exit 0.
@@ -7491,7 +7832,11 @@ def cmd_release_claim(args):
             record["previouslyOwned"] = history
             if not remaining:
                 record["status"] = "done"
-        commit_manifest(manifest_path, manifest)
+        if record is not None or released:
+            commit_manifest(manifest_path, manifest)
+    if dropped:
+        stderr("note: dropped " + str(len(dropped)) + " entry(ies) of agents[" + args.agent
+               + "].ownsCapabilities that were not capability ids: " + json.dumps(dropped)[:200])
     for cid, owner in skipped:
         stderr("Skipped " + cid + ": lock is held by '" + owner + "'")
     for cid in not_held:
@@ -7559,6 +7904,83 @@ def scope_baseline_path(manifest_path, agent_id):
     return manifest_path.parent / "locks" / (re.sub(r"[^A-Za-z0-9._-]", "_", agent_id) + ".scope.json")
 
 
+def scope_mirror_path(top, manifest_path, agent_id):
+    """A second copy of a baseline inside the git directory, outside the working tree.
+
+    `locks/` is the reviewer's own write surface and git-ignored, so deleting the
+    baseline there and starting again would reset it unseen. The copy in the git
+    directory is what a check trusts when the two disagree.
+    """
+    git_dir = Path(git_text(top, "rev-parse", "--absolute-git-dir").strip())
+    key = hashlib.sha256(
+        (comparable_path(manifest_path) + "\0" + agent_id).encode("utf-8")
+    ).hexdigest()[:16]
+    return git_dir / "adminwright" / "review-scope" / (key + ".json")
+
+
+def read_scope_baseline(path):
+    try:
+        stored = loads_bounded(path.read_text(encoding="utf-8"))
+        if not isinstance(stored, dict) or not isinstance(stored.get("head"), str):
+            raise ValueError("no head")
+        dict(stored["paths"])
+        return stored
+    except (ValueError, KeyError, TypeError, OSError, RecursionError) as exc:
+        raise ManifestError("unreadable review-scope baseline " + str(path) + ": " + str(exc)
+                            + "; record a new one with `review-scope --start --restart`")
+
+
+# Git-ignored files a reviewer must not change: configuration, which an ignore rule
+# hides from `git status` (`.env`, `*.local*`, settings files). Build output and
+# caches are not listed, so running the project's checks never trips the check.
+IGNORED_CONFIG_PATTERN = re.compile(
+    r"(?:^|/)(?:\.env(?:\.[^/]*)?|[^/]*\.local(?:\.[^/]+)?|[^/]*\.(?:ini|conf|cfg|properties|toml|ya?ml)"
+    r"|[^/]*(?:config|settings)[^/]*\.(?:json|js|cjs|mjs|ts))$",
+    re.I,
+)
+IGNORED_CONFIG_MAX_BYTES = 1024 * 1024
+# A file first cited as evidence during the pass is editable only when the pass
+# created it and it is one of these: a log, a report, a screenshot.
+NEW_EVIDENCE_SUFFIXES = frozenset((
+    ".log", ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".csv", ".json",
+    ".html", ".har", ".xml",
+))
+
+
+def ignored_config_hashes(top, manifest_dir):
+    """{repository-relative path: sha256} of git-ignored configuration files."""
+    listed = scope_paths(top, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
+                         "--no-empty-directory", "-z")
+    hashes = {}
+    for rel in sorted(listed):
+        if rel.endswith("/") or not IGNORED_CONFIG_PATTERN.search(rel):
+            continue
+        candidate = top / rel
+        if inside_manifest_dir(candidate.resolve(), manifest_dir):
+            continue
+        try:
+            if candidate.stat().st_size > IGNORED_CONFIG_MAX_BYTES:
+                continue
+        except OSError:
+            continue
+        hashes[rel] = working_hash(candidate)
+    return hashes
+
+
+def cited_evidence_at(top, base, manifest_path, root):
+    """Evidence the manifest cited at commit `base`, or an empty set when it was not committed."""
+    try:
+        rel = Path(os.path.relpath(str(manifest_path), str(top))).as_posix()
+    except ValueError:
+        return set()
+    try:
+        text = git_text(top, "show", base + ":" + rel)
+        manifest = loads_bounded(text)
+    except (ManifestError, ValueError, RecursionError):
+        return set()
+    return cited_evidence_files(manifest, root) if isinstance(manifest, dict) else set()
+
+
 def cmd_review_scope(args):
     """Check from git what a reviewer pass changed, instead of trusting its report.
 
@@ -7577,47 +7999,129 @@ def cmd_review_scope(args):
     manifest_path = resolve_manifest_path(args.manifest)
     manifest = load_json(manifest_path)
     record = find_agent(manifest, args.agent)
-    role = text_of(record.get("role")) if record else (args.role or "")
-    if role not in REVIEWER_ROLES:
-        stderr(
-            "review-scope checks a reviewer pass; agent '" + args.agent + "' "
-            + ("has role '" + role + "'" if record else "is not in agents[]; pass --role")
-            + " (reviewer roles: " + ", ".join(REVIEWER_ROLES) + ")"
-        )
-        return 2
+    registered = text_of(record.get("role")) if record else ""
     root = Path(args.project_root).resolve() if args.project_root else project_root_of(manifest_path, manifest)
     top = Path(git_text(root, "rev-parse", "--show-toplevel").strip()).resolve()
-    untracked = scope_paths(top, "ls-files", "--others", "--exclude-standard", "-z")
+    if subprocess.run(["git", "-C", str(top), "rev-parse", "--verify", "-q", "HEAD"],
+                      capture_output=True).returncode != 0:
+        stderr("review-scope: the repository " + str(top) + " has no commits yet; commit once "
+               "before dispatching a reviewer, so its pass has a starting point.")
+        return 2
     baseline_file = scope_baseline_path(manifest_path, args.agent)
+    mirror_file = scope_mirror_path(top, manifest_path, args.agent)
+    manifest_dir = manifest_path.parent.resolve()
 
     if args.start:
+        # At dispatch the reviewer has not registered yet: --role names the write
+        # surface; a registered reviewer's own role is used when --role is absent.
+        role = args.role or registered
+        if registered and args.role and registered != args.role:
+            stderr("review-scope: agent '" + args.agent + "' is registered as " + registered
+                   + ", not " + args.role + "; dispatch the review under another agent id.")
+            return 2
+        if role not in REVIEWER_ROLES:
+            stderr(
+                "review-scope: agent '" + args.agent + "' "
+                + ("has role '" + role + "', which is not a reviewer" if role else "is not registered yet")
+                + "; pass --role <" + "|".join(REVIEWER_ROLES) + "> to say which reviewer's write "
+                "surface applies, e.g. `review-scope --agent " + args.agent + " --role qa --start`."
+            )
+            return 2
+        previous = None
+        for existing in (mirror_file, baseline_file):
+            if existing.is_file():
+                try:
+                    previous = read_scope_baseline(existing)
+                except ManifestError:
+                    previous = {}
+                break
+        if previous is not None and not args.restart:
+            stderr(
+                "review-scope: a starting point for '" + args.agent + "' already exists; a second "
+                "--start would absorb whatever the pass has changed since. Check the pass with "
+                "`review-scope --agent " + args.agent + "`, or pass --restart to replace it "
+                "(the check then reports the restart)."
+            )
+            return 2
+        untracked = scope_paths(top, "ls-files", "--others", "--exclude-standard", "-z")
         head = git_text(top, "rev-parse", "HEAD").strip()
         dirty = scope_paths(top, "diff", "--name-only", "--no-renames", "-z", head, "--") | untracked
-        baseline = {"head": head, "paths": {rel: working_hash(top / rel) for rel in sorted(dirty)}}
-        baseline_file.parent.mkdir(parents=True, exist_ok=True)
-        write_json(baseline_file, baseline)
-        print("review-scope: recorded the starting point for " + args.agent + " at " + head[:12]
-              + " (" + str(len(dirty)) + " path(s) already uncommitted)")
+        restarts = 0
+        if previous is not None:
+            try:
+                restarts = int(previous.get("restarts", 0)) + 1
+            except (TypeError, ValueError):
+                restarts = 1
+        baseline = {
+            "head": head,
+            "role": role,
+            "restarts": restarts,
+            "paths": {rel: working_hash(top / rel) for rel in sorted(dirty)},
+            "evidence": sorted(cited_evidence_files(manifest, root)),
+            "ignored": ignored_config_hashes(top, manifest_dir),
+        }
+        for target in (baseline_file, mirror_file):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            write_json(target, baseline)
+        print("review-scope: recorded the starting point for " + args.agent + " (" + role + ") at "
+              + head[:12] + " (" + str(len(dirty)) + " path(s) already uncommitted"
+              + ("; restart " + str(restarts) if restarts else "") + ")")
         return 0
 
+    notes = []
+    ignored_before = None
     if args.base:
         try:
             base = git_text(top, "rev-parse", "--verify", args.base + "^{commit}").strip()
         except ManifestError:
             raise ManifestError("--base '" + args.base + "' is not a commit in " + str(top))
         before = {}
+        role = registered or args.role or ""
+        started_with = cited_evidence_at(top, base, manifest_path, root)
+        notes.append("git-ignored configuration is not checked with --base")
     else:
-        if not baseline_file.is_file():
+        source = mirror_file if mirror_file.is_file() else baseline_file
+        if not source.is_file():
             stderr(
-                "No starting point for '" + args.agent + "': run `review-scope --start` for it when "
-                "the pass is dispatched, or pass --base <commit the pass started from>."
+                "No starting point for '" + args.agent + "': run `review-scope --agent " + args.agent
+                + " --role <role> --start` when the pass is dispatched, or pass --base <commit the "
+                "pass started from>."
             )
             return 2
+        stored = read_scope_baseline(source)
+        if source == mirror_file and baseline_file.is_file():
+            try:
+                if read_scope_baseline(baseline_file) != stored:
+                    notes.append("the baseline in " + str(baseline_file) + " was changed after it was "
+                                 "recorded; the copy kept in the git directory was used")
+            except ManifestError:
+                notes.append("the baseline in " + str(baseline_file) + " is unreadable; the copy kept "
+                             "in the git directory was used")
+        base, before = stored["head"], dict(stored["paths"])
+        role = text_of(stored.get("role")) or registered or args.role or ""
+        if registered and registered != role:
+            notes.append("agent '" + args.agent + "' registered as " + registered + " but was dispatched "
+                         "as " + role + "; judged as " + role)
+        if isinstance(stored.get("evidence"), list):
+            started_with = set(str_items(stored["evidence"]))
+        else:  # a baseline recorded before evidence was kept: read the manifest at its commit
+            started_with = cited_evidence_at(top, base, manifest_path, root)
+        if isinstance(stored.get("ignored"), dict):
+            ignored_before = stored["ignored"]
         try:
-            stored = json.loads(baseline_file.read_text(encoding="utf-8"))
-            base, before = stored["head"], dict(stored["paths"])
-        except (ValueError, KeyError, TypeError, OSError) as exc:
-            raise ManifestError("unreadable review-scope baseline " + str(baseline_file) + ": " + str(exc))
+            restarts = int(stored.get("restarts", 0))
+        except (TypeError, ValueError):
+            restarts = 0
+        notes.insert(0, "baseline recorded at " + base[:12] + (
+            " (restarted " + str(restarts) + " time(s) with --restart)" if restarts else " (never restarted)"))
+    if role not in REVIEWER_ROLES:
+        stderr(
+            "review-scope checks a reviewer pass; agent '" + args.agent + "' "
+            + ("has role '" + role + "'" if role else "is not registered and no role was recorded")
+            + "; pass --role <" + "|".join(REVIEWER_ROLES) + "> to say which reviewer's write surface applies."
+        )
+        return 2
+    untracked = scope_paths(top, "ls-files", "--others", "--exclude-standard", "-z")
     changed_since = scope_paths(top, "diff", "--name-only", "--no-renames", "-z", base, "--") | untracked
     added_since = scope_paths(top, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", base, "--")
     touched = []
@@ -7627,12 +8131,24 @@ def cmd_review_scope(args):
             continue  # uncommitted before the pass began and not changed by it
         touched.append(rel)
     created = {rel for rel in (added_since | untracked) if before.get(rel) is None}
+    ignored_changes = []
+    if ignored_before is not None:
+        ignored_now = ignored_config_hashes(top, manifest_dir)
+        for rel in sorted(set(ignored_before) | set(ignored_now)):
+            if ignored_before.get(rel) != ignored_now.get(rel):
+                ignored_changes.append(rel)
 
-    manifest_dir = manifest_path.parent.resolve()
     own_worklogs = {
         os.path.normcase(str(manifest_dir / folder / (args.agent + ".md"))) for folder in ("worklog", "worklogs")
     }
-    evidence = cited_evidence_files(manifest, root)
+    # Reviewers run in parallel (ux and security over one domain): another
+    # registered reviewer's worklog is its own write, not this reviewer's.
+    other_reviewers = {
+        text_of(agent.get("id")) for _p, agent in iter_named(manifest, "agents")
+        if text_of(agent.get("role")) in REVIEWER_ROLES and text_of(agent.get("id")) != args.agent
+    }
+    excused = []
+    evidence_now = cited_evidence_files(manifest, root)
     violations = []
     for rel in touched:
         candidate = (top / rel).resolve()
@@ -7640,19 +8156,37 @@ def cmd_review_scope(args):
         if any(fnmatch.fnmatchcase(rel, pattern.replace("\\", "/")) for pattern in args.ignore or ()):
             continue
         if candidate.parent.name in ("worklog", "worklogs") and candidate.parent.parent == manifest_dir:
-            if key not in own_worklogs:
-                violations.append(rel + "  (another agent's worklog)")
+            if key in own_worklogs:
+                continue
+            if candidate.suffix.lower() == ".md" and candidate.stem in other_reviewers:
+                excused.append(rel)
+                continue
+            violations.append(rel + "  (another agent's worklog)")
             continue
         if inside_manifest_dir(candidate, manifest_dir, manifest_path):
             continue
         if REPORT_PATH_PATTERN.search(rel):
             continue
-        if (
-            key in evidence
-            and candidate.suffix.lower() not in SOURCE_SUFFIXES
-            and not non_evidence_reason(candidate, "gate")
-        ):
-            continue
+        # Evidence is what the manifest cited when the pass began. The manifest is
+        # in the reviewer's own write surface, so a file it cites only now is
+        # editable only if the pass created it and it is a log, report or image.
+        if key in started_with or key in evidence_now:
+            if (
+                key in started_with
+                and candidate.suffix.lower() not in SOURCE_SUFFIXES
+                and not non_evidence_reason(candidate, "gate")
+            ):
+                continue
+            if (
+                rel in created
+                and candidate.suffix.lower() in NEW_EVIDENCE_SUFFIXES
+                and not non_evidence_reason(candidate, "gate")
+                and not IGNORED_CONFIG_PATTERN.search(rel)
+            ):
+                continue
+            if key not in started_with:
+                violations.append(rel + "  (cited as evidence only during the pass)")
+                continue
         if role == "qa" and rel in created:
             body = read_head(candidate) if candidate.is_file() else ""
             if looks_like_test_file(candidate, body, rel) or TEST_DIR_PATTERN.search(rel):
@@ -7663,6 +8197,14 @@ def cmd_review_scope(args):
             violations.append(rel + "  (an existing test: qa adds tests, an implementer changes them)")
             continue
         violations.append(rel)
+    for rel in ignored_changes:
+        if not any(fnmatch.fnmatchcase(rel, pattern.replace("\\", "/")) for pattern in args.ignore or ()):
+            violations.append(rel + "  (git-ignored configuration)")
+    for note in notes:
+        stderr("review-scope: " + note)
+    if excused:
+        stderr("review-scope: not counted against " + args.agent + ", the worklogs of other registered "
+               "reviewers: " + ", ".join(excused))
     if violations:
         stderr(
             "review-scope: " + args.agent + " (" + role + ") changed " + str(len(violations))
@@ -7746,7 +8288,7 @@ def cmd_harvest(args):
         text_of(stack.get(name)) for name in ("frontend", "backend", "database") if text_of(stack.get(name))
     )
     try:
-        known = {record.get("id") for record in read_observations(store)}
+        known = {observation_key(record) for record in read_observations(store)}
     except OSError as exc:
         raise ManifestError("Cannot read the observation store at " + str(store) + ": " + str(exc))
     harvested = []
@@ -7761,11 +8303,16 @@ def cmd_harvest(args):
                 and text_of(item.get("promotedHash"))
                 and text_of(item.get("promotedHash")) != chash
             )
-            if status != "open" and not edited:
+            # `promoted` with no hash was set by hand (an older manual close step),
+            # never by a harvest: send it once, or it never reaches the store.
+            unhashed = status == "promoted" and not text_of(item.get("promotedHash"))
+            if status != "open" and not edited and not unhashed:
                 continue
             record = {
                 "project": project,
                 "projectKey": key,
+                # Kept so an export can scrub the name even when --project renamed it.
+                "platformName": text_of(platform.get("name")),
                 "archetypes": [text_of(a) for a in as_list(platform.get("archetypes"))],
                 "stack": stack_summary,
                 "category": text_of(item.get("category")),
@@ -7789,10 +8336,20 @@ def cmd_harvest(args):
         if harvested:
             try:
                 append_observations(store, harvested)
+                # Verify before marking anything promoted: a record the store
+                # cannot read back is a record harvest would never send again.
+                present = {observation_key(record) for record in read_observations(store, warn=False)}
             except OSError as exc:
                 raise ManifestError(
                     "Cannot write the observation store at " + str(store) + " (" + str(exc)
                     + "); no feedback was marked promoted. Check ADMINWRIGHT_HOME."
+                )
+            missing = [record["id"] for record in harvested if record["id"] not in present]
+            if missing:
+                raise ManifestError(
+                    "the store at " + str(store) + " does not read back " + str(len(missing))
+                    + " record(s) just written (" + ", ".join(missing[:5]) + "); no feedback was "
+                    "marked promoted. Run `store status` and repair observations.jsonl."
                 )
         for item, chash in flipped:
             item["status"] = "promoted"
@@ -7897,8 +8454,17 @@ def sync_store(store, args):
     # a harvest can no longer write between our read and our rewrite.
     with FileLock(store / ".lock"):
         unstage_foreign_paths(store)
+        local_records, bad = read_observation_file(local_path)
+        if bad:
+            # Rewriting the file from what parses deleted every other line and
+            # committed the loss. A line is never dropped: it waits for a person.
+            raise ManifestError(
+                str(local_path) + " has " + str(len(bad)) + " line(s) that are not observation "
+                "records (" + describe_lines(bad) + "); nothing was synced. Fix or delete those "
+                "lines by hand, then run `store sync` again."
+            )
         # Normalise first, so what we commit is already the canonical union.
-        write_observations(local_path, merge_observation_files(local_path))
+        write_observations(local_path, merge_observation_records(local_records))
         print(
             "Committed local observations."
             if commit_store(store, "observations: " + (text_of(args.date) or "sync"))
@@ -7915,13 +8481,15 @@ def sync_store(store, args):
         if run_git(store, "rev-parse", "--verify", "-q", remote_ref, check=False).returncode == 0:
             theirs = run_git(store, "show", remote_ref + ":observations.jsonl", check=False)
             if theirs.returncode == 0:
-                incoming = store / ".incoming.jsonl"
-                try:
-                    write_text_file(incoming, theirs.stdout)
-                    merged = merge_observation_files(local_path, incoming)
-                finally:
-                    if incoming.exists():
-                        incoming.unlink()
+                incoming, incoming_bad = parse_observation_lines(theirs.stdout)
+                if incoming_bad:
+                    raise ManifestError(
+                        "the remote's observations.jsonl (" + remote_ref + ") has "
+                        + str(len(incoming_bad)) + " line(s) that are not observation records ("
+                        + describe_lines(incoming_bad) + "); nothing was merged or pushed, and the "
+                        "local commit stays. Fix them in the store that pushed them, then sync again."
+                    )
+                merged = merge_observation_records(read_observation_file(local_path)[0], incoming)
                 write_observations(local_path, merged)
                 print("Merged " + str(len(merged)) + " observation(s) by id union.")
                 # Commit the union BEFORE joining histories, so the tree the merge
@@ -8003,12 +8571,15 @@ def cmd_store(args):
         if not (store / ".git").exists():
             run_git(store, "init", "-q")
             run_git(store, "checkout", "-q", "-B", "main", check=False)
-        # Repo-local identity so merges and commits work without touching the
-        # user's global git config. A merge commit needs this as much as a
-        # regular commit does, which is why it is set once here rather than
-        # passed per-command.
-        run_git(store, "config", "user.name", "adminwright", check=False)
-        run_git(store, "config", "user.email", "adminwright@localhost", check=False)
+            # Repo-local identity so merges and commits work without touching the
+            # user's global git config -- only in a repository this command created.
+            run_git(store, "config", "user.name", "adminwright", check=False)
+            run_git(store, "config", "user.email", "adminwright@localhost", check=False)
+        else:
+            # Setting it unconditionally re-authored the user's own next commits in
+            # an existing repository; the store's commits pass -c identities anyway.
+            stderr("NOTE: " + str(store) + " is already a git repository; its git identity and "
+                   "history are left as they are.")
         gitignore = store / ".gitignore"
         if not gitignore.exists():
             # The salt is deliberately not synced: it exists so a published
@@ -8038,7 +8609,71 @@ def cmd_store(args):
     raise ManifestError("unknown store action: " + str(action))
 
 
-def sanitise_candidate(candidate, salt=""):
+PLATFORM_ID_SUFFIX = re.compile(r"-[0-9a-f]{6}$")
+
+
+def identifier_patterns(value):
+    """Regex sources that name one project, from its name, display name or platform.id.
+
+    The whole platform.id (random suffix and all) always; the name in any spacing,
+    case or separator ("Zentrix Billing", zentrix-billing, zentrix_billing,
+    ZentrixBilling) unless every word of it is the skill's own vocabulary; and
+    each word longer than three letters that the guidance never uses ("Zentrix").
+    A name such as "Admin Console" identifies nothing and is left readable.
+    """
+    value = text_of(value)
+    if not value:
+        return []
+    patterns = []
+    base = PLATFORM_ID_SUFFIX.sub("", value)
+    if base != value:
+        patterns.append(re.escape(value))
+    words = [word for word in re.split(r"[\W_]+", base) if word]
+    vocabulary = skill_words()
+    distinctive = [word for word in words if len(word) > 3 and word.lower() not in vocabulary]
+    if not distinctive and all(word.lower() in vocabulary or word.isdigit() for word in words):
+        return patterns
+    if len(words) > 1:
+        patterns.append(r"[\s_.-]*".join(re.escape(word) for word in words))
+    elif words and len(words[0]) > 2:
+        patterns.append(re.escape(words[0]))
+    patterns.extend(re.escape(word) for word in distinctive)
+    return patterns
+
+
+def project_name_scrubber(records, salt=""):
+    """A function replacing every known project's names with that project's fingerprint.
+
+    Every project in the store, not only the candidate's: a note written in one
+    project often names another one of the same owner's. The fingerprint is the
+    one the bundle's `projects` list carries for that project.
+    """
+    owners = {}
+    for record in records:
+        key = record_project_key(record)
+        if not key:
+            continue
+        for field in ("projectKey", "project", "platformName"):
+            for pattern in identifier_patterns(record.get(field)):
+                owners.setdefault(pattern.lower(), (pattern, key))
+    if not owners:
+        return lambda text: text
+    ordered = sorted(owners.values(), key=lambda item: -len(item[0]))
+    # Case-insensitive name, then a boundary that still allows camel case after
+    # it ("ZentrixBilling"), never inside a longer lowercase word ("innovation").
+    combined = re.compile("|".join(
+        "(?P<p%d>(?<![^\\W_])(?i:%s)(?![^\\W_A-Z]))" % (index, pattern)
+        for index, (pattern, _key) in enumerate(ordered)
+    ))
+    replacement = [project_fingerprint(key, salt) for _pattern, key in ordered]
+
+    def scrub(text):
+        return combined.sub(lambda match: replacement[int(match.lastgroup[1:])], text_of(text))
+
+    return scrub
+
+
+def sanitise_candidate(candidate, salt="", scrub_names=None):
     """Strip a promotion candidate down to what is safe to publish.
 
     No fingerprint of the observation text is exported: the local one is an
@@ -8046,16 +8681,19 @@ def sanitise_candidate(candidate, salt=""):
     scrubbed host or customer could confirm the guess by hashing it -- the
     attack the project salt exists to stop -- and read_community_observations
     recomputes fingerprints on load anyway. The scope travels only when it
-    names a file or area of the skill; a hand-set private path does not.
+    names a file or area of the skill; a hand-set private path does not. The
+    project's own names come out of every text field first (see
+    project_name_scrubber), before the pattern scrub.
     """
+    names = scrub_names or (lambda text: text_of(text))
     scope = candidate["scope"]
     category = candidate["category"]
     return {
         "category": category if category in FEEDBACK_CATEGORIES else "unassigned",
         "scope": scope if skill_scope_problem(scope) is None else "unassigned",
-        "observation": scrub_text(candidate["observation"]),
-        "proposedChange": scrub_text(candidate["proposedChange"]),
-        "archetypes": sorted({scrub_text(a) for a in candidate["archetypes"] if a}),
+        "observation": scrub_text(names(candidate["observation"])),
+        "proposedChange": scrub_text(names(candidate["proposedChange"])),
+        "archetypes": sorted({scrub_text(names(a)) for a in candidate["archetypes"] if a}),
         "stacks": sorted({family for stack in candidate["stacks"] for family in coarsen_stack(stack)}),
         "projectCount": candidate["projectCount"],
         "projects": [project_fingerprint(name, salt) for name in candidate["projectKeys"]],
@@ -8125,7 +8763,7 @@ def cmd_promote(args):
         # still one and two unrelated projects that share a name are still two.
         keys = sorted({counted_key(item) for item in items if counted_key(item)})
         names = sorted({text_of(item.get("project")) for item in items if text_of(item.get("project"))})
-        archetypes = sorted({a for item in items for a in as_list(item.get("archetypes"))})
+        archetypes = sorted({a for item in items for a in str_items(item.get("archetypes"))})
         stacks = sorted({text_of(item.get("stack")) for item in items if text_of(item.get("stack"))})
         category = text_of(items[0].get("category"))
         # A correction of wrong guidance promotes on first sighting; everything
@@ -8144,7 +8782,7 @@ def cmd_promote(args):
             "scope": text_of(items[0].get("scope")),
             "proposedChange": text_of(items[0].get("proposedChange")),
             "observation": text_of(items[0].get("observation")),
-            "evidence": sorted({e for item in items for e in as_list(item.get("evidence"))}),
+            "evidence": sorted({e for item in items for e in str_items(item.get("evidence"))}),
             "reason": "correction" if immediate else "seen on " + str(len(keys)) + " projects",
             "communityEvidence": sum(1 for item in items if item.get("community")),
             # Who was merged into this cluster, so a bad merge is visible.
@@ -8170,27 +8808,30 @@ def cmd_promote(args):
     community_only.sort(key=lambda c: (-c["projectCount"], c["scope"], c["fingerprint"]))
 
     if exporting:
+        out_path = refuse_protected_output(args.export, "--export", store=store)
         salt = store_salt(store)
+        scrub_names = project_name_scrubber(local_records, salt)
         bundle = {
             "bundleVersion": "1",
             "generatedFor": "adminwright community observations",
             "note": "Sanitised. Project names are one-way fingerprints salted per store, so they "
-                    "count as one project only within bundles from the same store; paths, hosts, "
-                    "emails, URLs, credentials and evidence references are removed; scope is kept "
-                    "only when it names a file or area of the skill.",
-            "observations": [sanitise_candidate(c, salt) for c in candidates],
+                    "count as one project only within bundles from the same store, and the "
+                    "store's own project names are replaced by those fingerprints in the text; "
+                    "paths, hosts, emails, URLs, credentials and evidence references are removed; "
+                    "scope is kept only when it names a file or area of the skill.",
+            "observations": [sanitise_candidate(c, salt, scrub_names) for c in candidates],
         }
-        out_path = Path(args.export).resolve()
         write_text_file(out_path, json.dumps(bundle, indent=2, ensure_ascii=False) + "\n")
         print("Wrote " + str(len(bundle["observations"])) + " sanitised candidate(s) to " + str(out_path))
         print()
         print("READ THE FILE BEFORE SHARING IT.")
         print("Patterns removed emails, URLs, paths, IP addresses, hostnames, domains,")
-        print("tokens and hashes, replaced project names with salted one-way fingerprints, and")
-        print("dropped evidence references entirely.")
+        print("tokens and hashes, replaced this store's project names and platform ids with")
+        print("salted one-way fingerprints (in the text too), and dropped evidence references.")
         print()
-        print("What no pattern can catch: a company, product, customer or person's name")
-        print("written as an ordinary word. Only you can see those. Read every line.")
+        print("What no pattern can catch: any other company, product, customer or person's")
+        print("name written as an ordinary word, or a nickname for your project. Only you can")
+        print("see those. Read every line.")
         print()
         print("To contribute, open a pull request adding this file under")
         print("community/observations/ in the skill repository. Contribution is opt-in,")
@@ -8478,10 +9119,12 @@ def create_outbox_lesson(directory, stem, text):
 
 
 def cmd_lesson_add(args):
-    if args.status == "adopted":
+    if args.status != "proposed":
+        # `rejected` or `superseded` here wrote a closed lesson that was never
+        # proposed, with no rejected-reason or superseded-by.
         raise ManifestError(
-            "a lesson is opened as 'proposed'; adoption is a separate reviewed edit "
-            "(lessons/README.md, section 7), never part of opening it"
+            "a lesson is opened as 'proposed'; adoption, rejection and superseding are each a "
+            "separate reviewed edit (lessons/README.md, section 7), never part of opening it"
         )
     date = lesson_date(args.date) or "unknown"
     if date == "unknown":
@@ -8707,13 +9350,51 @@ def lesson_edit_target(scope, proposed):
     return named[0]
 
 
-def lesson_edit_proof(target, commit):
-    """The commit (full hash) or "working tree" that holds the guidance edit to `target`, else a refusal.
+PORCELAIN_STATES = {"M": "modified", "A": "added", "D": "deleted", "R": "renamed", "C": "copied",
+                    "T": "type changed", "U": "unmerged", "?": "untracked"}
+
+
+def lesson_predates_check(full, lesson_path, lesson_date):
+    """Refuse a commit older than the lesson: the edit a lesson records comes after it.
+
+    A commit that ever touched the target used to be enough -- including the one
+    that created the file, months before the lesson was written.
+    """
+    relative = Path(os.path.relpath(str(lesson_path), str(SKILL_ROOT))).as_posix()
+    added = skill_git("log", "--diff-filter=A", "--format=%H", "--", relative)
+    first_add = added.stdout.split()[-1] if added is not None and added.returncode == 0 and added.stdout.split() else ""
+    if first_add:
+        if full != first_add:
+            older = skill_git("merge-base", "--is-ancestor", full, first_add)
+            if older is not None and older.returncode == 0:
+                raise ManifestError(
+                    "commit %s predates the lesson (it is an ancestor of %s, which added %s); pass the "
+                    "commit that holds this lesson's edit" % (full[:12], first_add[:12], relative))
+        return
+    if not lesson_date or lesson_date == "unknown":
+        raise ManifestError(
+            "%s is not committed and has no date, so --commit cannot be shown to come after it; commit "
+            "the lesson first, or adopt from the working tree" % relative)
+    shown = skill_git("show", "-s", "--format=%cI", full)
+    day = shown.stdout.strip()[:10] if shown is not None and shown.returncode == 0 else ""
+    if day and day < lesson_date:
+        raise ManifestError("commit %s (%s) predates the lesson (dated %s); pass the commit that holds "
+                            "this lesson's edit" % (full[:12], day, lesson_date))
+
+
+def lesson_edit_proof(target, commit, lesson_path=None, lesson_date=None):
+    """(the commit's full hash or "working tree", the change counted), else a refusal.
 
     Adoption records an edit; it does not make one. A lesson closed `adopted` with
     nothing changed would put an id in `Guidance level` that no build is held to.
     """
     first = "make the guidance edit first (adoption records it, it does not make it)"
+    if target == "lessons/index.md" or (
+        target.startswith("lessons/") and LESSON_FILE_PATTERN.match(target[len("lessons/"):])
+    ):
+        raise ManifestError(
+            "%s is written by the lesson commands themselves, so a change to it proves no guidance "
+            "edit; name the file the rule changes" % target)
     if commit:
         found = skill_git("rev-parse", "--verify", "--quiet", commit + "^{commit}")
         if found is None:
@@ -8728,7 +9409,9 @@ def lesson_edit_proof(target, commit):
         changed = [name for name in listing.stdout.split("\0") if name]
         if target not in changed:
             raise ManifestError("commit %s does not change %s; %s" % (full[:12], target, first))
-        return full
+        if lesson_path is not None:
+            lesson_predates_check(full, lesson_path, lesson_date)
+        return full, "commit %s changes %s" % (full[:12], target)
     state = skill_git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--", target)
     if state is None or state.returncode != 0:
         raise ManifestError("git did not answer, so the edit to %s cannot be checked" % target)
@@ -8737,7 +9420,10 @@ def lesson_edit_proof(target, commit):
             "no edit to %s found; %s, then pass --commit <sha> or leave it uncommitted in the "
             "working tree" % (target, first)
         )
-    return "working tree"
+    code = state.stdout.split("\0", 1)[0][:2]
+    words = sorted({PORCELAIN_STATES.get(char, char) for char in code if char.strip()})
+    return "working tree", "uncommitted change to %s (%s); check that it is this lesson's edit" % (
+        target, ", ".join(words) or "changed")
 
 
 def plan_lesson_closure(lessons_dir, lesson_id, adopting, date, reviewer, commit, reason, note):
@@ -8795,10 +9481,12 @@ def plan_lesson_closure(lessons_dir, lesson_id, adopting, date, reviewer, commit
         if problem:
             raise ManifestError("lesson %s scope %s %s; correct it before adopting" % (
                 lesson_id, json.dumps(scope), problem))
-        edited_in = lesson_edit_proof(lesson_edit_target(scope, proposed), commit)
+        lesson_dated = fields.get("date") if isinstance(fields.get("date"), str) else None
+        edited_in, counted = lesson_edit_proof(lesson_edit_target(scope, proposed), commit, path, lesson_dated)
         entry = "- %s adopted by %s; edit in %s" % (date, reviewer, edited_in)
         new_status = "adopted"
     else:
+        counted = None
         entry = "- %s rejected (%s)%s" % (date, reason, (": " + note) if note else "")
         new_status = "rejected"
 
@@ -8835,7 +9523,8 @@ def plan_lesson_closure(lessons_dir, lesson_id, adopting, date, reviewer, commit
             new[at] = reason_line + lesson_line_end(lines[at])
         else:
             new.insert(status_at + 1, reason_line + lesson_line_end(lines[status_at]))
-    return {"path": path, "bom": bom, "old": lines, "new": new, "from": current, "to": new_status}
+    return {"path": path, "bom": bom, "old": lines, "new": new, "from": current, "to": new_status,
+            "counted": counted}
 
 
 def close_lesson(args, kind):
@@ -8868,7 +9557,7 @@ def close_lesson(args, kind):
             write_text_file(plan["path"], ("﻿" if plan["bom"] else "") + "".join(plan["new"]))
             try:
                 level = rebuild_lesson_index(lessons_dir)
-            except OSError as exc:
+            except (OSError, ManifestError, ValueError, TypeError) as exc:
                 raise ManifestError(
                     "lesson %s was written but %s could not be rebuilt (%s); run `lesson index`"
                     % (lesson_id, index_path, exc)
@@ -8885,9 +9574,11 @@ def close_lesson(args, kind):
         print(json.dumps({
             "ok": True, "id": lesson_id, "from": plan["from"], "to": plan["to"],
             "file": str(plan["path"]), "index": None if args.dry_run else str(index_path),
-            "dryRun": bool(args.dry_run),
+            "dryRun": bool(args.dry_run), "counted": plan["counted"],
         }, ensure_ascii=False))
         return 0
+    if plan["counted"]:
+        print("Edit counted: " + plan["counted"])
     if args.dry_run:
         import difflib
 
@@ -8940,6 +9631,16 @@ class VersionAction(argparse.Action):
         parser.exit(0)
 
 
+def at_least_one(raw):
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be a whole number, at least 1; got " + repr(raw))
+    return value
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Model, validate, and audit admin-console capability manifests",
@@ -8977,12 +9678,18 @@ def build_parser():
     init_parser.add_argument("--stack-hosting")
     init_parser.add_argument("--stack-design-system")
     init_parser.add_argument("--stack-admin-framework")
-    init_parser.add_argument("--force", action="store_true")
+    init_parser.add_argument(
+        "--force", action="store_true",
+        help="discard the existing manifest and start over (everything recorded in it is lost)",
+    )
     init_parser.set_defaults(func=cmd_init)
 
     migrate_parser = subparsers.add_parser("migrate", help="Upgrade a 1.0 manifest to 2.0")
     migrate_parser.add_argument("--manifest", required=True)
-    migrate_parser.add_argument("--write", action="store_true")
+    migrate_parser.add_argument(
+        "--write", action="store_true",
+        help="persist the migration; without it this is a dry run that prints the changes",
+    )
     migrate_parser.set_defaults(func=cmd_migrate)
 
     validate_parser = subparsers.add_parser("validate", help="Validate structure, evidence, and coverage")
@@ -9017,7 +9724,11 @@ def build_parser():
         "--manifest", help="the manifest to render (not needed for --format rule-matrix)"
     )
     emit_parser.add_argument("--format", required=True, choices=sorted(EMITTERS) + ["rule-matrix"])
-    emit_parser.add_argument("--out")
+    emit_parser.add_argument(
+        "--out", metavar="FILE",
+        help="write here instead of printing; an existing file is overwritten, but never the "
+             "manifest, the files the tool keeps beside it, or the observation store",
+    )
     emit_parser.set_defaults(func=cmd_emit)
 
     add_parser = subparsers.add_parser("add", help="Append one object to a manifest collection")
@@ -9126,9 +9837,12 @@ def build_parser():
     scope_parser.add_argument("--agent", required=True, help="the reviewer's agent id")
     scope_parser.add_argument("--start", action="store_true",
                               help="record the starting point (uncommitted work already present) at dispatch")
+    scope_parser.add_argument("--restart", action="store_true",
+                              help="with --start: replace an existing starting point (the check reports it)")
     scope_parser.add_argument("--base", help="compare with this commit instead of a recorded --start")
     scope_parser.add_argument("--role", choices=REVIEWER_ROLES,
-                              help="the pass's role when the agent is not in agents[] (single-agent runs)")
+                              help="the reviewer's role, which sets its write surface; needed with --start "
+                                   "at dispatch, before the reviewer registers itself in agents[]")
     scope_parser.add_argument("--ignore", action="append", metavar="GLOB",
                               help="repository-relative paths another agent changed during this pass")
     scope_parser.add_argument("--project-root", help="defaults to the manifest's project root")
@@ -9154,7 +9868,10 @@ def build_parser():
     lesson_add.add_argument("--evidence", action="append", default=[])
     lesson_add.add_argument("--platform", action="append", default=[])
     lesson_add.add_argument("--date", help="caller-supplied date; the script never reads the clock")
-    lesson_add.add_argument("--status", choices=LESSON_STATUSES, default="proposed")
+    lesson_add.add_argument(
+        "--status", choices=LESSON_STATUSES, default="proposed",
+        help="always proposed: adopt and reject close a lesson, and superseded is a reviewed edit",
+    )
     lesson_add.add_argument("--confidence", choices=LESSON_CONFIDENCES, default="observed-once")
     lesson_add.add_argument("--lessons-dir", help="override the skill lessons directory")
     lesson_add.set_defaults(func=cmd_lesson)
@@ -9176,7 +9893,10 @@ def build_parser():
         "promote", help="List observations that clear the promotion bar across projects"
     )
     promote.add_argument("--store", help="defaults to $ADMINWRIGHT_HOME or ~/.adminwright")
-    promote.add_argument("--min-projects", type=int, default=2)
+    promote.add_argument(
+        "--min-projects", type=at_least_one, default=2, metavar="N",
+        help="distinct projects an observation needs to clear the bar (default 2; at least 1)",
+    )
     promote.add_argument(
         "--similarity",
         type=float,

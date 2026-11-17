@@ -743,6 +743,57 @@ class TestDryRunAndJson(CloseCase):
         self.assertIn("ERROR: " + result["error"], err)
 
 
+class TestAdoptionProof(CloseCase):
+    """C-13 (audit 2026-11-17) -- the commit must be the lesson's edit, not any commit of the file."""
+
+    def adopt(self, *extra):
+        return ("adopt", "0006", "--by", "Reviewer", "--date", "2026-11-17") + extra
+
+    def test_a_commit_older_than_the_lesson_is_refused(self):
+        created = git(self.base, "log", "--diff-filter=A", "--format=%H", "--", SCOPE).splitlines()[-1]
+        self.refused(*self.adopt("--commit", created), contains="predates the lesson")
+
+    def test_an_uncommitted_lesson_refuses_a_commit_dated_before_it(self):
+        sha = self.commit_scope_edit()
+        self.put(lesson_text(number="0007", title="Later lesson"), number="0007", slug="later-lesson")
+        path = self.lesson_path("0007")
+        git(self.base, "rm", "-q", "--cached", str(path.relative_to(self.base)).replace("\\", "/"))
+        git(self.base, "commit", "-q", "-m", "untrack the lesson")
+        path.write_text(lesson_text(number="0007", title="Later lesson").replace(
+            'date: "2026-03-02"', 'date: "2099-01-01"'), encoding="utf-8")
+        self.refused("adopt", "0007", "--by", "Reviewer", "--commit", sha, contains="predates the lesson")
+
+    def test_the_lesson_files_are_never_the_edit(self):
+        self.put(lesson_text(scope="lessons", proposed="Edit `lessons/index.md` to add a row.\n"))
+        self.run_lesson("index")
+        (self.lessons / "index.md").write_text(
+            (self.lessons / "index.md").read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+        self.refused(*self.adopt(), contains="lessons/index.md")
+
+    def test_the_output_names_the_change_it_counted(self):
+        self.edit_scope()
+        code, out, err = self.run_lesson(*self.adopt())
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("uncommitted change to " + SCOPE, out)
+
+
+class TestIndexSurvivesBadInput(CloseCase):
+    """C-16 (audit 2026-11-17) -- a malformed lesson or a UTF-16 index never gives a traceback."""
+
+    def test_a_list_valued_id_and_a_utf16_index(self):
+        (self.lessons / "0010-bad.md").write_text('---\nid: ["x"]\ntitle: t\nstatus: proposed\n---\n',
+                                                  encoding="utf-8")
+        index = self.lessons / "index.md"
+        index.write_bytes(index.read_text(encoding="utf-8").encode("utf-16"))
+        code, out, err = self.run_lesson("index")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("Traceback", err)
+        text = index.read_text(encoding="utf-8")
+        self.assertIn("0010-bad.md", text)
+        self.assertIn("Last consolidation:", text)
+        self.assertNotIn("Last consolidation: unknown", text, "the UTF-16 index was still read")
+
+
 class TestHelp(unittest.TestCase):
     def test_lesson_help_lists_both_commands(self):
         code, out, _err = run_in(SKILL_ROOT, "lesson", "--help")

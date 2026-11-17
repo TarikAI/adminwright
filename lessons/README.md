@@ -123,8 +123,9 @@ arguments and creates the last two empty.
    edit: it rebuilds the row in [index.md](index.md) and the `Guidance level` from the files.
    Never edit the index by hand. `lesson adopt` does all of this once the edit exists
    (section 7).
-8. Close the originating manifest entry with
-   `set --manifest <path> --path 'feedback[fb-003].status' --value promoted`.
+8. Make sure the originating manifest entry reached the store: run
+   `harvest --manifest <path> --date <YYYY-MM-DD>` in that project. It sends the entry and
+   marks it `promoted` itself; never set `promoted` by hand.
 
 The agent that opened a lesson does not adopt it. In single-agent operation, adoption is a
 separate declared pass with the reference file re-read rather than recalled.
@@ -146,12 +147,13 @@ The two transitions that close a `proposed` lesson have commands. Each works onl
 checkout of the skill (a plugin cache or a vendored copy is overwritten on update), under the
 lessons lock; it changes only the lines listed below, keeps the file's line endings, and
 rebuilds [index.md](index.md). `--dry-run` shows the change and writes nothing; `--json`
-prints `{ok, id, from, to, file, index, dryRun}`. A refusal exits 2 with a one-line reason,
+prints `{ok, id, from, to, file, index, dryRun, counted}`, where `counted` says which change
+`adopt` took as the edit. A refusal exits 2 with a one-line reason,
 and with `--json` also reports it on stdout as `{ok: false, id, error}`.
 
 | Command | Refuses unless | Writes |
 |---|---|---|
-| `lesson adopt <id> --by <reviewer> [--commit <sha>] [--date YYYY-MM-DD]` | status is `proposed`; `platforms` is non-empty; `Proposed edit` is non-empty; `scope` exists in the skill, and for an area scope `Proposed edit` names the one file under it that changes; the edit has landed: `--commit` changed that file, or, without it, the file has uncommitted changes | `status: adopted`, and under `## Review notes` the line `- <date> adopted by <reviewer>; edit in <commit or "working tree">` |
+| `lesson adopt <id> --by <reviewer> [--commit <sha>] [--date YYYY-MM-DD]` | status is `proposed`; `platforms` is non-empty; `Proposed edit` is non-empty; `scope` exists in the skill, and for an area scope `Proposed edit` names the one file under it that changes; the edit has landed: `--commit` changed that file and is not older than the lesson (not an ancestor of the commit that added the lesson file; for a lesson not yet committed, not dated before it), or, without it, the file has uncommitted changes, which the output names so you can check they are this lesson's edit; `lessons/index.md` and lesson files never count as the edit | `status: adopted`, and under `## Review notes` the line `- <date> adopted by <reviewer>; edit in <commit or "working tree">` |
 | `lesson reject <id> --reason <reason> [--note <text>] [--date YYYY-MM-DD]` | status is `proposed` | `status: rejected`, the line `rejected-reason: <reason>` after it, and under `## Review notes` the line `- <date> rejected (<reason>)`, followed by `: <note>` when a note is given |
 
 Values are one line of plain text: a line break or control character in `--by`, `--note` or

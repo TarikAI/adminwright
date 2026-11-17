@@ -580,5 +580,424 @@ class TestRuleMatrix(unittest.TestCase):
         self.assertEqual(doc, out, "regenerate: emit --format rule-matrix --out references/rule-matrix.md")
 
 
+# --------------------------------------------------------------------------
+# Audit 2026-11-17 (02-cli)
+# --------------------------------------------------------------------------
+
+
+class TestProtectedOutputs(TempProject):
+    """C-01 -- `emit --out` and `promote --export` must never overwrite what the tool keeps."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.tmp / "store"
+        self.env = {"ADMINWRIGHT_HOME": str(self.store)}
+
+    def assert_refused(self, target, *argv):
+        before = target.read_bytes() if target.exists() else None
+        code, out, err = run(*argv, env=self.env)
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("nothing was written", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(target.read_bytes() if target.exists() else None, before)
+
+    def test_emit_onto_the_manifest_is_refused(self):
+        self.assert_refused(self.manifest, "emit", "--manifest", self.manifest, "--format", "nav-map",
+                            "--out", self.manifest)
+        code, out, err = self.validate(phase="plan")
+        self.assertEqual(code, 0, out + err)
+
+    @unittest.skipUnless(os.name == "nt", "case-insensitive paths are a Windows property")
+    def test_another_spelling_of_the_manifest_is_refused(self):
+        spelled = Path(str(self.manifest.parent).upper()) / "MANIFEST.JSON"
+        self.assert_refused(self.manifest, "emit", "--manifest", self.manifest, "--format", "nav-map",
+                            "--out", spelled)
+
+    def test_the_tools_own_files_beside_the_manifest_are_refused(self):
+        folder = self.manifest.parent
+        (folder / "locks").mkdir(exist_ok=True)
+        (folder / "worklog").mkdir(exist_ok=True)
+        (folder / "worklog" / "qa-1.md").write_text("qa-1 notes\n", encoding="utf-8")
+        for target in (folder / "admin-console.manifest.schema.json", folder / ".gitignore",
+                       folder / "locks" / "user.list.lock", folder / "worklog" / "qa-1.md",
+                       folder / "ocr-record-1.json"):
+            self.assert_refused(target, "emit", "--manifest", self.manifest, "--format", "seed-plan",
+                                "--out", target)
+            self.assert_refused(target, "emit", "--format", "rule-matrix", "--out", target)
+
+    def test_a_report_beside_the_manifest_is_still_written(self):
+        # verification.md and test-data.md emit working documents into .admin-console/.
+        target = self.manifest.parent / "authz-matrix.md"
+        code, out, err = run("emit", "--manifest", self.manifest, "--format", "authz-matrix",
+                             "--out", target, env=self.env)
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(target.read_text(encoding="utf-8").startswith("# Authorization matrix"))
+
+    def test_a_file_in_the_store_is_refused(self):
+        self.store.mkdir()
+        observations = self.store / "observations.jsonl"
+        records = "".join(json.dumps({"id": "p:%d" % i, "project": "P%d" % i, "category": "gap",
+                                      "scope": "SKILL.md", "observation": "same thing seen",
+                                      "proposedChange": "fix it the same way"}) + "\n" for i in range(3))
+        observations.write_text(records, encoding="utf-8")
+        self.assert_refused(observations, "promote", "--export", observations)
+        self.assert_refused(observations, "promote", "--store", self.store, "--export",
+                            self.store / "bundle.json")
+        self.assert_refused(observations, "emit", "--manifest", self.manifest, "--format", "nav-map",
+                            "--out", observations)
+        code, out, err = run("store", "status", env=self.env)
+        self.assertIn("Observations: 3", out, err)
+
+
+GIT_IDENTITY = ["-c", "user.email=t@example.test", "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+
+
+@unittest.skipIf(__import__("shutil").which("git") is None, "git is not installed")
+class TestReviewScope(TempProject):
+    """A-01, A-03, C-05, C-06, C-17, C-18 -- the orchestrator's independence check."""
+
+    def git(self, *args):
+        done = subprocess.run(["git", "-C", str(self.root)] + list(args), capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def setUp(self):
+        super().setUp()
+        self.build_honest_manifest()
+        (self.root / "src").mkdir()
+        (self.root / "src" / "service.ts").write_text("export const x = 1;\n", encoding="utf-8")
+        (self.root / "prisma").mkdir()
+        (self.root / "prisma" / "schema.prisma").write_text("model User { id Int @id }\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text(".env\n", encoding="utf-8")
+        (self.root / ".env").write_text("FEATURE_X=0\n", encoding="utf-8")
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git(*(GIT_IDENTITY + ["commit", "-q", "--no-verify", "-m", "base"]))
+
+    def scope(self, expected, *args):
+        code, out, err = self.cli("review-scope", *args)
+        self.assertEqual(code, expected, " ".join(map(str, args)) + "\n" + out + err)
+        self.assertNotIn("Traceback", err)
+        return out + err
+
+    def test_start_works_at_dispatch_before_the_reviewer_registers(self):
+        # A-01: the documented form names the role; without it the message says so.
+        message = self.scope(2, "--agent", "ux-1", "--start")
+        self.assertIn("--role", message)
+        self.assertIn("write surface", message)
+        self.scope(0, "--agent", "ux-1", "--role", "ux-reviewer", "--start")
+        # The reviewer registers during its pass; the check needs no --role afterwards.
+        self.cli("claim", "--agent", "ux-1", "--role", "ux-reviewer", "--capability", "user.list")
+        self.scope(0, "--agent", "ux-1")
+
+    def test_a_second_start_never_replaces_the_baseline_silently(self):
+        # C-05
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start")
+        (self.root / "src" / "service.ts").write_text("export const x = 2;\n", encoding="utf-8")
+        self.assertIn("src/service.ts", self.scope(1, "--agent", "qa-1"))
+        self.assertIn("--restart", self.scope(2, "--agent", "qa-1", "--role", "qa", "--start"))
+        self.assertIn("src/service.ts", self.scope(1, "--agent", "qa-1"), "the first baseline stands")
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start", "--restart")
+        self.assertIn("restarted 1 time", self.scope(0, "--agent", "qa-1"))
+
+    def test_deleting_the_baseline_in_locks_does_not_reset_it(self):
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start")
+        (self.root / "src" / "service.ts").write_text("export const x = 2;\n", encoding="utf-8")
+        for path in (self.manifest.parent / "locks").glob("*.scope.json"):
+            path.unlink()
+        self.assertIn("--restart", self.scope(2, "--agent", "qa-1", "--role", "qa", "--start"))
+        self.assertIn("src/service.ts", self.scope(1, "--agent", "qa-1"))
+
+    def test_citing_a_file_during_the_pass_does_not_make_it_editable(self):
+        # C-06: the P9 sequence.
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start")
+        self.cli("add", "--kind", "gap", "--json", json.dumps(
+            {"id": "gap.qa-notes", "severity": "low", "description": "qa notes for user list",
+             "capability": "user.list", "evidence": ["prisma/schema.prisma", "src/service.ts"]}))
+        (self.root / "prisma" / "schema.prisma").write_text("model User { id String @id }\n",
+                                                            encoding="utf-8")
+        (self.root / "src" / "service.ts").write_text("export const x = 0;\n", encoding="utf-8")
+        message = self.scope(1, "--agent", "qa-1")
+        self.assertIn("prisma/schema.prisma", message)
+        self.assertIn("src/service.ts", message)
+
+    def test_evidence_cited_before_the_pass_and_new_reports_stay_editable(self):
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start")
+        (self.root / "evidence" / "tests.log").write_text("tests run\n  0 errors across 120 files\n",
+                                                          encoding="utf-8")
+        (self.root / "evidence" / "qa-review.md").write_text("Walked the list as ops\n", encoding="utf-8")
+        self.cli("set", "--path", "crossCutting.experience.evidence", "--append",
+                 "--value", "evidence/qa-review.md")
+        self.scope(0, "--agent", "qa-1")
+
+    def test_an_edit_to_ignored_configuration_is_seen(self):
+        # C-17
+        self.scope(0, "--agent", "sec-1", "--role", "security", "--start")
+        (self.root / ".env").write_text("FEATURE_X=1\n", encoding="utf-8")
+        self.assertIn(".env", self.scope(1, "--agent", "sec-1"))
+
+    def test_parallel_reviewers_do_not_fail_on_each_others_worklogs(self):
+        # A-03
+        self.scope(0, "--agent", "ux-1", "--role", "ux-reviewer", "--start")
+        self.scope(0, "--agent", "sec-1", "--role", "security", "--start")
+        for agent, role in (("ux-1", "ux-reviewer"), ("sec-1", "security")):
+            self.cli("claim", "--agent", agent, "--role", role, "--capability", "user.list")
+        worklogs = self.manifest.parent / "worklog"
+        worklogs.mkdir()
+        (worklogs / "ux-1.md").write_text("ux-1 pass\n", encoding="utf-8")
+        (worklogs / "sec-1.md").write_text("sec-1 pass\n", encoding="utf-8")
+        self.assertIn("sec-1", self.scope(0, "--agent", "ux-1"), "the excused worklog is named")
+        self.scope(0, "--agent", "sec-1")
+        # A worklog of an id that is no registered reviewer is still a violation.
+        (worklogs / "impl-9.md").write_text("forged\n", encoding="utf-8")
+        self.assertIn("impl-9.md", self.scope(1, "--agent", "ux-1"))
+
+    def test_a_repository_without_commits_says_what_to_do(self):
+        # C-18
+        fresh = self.tmp / "fresh"
+        fresh.mkdir()
+        code, _o, err = run("init", "--project-root", fresh, "--name", "Fresh")
+        self.assertEqual(code, 0, err)
+        subprocess.run(["git", "-C", str(fresh), "init", "-q"], check=True)
+        code, out, err = run("review-scope", "--manifest", fresh / ".admin-console" / "manifest.json",
+                             "--agent", "qa-1", "--role", "qa", "--start")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("no commits yet", err)
+
+
+class ClaimCase(TempProject):
+    """A manifest with user.list and the dotted ids that collided: user.list.qa, user.list.bulk."""
+
+    def setUp(self):
+        super().setUp()
+        data = self.build_honest_manifest()
+        base = self.capability_of(data)
+        base.update({"owner": "", "implementedBy": "", "reviewStatus": "unreviewed", "reviewedBy": ""})
+        for cid in ("user.list.qa", "user.list.bulk"):
+            data["entities"][0]["capabilities"].append(dict(json.loads(json.dumps(base)), id=cid))
+        self.write(data)
+        self.locks = self.manifest.parent / "locks"
+
+    def step(self, expected, *args):
+        code, out, err = self.cli(*args)
+        self.assertEqual(code, expected, " ".join(map(str, args)) + "\n" + out + err)
+        self.assertNotIn("Traceback", err)
+        return out + err
+
+    def claim(self, expected, agent, role, cid="user.list", *extra):
+        return self.step(expected, "claim", "--agent", agent, "--role", role, "--capability", cid, *extra)
+
+    def held_by(self, agent):
+        return sorted(p.name for p in self.locks.glob("*.lock")
+                      if p.read_text(encoding="utf-8").strip() == agent)
+
+
+class TestLockNames(ClaimCase):
+    """C-08 -- a builder lock of `a.qa` and the qa review lock of `a` were one file."""
+
+    def test_a_builder_of_a_dotted_id_does_not_block_a_review_of_its_prefix(self):
+        self.claim(0, "impl-1", "implementer", "user.list.qa")
+        self.claim(0, "qa-1", "qa", "user.list")
+        self.assertEqual(self.held_by("qa-1"), ["user.list@qa.lock"])
+
+    def test_a_lock_in_the_old_naming_is_still_honoured_and_migrated(self):
+        self.locks.mkdir(exist_ok=True)
+        (self.locks / "user.list.qa.lock").write_text("qa-old\n", encoding="utf-8")
+        self.step(0, "add", "--kind", "agent", "--json", json.dumps(
+            {"id": "qa-old", "role": "qa", "ownsCapabilities": [], "ownsScreens": [],
+             "status": "active"}))
+        # Ambiguous by name (user.list.qa is also a capability): the holder's role decides.
+        self.claim(3, "qa-2", "qa")
+        (self.locks / "user.list.security.lock").write_text("sec-old\n", encoding="utf-8")
+        self.claim(3, "sec-2", "security")
+        self.assertEqual(self.held_by("sec-old"), ["user.list@security.lock"])
+        self.assertEqual(self.held_by("qa-old"), ["user.list@qa.lock"])
+        self.step(0, "release-claim", "--agent", "qa-old")
+        self.assertEqual(self.held_by("qa-old"), [])
+        self.claim(0, "qa-2", "qa")
+
+
+class TestReleaseByWhatIsOnDisk(ClaimCase):
+    """C-07, C-15 -- release-claim left locks behind that then blocked everyone."""
+
+    def test_a_reviewer_that_changed_role_releases_both_locks(self):
+        self.claim(0, "rev-1", "qa")
+        out = self.claim(2, "rev-1", "security", "user.list.bulk")
+        self.assertIn("release-claim", out)
+        self.step(0, "release-claim", "--agent", "rev-1")
+        self.assertEqual(self.held_by("rev-1"), [])
+        self.claim(0, "qa-2", "qa")
+
+    def test_a_reviewer_steal_from_a_builder_takes_the_builder_lock_too(self):
+        self.claim(0, "impl-1", "implementer")
+        self.claim(0, "qa-1", "qa", "user.list", "--force-steal", "--reason", "impl-1 stalled")
+        self.assertEqual(self.held_by("impl-1"), [])
+        self.step(0, "release-claim", "--agent", "qa-1")
+        self.claim(0, "sec-1", "security")
+        self.step(0, "release-claim", "--agent", "sec-1")
+        self.claim(0, "impl-2", "implementer")
+
+    def test_a_lock_the_manifest_no_longer_lists_is_still_released(self):
+        self.claim(0, "impl-1", "implementer")
+        data = self.read()
+        for agent in data["agents"]:
+            agent["ownsCapabilities"] = []
+        self.write(data)
+        self.assertIn("user.list", self.step(0, "release-claim", "--agent", "impl-1"))
+        self.assertEqual(self.held_by("impl-1"), [])
+
+    def test_an_unknown_agent_with_no_lock_is_a_conflict_and_writes_nothing(self):
+        before = self.manifest.read_bytes()
+        self.assertIn("not in agents[]", self.step(3, "release-claim", "--agent", "nobody"))
+        self.assertEqual(self.manifest.read_bytes(), before)
+
+    def test_a_non_string_in_owns_capabilities_is_dropped_not_crashed_on(self):
+        self.claim(0, "impl-1", "implementer")
+        data = self.read()
+        for agent in data["agents"]:
+            agent["ownsCapabilities"].extend([{"x": 1}, 5])
+        self.write(data)
+        self.step(0, "release-claim", "--agent", "impl-1")
+        record = {a["id"]: a for a in self.read()["agents"]}["impl-1"]
+        self.assertEqual(record["ownsCapabilities"], [])
+
+
+class TestSetValues(TempProject):
+    """C-04, C-19 -- `set` must neither write an unreadable manifest nor retype a number."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_honest_manifest()
+
+    def test_a_value_nested_past_the_limit_is_refused_and_nothing_is_written(self):
+        deep = self.tmp / "deep.tmp"
+        deep.write_text("[" * 200 + "]" * 200, encoding="utf-8")
+        before = self.manifest.read_bytes()
+        for path in (CAP + ".x-deep", CAP + ".evidence"):
+            code, out, err = self.cli("set", "--path", path, "--value-file", deep)
+            self.assertEqual(code, 2, out + err)
+            self.assertNotIn("Traceback", err)
+            self.assertIn("nested", err)
+            self.assertEqual(self.manifest.read_bytes(), before)
+
+    def test_a_value_that_is_shallow_alone_but_too_deep_where_it_lands_is_refused(self):
+        value = "[" * 98 + "]" * 98
+        before = self.manifest.read_bytes()
+        code, out, err = self.cli("set", "--path", CAP + ".x-deep", "--value", value)
+        self.assertEqual(code, 2, out + err)
+        self.assertEqual(self.manifest.read_bytes(), before)
+        self.assertEqual(self.cli("validate", "--phase", "plan")[0], 0)
+
+    def test_a_float_field_stays_a_number(self):
+        data = self.read()
+        data["platform"]["volumes"]["peakConcurrentOperators"] = 2.5
+        self.write(data)
+        code, _o, err = self.cli("set", "--path", "platform.volumes.peakConcurrentOperators", "--value", "3.5")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read()["platform"]["volumes"]["peakConcurrentOperators"], 3.5)
+        for bad in ("nan", "inf", "many"):
+            code, _o, err = self.cli("set", "--path", "platform.volumes.peakConcurrentOperators", "--value", bad)
+            self.assertEqual(code, 2, bad + err)
+
+
+class TestEmitWhatTheManifestSays(TempProject):
+    """C-10, C-20 -- a document must not hide a gap or present an absent capability as live."""
+
+    def setUp(self):
+        super().setUp()
+        self.data = self.build_honest_manifest()
+
+    def emit(self, fmt):
+        code, out, err = self.cli("emit", "--format", fmt)
+        self.assertEqual(code, 0, out + err)
+        return out
+
+    def test_gaps_without_a_valid_severity_are_still_reported(self):
+        self.data["gaps"] = [
+            {"id": "gap.blocker", "severity": "Critical", "description": "cross-tenant leak",
+             "status": "open", "rationale": "", "evidence": []},
+            {"id": "gap.nosev", "description": "no severity at all", "status": "open",
+             "rationale": "", "evidence": []},
+        ]
+        self.write(self.data)
+        out = self.emit("gap-report")
+        self.assertIn("gap.blocker", out)
+        self.assertIn("gap.nosev", out)
+        self.assertIn("Critical", out)
+        self.assertIn("2 gap(s) have no valid severity", out)
+
+    def test_a_not_applicable_capability_is_not_offered_to_operators(self):
+        capability = self.capability_of(self.data)
+        capability.update({"status": "not-applicable", "risk": "high",
+                           "rationale": "No listing in this product"})
+        self.data["decisions"].append({
+            "id": "dec.na-list", "kind": "not-applicable", "decision": "No user listing",
+            "reason": "owner confirmed", "evidence": [], "status": "confirmed", "appliesTo": ["user.list"]})
+        self.write(self.data)
+        for fmt in ("operator-handbook", "authz-matrix", "test-plan"):
+            out = self.emit(fmt)
+            rows = [line for line in out.splitlines() if "user.list" in line]
+            self.assertTrue(rows, fmt)
+            self.assertTrue(all("not applicable" in line.lower() for line in rows), fmt + "\n" + out)
+        self.assertNotIn("Before a high-risk action", self.emit("operator-handbook"))
+
+
+class TestUsageMessages(TempProject):
+    """C-18, C-21, C-23 -- refusals that say what to do; options that say what they do."""
+
+    def test_a_folder_given_as_the_manifest_is_resolved_or_explained(self):
+        code, out, err = run("validate", "--manifest", self.manifest.parent, "--phase", "plan")
+        self.assertEqual(code, 0, out + err)
+        empty = self.tmp / "empty-folder"
+        empty.mkdir()
+        code, out, err = run("validate", "--manifest", empty)
+        self.assertEqual(code, 2)
+        self.assertIn("is a folder", err)
+        self.assertIn("manifest.json", err)
+
+    def test_init_with_a_folder_as_the_manifest_is_explained(self):
+        folder = self.tmp / "consoles"
+        folder.mkdir()
+        for extra in ((), ("--force",)):
+            code, out, err = run("init", "--project-root", self.root, "--manifest", folder, "--name", "X", *extra)
+            self.assertEqual(code, 2, out + err)
+            self.assertIn("is a folder", err)
+            self.assertNotIn("Traceback", err)
+
+    def test_a_name_without_ascii_letters_gets_a_console_id_and_a_blank_name_is_refused(self):
+        for name in ("!!!", "管理"):
+            root = self.tmp / ("p" + str(len(name)))
+            root.mkdir()
+            code, _o, err = run("init", "--project-root", root, "--name", name, encoding="utf-8")
+            self.assertEqual(code, 0, err)
+            data = json.loads((root / ".admin-console" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertRegex(data["platform"]["id"], r"^console-[0-9a-f]{6}$")
+        blank = self.tmp / "blank"
+        blank.mkdir()
+        code, _o, err = run("init", "--project-root", blank, "--name", "  ")
+        self.assertEqual(code, 2, err)
+        self.assertFalse((blank / ".admin-console").exists())
+
+    def test_lesson_add_opens_only_proposed_lessons(self):
+        code, _o, err = run("lesson", "add", "--title", "t", "--category", "gap", "--scope", "SKILL.md",
+                            "--trigger", "x", "--rule", "y", "--status", "superseded",
+                            "--lessons-dir", self.tmp / "lessons")
+        self.assertEqual(code, 2, err)
+        self.assertFalse((self.tmp / "lessons").exists())
+
+    def test_destructive_options_say_what_they_do(self):
+        for argv, flag, words in (
+            (("init", "--help"), "--force", "discard"),
+            (("emit", "--help"), "--out", "never the manifest"),
+            (("migrate", "--help"), "--write", "dry run"),
+            (("promote", "--help"), "--min-projects", "at least 1"),
+        ):
+            _code, out, _err = run(*argv)
+            text = " ".join(out.split())
+            self.assertIn(words, text, argv[0] + " " + flag)
+        code, _o, err = run("promote", "--min-projects", "0", env={"ADMINWRIGHT_HOME": str(self.tmp / "s")})
+        self.assertEqual(code, 2, err)
+
+
 if __name__ == "__main__":
     unittest.main()
