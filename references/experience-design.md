@@ -42,7 +42,7 @@ Consult the canonical sources for the pattern you are building. Read the source;
 | PatternFly | Enterprise console shell: masthead, primary nav, page structure, toolbars, wizards, notification drawer, empty and failure states |
 | IBM Carbon | The data table contract: toolbar, batch actions, selection, sorting, expansion, skeletons, density |
 | Atlassian Design System | Admin conventions: nav hierarchy, inline edit, drawer versus modal, section messages, transient versus persistent messaging |
-| Shopify Polaris | Admin conventions: index tables, index filters, saved views, bulk actions, page headers with primary and secondary actions |
+| Shopify Polaris (now web components; the archived React docs still show the index-table patterns) | Admin conventions: index tables, index filters, saved views, bulk actions, page headers with primary and secondary actions |
 | Dashboard Design Patterns | Dashboard information design: eight pattern groups (data information, meta information, visual representations, interactions, screenspace, structure, page layout, color) from a systematic review of 144 dashboards, plus six dashboard genres (static, magazine, infographic, embedded mini, analytic, repository) |
 | WAI-ARIA Authoring Practices Guide (APG) | The keyboard contract for every composite widget you ship |
 
@@ -109,7 +109,7 @@ Rules:
 - Do not reproduce a queue on the dashboard. Link to it. Two renderings of the same queue drift.
 - If the platform has no urgent work to route, do not build a dashboard. Land on the primary queue or on search.
 
-Every metric must expose its definition and time window, its source and as-of freshness, the comparison or threshold that makes it actionable, the responsible owner or domain, drill-down to the affected records, and the investigation or action path.
+Every metric must expose its definition and time window, its source and as-of freshness, the comparison or threshold that makes it actionable, the responsible owner or domain, drill-down to the affected records, and the investigation or action path. The manifest records these on the metric's query capability, as `x-metric` ([discovery.md](discovery.md#6-decision-to-metric-map)); check each dashboard element against it.
 
 Avoid oversized vanity numbers, arbitrary card grids, decorative charts, and color-only meaning.
 
@@ -398,7 +398,7 @@ Use `py -3` or `python3` if `python` is not on PATH.
 
 The handbook is derived from roles and scopes, screens and routes, entities with lifecycle states and transitions, queues with SLA and actions, commands with preconditions and safeguards, and failure and escalation paths. Anything the handbook cannot state is a modeling defect, not a writing problem: an empty `rationale`, a missing lifecycle transition, an unnamed audit event. Fix the manifest, re-emit.
 
-Emitting is not acceptance. [verification.md](verification.md) carries the check that it works: a new authorized operator completes the workflow using only the console and the handbook.
+Emitting is not acceptance. The first of the [UX acceptance checks](#ux-acceptance-checks) below is the test that it works: a new authorized operator completes the workflow using only the console and the handbook.
 
 ## UX acceptance checks
 

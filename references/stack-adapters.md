@@ -6,7 +6,7 @@
 2. Identifying the stack
 3. The seven seams
 4. Next.js App Router
-5. Remix and React Router
+5. React Router framework mode (and Remix 2)
 6. Laravel
 7. Django
 8. Ruby on Rails
@@ -41,7 +41,7 @@ validator reports empty `platform.stack` and missing `researchSources` at releas
 | Evidence | Indicates |
 |---|---|
 | `package.json` + `next.config.*` + `app/` directory | Next.js App Router |
-| `package.json` + `vite.config.*` + `app/routes/` | Remix or React Router framework mode |
+| `package.json` + `vite.config.*` + `app/routes/` | React Router framework mode, or Remix 2 |
 | `composer.json` + `artisan` | Laravel; check `app/Filament/` for Filament |
 | `manage.py` + `settings.py` | Django; check `INSTALLED_APPS` for `django.contrib.admin` |
 | `Gemfile` + `config/routes.rb` | Rails; check for admin engines |
@@ -73,7 +73,7 @@ Every adapter below resolves the same seven questions. So must any stack not lis
 
 | Seam | Landing point |
 |---|---|
-| Admin gateway | A dedicated `app/admin/` route group with its own layout and `proxy.ts` matcher |
+| Admin gateway | A dedicated `app/admin/` segment (or an `app/(admin)/` route group when the URL should not carry `/admin`) with its own layout and `proxy.ts` matcher |
 | Authorization | In the Server Action or Route Handler body, and in every data-access function. Never in `proxy.ts` alone |
 | Commands | Server Actions delegating to a domain service; the action is transport, not logic |
 | Jobs | An external queue (BullMQ, Inngest, QStash). Serverless request timeouts make in-request work unsafe |
@@ -96,15 +96,19 @@ Traps:
 - `"use client"` boundaries silently pull data into the browser bundle. Any field excluded by
   policy must be dropped server-side before it crosses the boundary, not hidden in the
   component.
-- Aggressive route caching can serve one tenant's rendered data to another. Mark privileged
-  routes dynamic and key any cache by tenant and role.
+- Caching can serve one tenant's rendered data to another. Which idiom prevents it depends on
+  the `cacheComponents` option (stable in Next 16). Without it, mark privileged routes dynamic
+  and key any cache by tenant and role. With it, data is uncached unless a function opts in
+  with `'use cache'`: remove segment `dynamic` exports as the migration guide says, never read
+  tenant- or role-scoped data inside `'use cache'` unless tenant and role are arguments of the
+  cached function, and use `'use cache: private'` for data that depends on the request.
 
-## Remix and React Router
+## React Router framework mode (and Remix 2)
 
 | Seam | Landing point |
 |---|---|
 | Admin gateway | A `routes/admin.*` segment with a parent loader that establishes the admin session |
-| Authorization | In every `loader` and `action`; the parent loader does not protect child routes |
+| Authorization | Route `middleware` on the protected layout runs before every matched loader and action (stable in v8; behind `future.v8_middleware` in v7). Without it, check in every `loader` and `action`, because the parent loader does not protect child routes |
 | Commands | `action` functions delegating to domain services |
 | Jobs | External queue; the request/response model is not a job runner |
 | Audit | In the domain service, transactionally |
@@ -112,7 +116,12 @@ Traps:
 | Lists | Loader reads the URL search params, which keeps filter state shareable by default |
 
 Trap: a parent route's loader running does not mean a child route's loader is protected —
-child loaders are addressable directly. Authorize in each.
+child loaders are addressable directly. Authorize in each, or in middleware that runs for all
+of them.
+
+Remix 3 is a different framework, not a newer version of this one, with its own server
+runtime and routing. Do not carry this adapter's loaders over to it: on a Remix 3 project,
+resolve the seven seams from its own documentation.
 
 ## Laravel
 
@@ -142,10 +151,10 @@ Traps:
 | Admin gateway | `django.contrib.admin`, or a separate app for custom operator workflows |
 | Authorization | Django admin: `ModelAdmin.has_change_permission(request, obj)` and its `view` and `delete` siblings, per row. APIs on Django REST framework: `permission_classes`, whose `has_permission` guards the view and `has_object_permission` the row |
 | Commands | Service functions; keep business rules out of `ModelAdmin` |
-| Jobs | Celery or equivalent |
+| Jobs | Celery or equivalent; on 6.0 and later, `django.tasks` with a production backend and worker (its built-in backends are for development and testing only) |
 | Audit | `LogEntry` for admin actions, plus a domain audit table for business commands |
 | Tenant scope | Explicit queryset filtering in `get_queryset`, per view and per admin class |
-| Lists | `list_display`, `list_filter`, `search_fields`, with `select_related` to avoid N+1 |
+| Lists | `list_display`, `list_filter`, `search_fields`, with `list_select_related` naming the relations to avoid N+1 (`True` is deprecated in 6.1) |
 
 Trap: in Django REST framework `has_object_permission` runs only when the view calls
 `get_object()` or `check_object_permissions()`. The generic views do not apply it to each
@@ -234,7 +243,7 @@ restart. Long admin operations need durable jobs with recorded state.
 |---|---|
 | Admin gateway | A separate area or minimal-API group with its own auth policy |
 | Authorization | Policy-based authorization with requirements and handlers; resource-based checks for rows |
-| Commands | MediatR handlers or services |
+| Commands | Services, or MediatR handlers (v13 and later are RPL-1.5 or a commercial licence with a licence key; record that choice per [buy-vs-build.md](buy-vs-build.md)) |
 | Jobs | Hosted services with a durable queue, or Hangfire |
 | Audit | `SaveChanges` interception or an explicit write in the same transaction |
 | Tenant scope | A scoped tenant provider plus EF global query filters, verified by test |

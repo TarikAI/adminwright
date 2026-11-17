@@ -36,7 +36,8 @@ DOC_GLOBS = (
 )
 SKIP_MARKER = "<!-- doc-test: skip -->"
 PLACEHOLDER = re.compile(r"<[A-Za-z][^<>\s]*>")
-MINIMUM_EXECUTED = 6
+# SKILL.md's own examples (four of them) run in a separate, unseeded test and count there.
+MINIMUM_EXECUTED = 4
 
 
 def doc_files():
@@ -132,9 +133,36 @@ def parse_command(command, root, manifest):
     resolved = []
     for token in args:
         token = token.replace("<project-root>", str(root))
-        token = token.replace("<path>", str(manifest)) if token == "<path>" else token
+        token = str(manifest) if token in ("<path>", "<manifest>") else token
         resolved.append(token)
     return resolved
+
+
+def runnable_commands(path, root, manifest):
+    """(line, argv) for every add/set example in a file, in document order."""
+    found = [
+        (start, command)
+        for start, skipped, body in fenced_blocks(path)
+        if not skipped
+        for command in commands_in(body)
+    ] + list(inline_commands(path))
+    found.sort(key=lambda pair: pair[0])
+    for start, command in found:
+        argv = parse_command(command, root, manifest)
+        if argv is None or any(PLACEHOLDER.search(a) or a == "..." for a in argv):
+            continue
+        yield start, argv
+
+
+def fresh_manifest(work):
+    root = work / "project"
+    root.mkdir()
+    code, _out, err = run(
+        "init", "--project-root", root, "--name", "DocExamples",
+        "--archetype", "b2b-saas", "--profile", "standard",
+    )
+    assert code == 0, err
+    return root, root / ".admin-console" / "manifest.json"
 
 
 WORLD = (
@@ -165,6 +193,8 @@ class TestDocumentedExamples(unittest.TestCase):
         executed = 0
         failures = []
         for path in doc_files():
+            if path == SKILL_ROOT / "SKILL.md":
+                continue  # runs unseeded, from its own role and entity, in the next test
             work = Path(tempfile.mkdtemp(prefix="adminwright-docs-"))
             root = work / "project"
             root.mkdir()
@@ -210,6 +240,68 @@ class TestDocumentedExamples(unittest.TestCase):
             "with '" + SKIP_MARKER + "' if it is deliberately illustrative):\n"
             + "\n".join(failures),
         )
+
+    def test_skill_md_examples_run_on_a_fresh_manifest_without_help(self):
+        """SKILL.md's first writes must work straight after `init`, in the order shown.
+
+        The test above seeds a role and an entity first, which hid that SKILL.md's first
+        `add` (a capability for role `ops` on entity `user`) was refused on a fresh
+        manifest: nothing told the agent to add the role and the entity before it.
+        """
+        work = Path(tempfile.mkdtemp(prefix="adminwright-skill-"))
+        try:
+            root, manifest = fresh_manifest(work)
+            executed = 0
+            for start, argv in runnable_commands(SKILL_ROOT / "SKILL.md", root, manifest):
+                code, out, err = run(*argv)
+                executed += 1
+                self.assertEqual(code, 0, "SKILL.md:%d exit %d\n%s" % (start, code, (err or out)[:400]))
+            self.assertGreaterEqual(executed, 4, "SKILL.md lost its runnable role, entity, capability and set examples")
+        finally:
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
+
+
+# Fixed separately in the same round; drop it from this set once its text no longer says so.
+CLOSE_STEP_PENDING = {"lessons/README.md"}
+HAND_PROMOTE = re.compile(r"feedback\[[^\]]*\]\.status'?\s+--value\s+promoted")
+
+
+class TestFeedbackCloseStep(unittest.TestCase):
+    def test_no_doc_tells_the_agent_to_promote_a_feedback_entry_by_hand(self):
+        """`harvest` skips an entry already set to `promoted`, so a hand-set status loses it.
+
+        Two documents told the agent to "close the project entry" with
+        `set ... feedback[fb-003].status --value promoted`; done before `harvest`, the
+        observation never reached the cross-project store.
+        """
+        offenders = []
+        for path in doc_files():
+            name = path.relative_to(SKILL_ROOT).as_posix()
+            if name in CLOSE_STEP_PENDING:
+                continue
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if HAND_PROMOTE.search(line):
+                    offenders.append("%s:%d" % (name, number))
+        self.assertEqual(offenders, [], "close a feedback entry with `harvest`, not by hand")
+
+    def test_harvest_is_the_step_that_closes_the_entry(self):
+        """The documented close step collects the entry and marks it `promoted` itself."""
+        work = Path(tempfile.mkdtemp(prefix="adminwright-close-"))
+        try:
+            _root, manifest = fresh_manifest(work)
+            code, _out, err = run("add", "--manifest", manifest, "--kind", "feedback",
+                                  "--json", json.dumps(dict(WORLD[2][1])))
+            self.assertEqual(code, 0, err)
+            code, out, err = run("harvest", "--manifest", manifest, "--date", "2026-11-17",
+                                 env={"ADMINWRIGHT_HOME": str(work / "store")})
+            self.assertEqual(code, 0, err)
+            self.assertIn("Harvested 1 observation", out)
+            status = json.loads(manifest.read_text(encoding="utf-8"))["feedback"][0]["status"]
+            self.assertEqual(status, "promoted")
+        finally:
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":

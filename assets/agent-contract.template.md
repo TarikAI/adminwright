@@ -86,14 +86,17 @@ dropdown.
 
 ## Coordination
 
-- Change `.admin-console/manifest.json` only through the script's `add`, `set`, `claim` and
-  `release-claim`; never rewrite the file by hand, and never edit lock files.
+- Change `.admin-console/manifest.json` only through the adminwright script (`add`, `set`,
+  `remove`, `rename`, `claim`, `release-claim`); never rewrite the file by hand, and never
+  edit lock files.
 - `claim` a capability before you read the code you will change, work only inside the claim,
   and `release-claim` when you stop. Exit 3 means another agent holds it: do not retry in a loop.
 - Write a worklog at `.admin-console/worklog/<agent id>.md` before you stop; the next agent
   has the manifest and that file and nothing else.
 - A reviewer that contests a capability files a gap naming it. A capability contested twice
-  goes to a human; only a human, or a named approver in `decisions[]`, accepts a gap.
+  goes to a human. Accepting a gap, or confirming any decision, is a person's call: an agent
+  records its proposal as an `assumed` decision with a `blocked` gap asking for that call,
+  and changes the status only after the person has answered.
 
 ## Review independence
 
@@ -102,10 +105,17 @@ that re-reads the code rather than recalling it.
 
 ## Completion gate
 
+`<adminwright skill dir>` below is the directory that holds the adminwright skill's
+`SKILL.md`. Find it at the start of each session rather than trusting a path written here,
+because an installed plugin moves on every update: if the adminwright skill is loaded, it is
+the directory the skill was loaded from; otherwise search the harness's installed plugins
+or skills for `adminwright/scripts/admin_console_manifest.py`. If you cannot find it, say
+so; never skip the gate.
+
 Do not report completion until all of these hold:
 
-- `python <SKILL DIR>/scripts/admin_console_manifest.py validate --manifest .admin-console/manifest.json --project-root . --phase release` exits 0
-- `python <SKILL DIR>/scripts/admin_console_manifest.py coverage --manifest .admin-console/manifest.json --project-root .` exits 0
+- `python <adminwright skill dir>/scripts/admin_console_manifest.py validate --manifest .admin-console/manifest.json --project-root . --phase release` exits 0
+- `python <adminwright skill dir>/scripts/admin_console_manifest.py coverage --manifest .admin-console/manifest.json --project-root .` exits 0
 - `<BUILD COMMAND>` succeeds
 - `<TYPECHECK COMMAND>` succeeds
 - `<LINT COMMAND>` succeeds
@@ -132,8 +142,8 @@ validation and coverage results.
 | `<internal / standard / regulated>` | The profile recorded in the manifest |
 | `<PRODUCT DOC>` and the rest | Whichever of these the project has; create the missing ones |
 | `<STACK>`, `<VERSIONS>` | `platform.stack`, read from lockfiles rather than assumed |
-| `<SKILL DIR>` | Where this skill is installed, as an absolute or repo-relative path |
+| `<adminwright skill dir>` | Leave it as written: the contract tells each session how to find the skill. Never replace it with a plugin-cache path or any path containing a commit hash, which goes dead at the next update |
 | `<BUILD COMMAND>` and the rest | The project's real commands, verified by running them once |
 
-Do not ship the template with placeholders intact. An instruction file containing
+Do not ship the template with any other placeholder intact. An instruction file containing
 `<TEST COMMAND>` teaches the next agent that the rules here are decorative.

@@ -47,7 +47,7 @@ A complete admin specification needs these ten inputs. Most are recoverable from
 
 Record every inferred answer as `decisions[]` with `status: assumed`. Record every genuinely human input you did not get as `gaps[]` with a severity and a working default. Continue building around an open gap; do not stall the whole build on one unanswered question.
 
-At the `regulated` profile an `assumed` decision is a release error (`decision-assumed`; `init` records the profile choice itself as one, `dec.profile`). Convert assumptions to `confirmed` through the batched questions in Autonomy boundaries below: `set --path 'decisions[<id>].status' --value confirmed`, with who confirmed it, and when, in the decision's `reason` (decisions have no separate confirmer field).
+At the `regulated` profile an `assumed` decision is a release error (`decision-assumed`; `init` records the profile choice itself as one, `dec.profile`). A decision becomes `confirmed` only when a person has answered: ask through the batched questions in Autonomy boundaries below, then `set --path 'decisions[<id>].status' --value confirmed`, with who confirmed it, and when, in the decision's `reason` (decisions have no separate confirmer field). Your own analysis, however thorough, leaves a decision `assumed`; if nobody can answer before release, the open question is a `blocked` gap, not a confirmation.
 
 ## Evidence hierarchy
 
@@ -115,7 +115,9 @@ Step 4 — record every source consulted in `platform.researchSources[]`. `appli
   "checkedOn": "YYYY-MM-DD" }
 ```
 
-Step 5 — capture `platform.volumes` (`entityCounts`, `peakConcurrentOperators`, `retentionHorizon`). Volume decides server-side versus client-side filtering, pagination style, export limits, and job-versus-synchronous execution. See [architecture.md](architecture.md) for the budgets these numbers set.
+Write each one with `set --manifest <path> --path platform.researchSources --append --value '[<object>]'`, where `<object>` is the JSON above. `--append` adds to the list under the manifest lock, so agents recording sources at the same time do not overwrite each other.
+
+Step 5 — capture `platform.volumes` (`entityCounts`, `peakConcurrentOperators`, `retentionHorizon`). Volume decides server-side versus client-side filtering, pagination style, export limits, and job-versus-synchronous execution. See [experience-design.md](experience-design.md#required-behavior-by-volume) for what these numbers decide in lists and tables.
 
 ## The six discovery maps
 
@@ -284,6 +286,8 @@ Rules:
 - Every dashboard metric becomes a query capability with a real `dataBinding`. Sample series and static numbers fail the placeholder scan at every profile.
 - Trend charts only when the shape of the trend changes an operator decision.
 
+Record each metric on the query capability that computes it, so the map lives in the manifest and its completeness can be checked. The capability's `outcome` holds the question and `dataBinding` the source; an `x-metric` object on the same capability holds the rest, with the keys `owner` (a role id), `threshold` (the numeric breach rule), `freshness`, `drillDown` (the console route and filter the number opens), and `action` (the command or queue the operator works next). For example `set --path 'entities[<entity>].capabilities[<id>].x-metric' --value '<json>'`. Keys beginning `x-` pass the schema, and the validator does not read them, so the ux-reviewer checks that every dashboard metric has one with all five keys filled.
+
 Layout and density rules are in [experience-design.md](experience-design.md). The KPI-wall anti-pattern is in [capability-catalog.md](capability-catalog.md).
 
 ## Requirement inference
@@ -359,7 +363,9 @@ decisions[]                     every inferred answer, status assumed|confirmed
 gaps[]                          every blocking unknown, with severity and working default
 ```
 
-Leave implementation fields empty at this phase: `dataBinding`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `safeguards`, `tests`, `evidence`. Do not fill them with `TBD`, `mock`, or `coming soon` — the placeholder scan errors on those at every profile. Empty is honest; a placeholder is a defect.
+In a build, leave implementation fields empty at this phase: `dataBinding`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `safeguards`, `tests`, `evidence`. Do not fill them with `TBD`, `mock`, or `coming soon` — the placeholder scan errors on those at every profile. Empty is honest; a placeholder is a defect.
+
+In an audit the same fields are your findings. Record what the existing code actually uses, from the files you read: the operation behind each screen in `serverOperations`, the policy that guards it in `authorizationPolicies`, the store it reads in `dataBinding`, the events it emits in `auditEvents`. An empty field then means you looked and found none, which is itself a gap to file; the repair that follows works from these fields.
 
 Discovery is complete when all of the following hold:
 
@@ -367,7 +373,7 @@ Discovery is complete when all of the following hold:
 - Every declared role is used by at least one screen and at least one capability.
 - Every lifecycle state appears in a capability's `entityStates` and has a query capability to see it; every non-initial state is reachable by a command capability or a declared transition.
 - Every queue has a source, a priority rule, an SLA, and at least one action.
-- Every dashboard metric has an owner, a threshold, and a drill-down target.
+- Every dashboard metric is a query capability whose `x-metric` names an owner, a threshold, a freshness, a drill-down and an action.
 - `platform.stack` is filled and `platform.researchSources[]` has an entry for every stack element you will implement against.
 - Every unresolved question is a `gaps[]` entry, not silence.
 

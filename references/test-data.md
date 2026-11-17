@@ -82,7 +82,7 @@ The emitter derives these, and only these, from the manifest:
 | `integrations[]` | One row per integration: provider timeout, duplicate delivery, and reconciliation mismatch |
 | `workQueues[]` | One row per queue: a backlog past its SLA, an empty queue, and one item claimed by another operator |
 
-The plan names required fixtures. It does not write them, and it does not read transitions, screen states, capability `entityStates`, `risk` or queue SLA values. Add those by hand from the manifest: a record in every precondition state a command needs (`entityStates.from`, a transition's `from`) and one deliberately ineligible; a fixture that reaches each state in `screens[].states` (section 6); for `risk: high` or `critical` capabilities, a record reserved for the negative and replay tests; and records inside, near, and past each queue's SLA. Implement each in the project's own fixture mechanism.
+The plan names required fixtures. It does not write them, and it does not read transitions, screen states, capability `entityStates`, `risk` or queue SLA values. Add those by hand from the manifest: a record in every precondition state a command needs (`entityStates.from`, a transition's `from`) and one deliberately ineligible; a fixture that reaches each state in `screens[].states` ([Which fixture proves which screen state](#which-fixture-proves-which-screen-state)); for `risk: high` or `critical` capabilities, a record reserved for the negative and replay tests; and records inside, near, and past each queue's SLA. Implement each in the project's own fixture mechanism.
 
 ## Generating fixtures
 
@@ -176,4 +176,4 @@ Seed data rots faster than code. A lifecycle state added in a migration and not 
 - When a lifecycle state, role, or sensitivity class is added, the fixture is part of the same change. A state with no fixture is a state no test can reach, however the manifest lists it.
 - When a state is removed, remove its fixture and its screen state together. Orphan fixtures hide dead code.
 - Verify the fixtures still produce the states they claim after any schema migration; a migration that backfills a default can quietly collapse several dimensions into one.
-- Record fixture gaps found during verification as manifest `feedback[]` entries, and promote recurring ones under [skill-evolution.md](skill-evolution.md).
+- Record a fixture gap found during verification (a state or dimension this project's seed cannot produce) as a `gaps[]` entry, because it is a defect in the project. Record a `feedback[]` entry only when the dimension is missing from this file's own table, because `feedback[]` is about the skill; promote recurring ones under [skill-evolution.md](skill-evolution.md).

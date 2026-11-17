@@ -162,11 +162,12 @@ A browser sends a session cookie on a forged cross-site request; a bearer token 
 | Family | Built-in defense | Verify |
 |---|---|---|
 | Django | `CsrfViewMiddleware`, on by default; `X-CSRFToken` header for AJAX | still in `MIDDLEWARE`; each `csrf_exempt` view is a webhook, not an admin action |
-| Laravel | the `web` group's request-forgery middleware (`PreventRequestForgery` in the 13.x docs, which checks `Sec-Fetch-Site` and falls back to a token; earlier versions call it `VerifyCsrfToken`); `X-CSRF-TOKEN` and `X-XSRF-TOKEN` headers; SPAs use Sanctum | admin routes sit inside the `web` group; the exclusion list holds only webhooks |
+| Laravel | the `web` group's request-forgery middleware: `PreventRequestForgery` in 13.x, which checks `Sec-Fetch-Site` and falls back to a token, with exclusions in `preventRequestForgery(except: [...])`; `ValidateCsrfToken` in 11.x and 12.x, with exclusions in `validateCsrfTokens(except: [...])`; `VerifyCsrfToken` and its `$except` property in 10.x and earlier. `X-CSRF-TOKEN` and `X-XSRF-TOKEN` headers; SPAs use Sanctum | admin routes sit inside the `web` group; the exclusion list holds only webhooks |
 | Rails | `protect_from_forgery`, on in new apps through `default_protect_from_forgery`; `csrf_meta_tags` and the `X-CSRF-Token` header (Turbo sends it) | no admin controller skips forgery protection; custom JavaScript sends the header |
 | ASP.NET Core | Razor Pages automatic; MVC `[AutoValidateAntiforgeryToken]`; minimal APIs `UseAntiforgery()`; `X-XSRF-TOKEN` for SPAs | `[IgnoreAntiforgeryToken]` and `DisableAntiforgery()` only on bearer-token endpoints |
 | Next.js | Server Actions accept `POST` only and compare `Origin` with `Host` (`serverActions.allowedOrigins` behind a proxy) | the guide documents this for Server Actions only: give every cookie-authenticated Route Handler that mutates its own `Origin` check or token |
-| Express, NestJS, Go, others with none built in | nothing by default | add a maintained CSRF-token library or a strict `Origin` and `Sec-Fetch-Site` check on every non-safe method; confirm the library is still maintained |
+| Go 1.25 and later | `http.CrossOriginProtection`, opt-in: `http.NewCrossOriginProtection().Handler(mux)`, which rejects cross-origin non-safe requests | the admin mux is wrapped; only webhook routes are added with `AddInsecureBypassPattern` |
+| Express, NestJS, Go before 1.25, others with none built in | nothing by default | add a maintained CSRF-token library or a strict `Origin` and `Sec-Fetch-Site` check on every non-safe method; confirm the library is still maintained |
 
 Across families: state changes never ride on `GET`; prefer a synchronizer token or a signed double-submit cookie (the naive double-submit cookie is discouraged); treat `SameSite` cookies and `Origin` or `Sec-Fetch-Site` checks as defense in depth, not the only control; and remember that XSS defeats every CSRF defense, so output encoding and a content security policy stay in scope. Sources: [OWASP CSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html) and each framework's own CSRF documentation, read at the pinned version. Test: a forged cross-site `POST` that carries a valid session cookie and no token is rejected on every state-changing route, including export, bulk, impersonation start and break-glass grant.
 
@@ -188,9 +189,9 @@ indexed in [resource-index.md](resource-index.md).
 
 | Requirement here | Control family |
 |---|---|
-| Least privilege, default deny, scoped grants, access review | NIST SP 800-53 AC; OWASP ASVS access control |
+| Least privilege, default deny, scoped grants, access review | NIST SP 800-53 AC; OWASP ASVS 5.0 V8 Authorization |
 | Audit content, protection, and retention | NIST SP 800-53 AU; NIST SP 800-92 |
-| Authentication strength and step-up | OWASP ASVS authentication; OWASP MFA guidance |
+| Authentication strength and step-up | OWASP ASVS 5.0 V6 Authentication; OWASP MFA guidance |
 | Subject access, erasure, processing records | GDPR Articles 15, 17, 30 |
 | Change control and monitoring of privileged operations | SOC 2 CC6 and CC7 |
 
@@ -253,7 +254,7 @@ Record enough to reconstruct privileged activity:
 
 Protect audit records against unauthorized mutation or deletion. Define retention and access. Redact secrets and minimize sensitive payloads. Make timestamps, actor display, and exported evidence unambiguous.
 
-**Tamper-evident means the hash chain, not a slogan.** The release gate requires `crossCutting.audit.tamperProtected`; where it is claimed, it is implemented as the reference schema does. `audit_event` carries `chain_id`, `chain_seq`, `prev_hash`, `row_hash` and `hash_algorithm`; the `audit_event_chain_link` trigger assigns them, so writers never supply them; and `verify_audit_chain()` recomputes every row and lists gaps, broken links, edited rows and payload-hash mismatches (empty output means internally consistent). Append-only permissions prevent tampering, the chain detects it, and only a head hash anchored outside the database keeps detection meaningful against an attacker with write access. Run the verifier on a schedule and after every restore, and cite its output and the anchor's location in `crossCutting.audit.evidence`. What the chain proves and does not prove, and how to anchor it, is in [admin-data-model.md](admin-data-model.md#hash-chaining-what-it-proves-and-what-it-does-not).
+**Tamper-evident means the hash chain, not a slogan.** At `standard` and `regulated` the release gate requires `crossCutting.audit.tamperProtected`. At `internal` it may instead be recorded as not applicable with a reason, as [verification.md](verification.md#profiles-and-the-gate-matrix) describes for the cross-cutting flags; the audit table still stays append-only to the application role, because that costs a grant, not a chain. Wherever `tamperProtected` is claimed, it is implemented as the reference schema does. `audit_event` carries `chain_id`, `chain_seq`, `prev_hash`, `row_hash` and `hash_algorithm`; the `audit_event_chain_link` trigger assigns them, so writers never supply them; and `verify_audit_chain()` recomputes every row and lists gaps, broken links, edited rows and payload-hash mismatches (empty output means internally consistent). Append-only permissions prevent tampering, the chain detects it, and only a head hash anchored outside the database keeps detection meaningful against an attacker with write access. Run the verifier on a schedule and after every restore, and cite its output and the anchor's location in `crossCutting.audit.evidence`. What the chain proves and does not prove, and how to anchor it, is in [admin-data-model.md](admin-data-model.md#hash-chaining-what-it-proves-and-what-it-does-not).
 
 ## Impersonation and support access
 

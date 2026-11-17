@@ -8,15 +8,16 @@
 4. Slice ordering after the skeleton
 5. Reading the repository for operational pain
 6. Definition of ready and definition of done
-7. Parallel and serial work
-8. Demo-safe and release-safe milestones
-9. Anti-sequences
+7. Repairing from an audit
+8. Parallel and serial work
+9. Demo-safe and release-safe milestones
+10. Anti-sequences
 
 ## Order before scaffolding
 
 Settle the adopt-or-build question first ([buy-vs-build.md](buy-vs-build.md)). A framework changes who writes the code, not the order in which the layers must exist.
 
-Then commit the order to the manifest before writing feature code. The build order is a set of `decisions[]` entries with an explicit sequence, not a preference held in conversation. In concurrent operation it is the only thing preventing two agents from independently choosing a different first slice.
+Then commit the order to the manifest before writing feature code, as one decision with the id `dec.build-order` and `kind: design`. Its `decision` lists the slices in sequence, each named by the capability ids it covers; its `evidence` is `docs/admin-build-order.md`, a table with one row per slice giving its capability ids, the paths it owns, and the shared paths it must take its turn on. When the order changes, `set` the same decision and edit the same table, so every agent always reads one current order under one id; git keeps the history. The order is a manifest record, not a preference held in conversation: in concurrent operation it is the only thing preventing two agents from independently choosing a different first slice.
 
 The `architect` role owns the order and revises it when evidence changes. See [multi-agent.md](multi-agent.md).
 
@@ -33,7 +34,7 @@ Build one thin path through every layer before building any second path.
 | 5 | One low-risk command end to end | Policy call, validation, transaction boundary, audit emission, truthful result, recovery path, tests | The command contract — error taxonomy, idempotency, confirmation, conflict handling — is invented separately by every slice |
 | 6 | Fan out | Everything else | — |
 
-Each step must be visible in the manifest before the next begins. Steps 4 and 5 must each reach `status: implemented` with non-empty `evidence[]`. A spike that is deleted afterward does not count.
+Each step must be visible in the manifest before the next begins, which means each is a capability, not a note. Model steps 1 to 3 as capabilities on the control-plane entities of [admin-data-model.md](admin-data-model.md), for example `admin-actor.sign-in` and `admin-actor.revoke-session` for step 1, `admin-actor.grant-role` for step 2, and `audit-event.list`, the query that reads events back, for step 3; add your own where the platform's identity or policy needs more. A step is done when its capabilities, like the step 4 list and the step 5 command, reach `status: implemented` with non-empty `evidence[]`. That is what "spine dependencies are `implemented`" in [multi-agent.md](multi-agent.md) checks. The `crossCutting` sections still belong to the security pass to fill; the capabilities record what was built. A spike that is deleted afterward does not count.
 
 The finished skeleton traces end to end:
 
@@ -159,6 +160,15 @@ Use `py -3` or `python3` if `python` is not on PATH.
 
 Update the manifest at the end of each slice, never in a batch at the end of the day. A slice that is done but unrecorded is indistinguishable from one never started, and under concurrency it will be started again by someone else.
 
+## Repairing from an audit
+
+An audit leaves the console modeled as found: capabilities at `discovered`, their implementation fields recording what the code uses, and each finding a `gaps[]` entry. A repair fixes chosen gaps through the same slices as a build, without pretending the repair agent wrote the rest.
+
+1. **Choose and schedule.** The architect pass (or the single agent, acting as architect) picks the gaps this repair closes, moves each capability they target from `discovered` to `planned` with `set`, and records the order as `dec.build-order`. `planned` is the implementer's entry condition, and only the architect moves capabilities there.
+2. **Claim and fix.** The implementer claims each capability with `claim --role implementer`, which stamps it as `implementedBy`. For pre-existing code that stamp is unavoidable and covers only the fix, so record the rest of the history in a decision with `kind: other`, `status: assumed`, `appliesTo` naming the capability, and a `decision` that says what was there before and what this repair changed, citing the gap id. It stays `assumed` until the owner confirms it with the other decisions. The implementer then fills any implementation field the audit left empty from the code, and sets the gap `fixed` with evidence.
+3. **Review the whole capability.** A reviewer that did not implement the fix reads all of it, old code included, since the audit only found what it looked for. qa then sets `reviewedBy` and `reviewStatus` as for new work, and a fresh agent of the role that filed the gap confirms the fix or reopens it.
+4. **Know when it is done.** The repair is done when every chosen gap is `fixed` and re-reviewed, each target capability is `implemented` and `reviewed`, `validate --phase plan` exits 0, and `validate --phase release` reports no finding whose path names a repaired capability. The release check as a whole exits 0 only once no capability is left at `discovered` (`release-status-unresolved`), so a partial repair does not declare a release: report per gap what was fixed and what remains, and list the capabilities still at `discovered`.
+
 ## Parallel and serial work
 
 Coordination runs through the manifest and lock files. See [multi-agent.md](multi-agent.md). Claim before touching:
@@ -204,7 +214,7 @@ The agent that implements a capability may not be the agent that reviews it. Sch
 | Audit | Event written | Event written, queried back, and asserted in a test |
 | Screen states | Populated and loading | All applicable states from Phase 5 step 8 |
 | Concurrency and idempotency | Not exercised | Asserted for every mutating capability |
-| Accessibility and performance | Not measured | Gates passed or `not-applicable` with rationale |
+| Accessibility and performance | Not measured | Gates `passed`; `not-applicable` only at `internal`, with a confirmed `not-applicable` decision naming the gate |
 | Evidence | Optional | Paths exist, are non-empty, and reference the capability |
 | `decisions[]` | May be `assumed` | `confirmed` at the levels the profile requires |
 | Validator phase | `--phase plan` | `--phase release` |

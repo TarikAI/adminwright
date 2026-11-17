@@ -19,7 +19,7 @@ Order of use: (1) common feature families, what nearly every console needs; (2) 
 
 Confirm or reject each candidate against the evidence hierarchy in [discovery.md](discovery.md). Record every candidate in the manifest with a `status` of `discovered`, `planned`, `in-progress`, `implemented`, `blocked`, `deferred`, or `not-applicable`, plus a `rationale`. A rejected candidate with a written reason is a result. An unexamined candidate is a gap.
 
-A `not-applicable` candidate needs only its `id`, `outcome`, `kind`, `status` and `rationale`; the implementation checks skip it (a command, job or export must also be named by a confirmed decision, so it cannot be a deferred capability relabelled). An `implemented` capability must fill the fields in the table in [verification.md](verification.md#capability-fields-the-validator-requires) from real code: `kind`, `risk`, `entityStates`, `surface`, `uiRoutes` or `entrypoints`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `safeguards`, `dataBinding`, `idempotency`, `concurrency`, `recovery`, `tests`, `policyTests`, `evidence`. If a catalog entry cannot be expressed with those fields filled from real code, it is not yet a capability.
+A `not-applicable` candidate needs only its `id`, `outcome`, `kind`, `status` and `rationale`; the implementation checks skip it (a command, job or export must also be named by a confirmed decision, so it cannot be a deferred capability relabelled). An `implemented` capability fills, from real code, the fields that the table in [verification.md](verification.md#capability-fields-the-validator-requires) requires for its kind, risk and surface. A field the table does not require for that capability stays empty rather than holding an invented value: a query has no `idempotency` to declare, and a low-risk command may have no `recovery` beyond the next command. If a catalog entry cannot be expressed with those fields filled from real code, it is not yet a capability.
 
 ## Common feature families
 
@@ -345,35 +345,21 @@ Exclude or defer when:
 
 ## The completeness test
 
-Apply this to every important problem the platform can have, including the exceptions and failures, not only the intended paths:
+The test itself, its seven steps and its binding constraint, is in [verification.md](verification.md#the-completeness-test). Apply it to every important problem the platform can have, including the exceptions and failures, not only the intended paths. If any step fails for a major workflow or exception, the console is incomplete regardless of how many pages exist.
 
-```text
-Can the correct administrator
-  detect the problem,
-  find the affected record,
-  understand its state and history,
-  take the permitted action,
-  verify the result,
-  recover from a mistake,
-  and prove who did what
-without an engineer touching the database?
-```
+Each step demands a specific capability:
 
-If the answer is no for any major workflow or exception, the console is incomplete regardless of how many pages exist.
-
-Each clause demands a specific capability:
-
-| Clause | Requires |
+| Step | Requires |
 |---|---|
 | Detect | A queue, alert, report, or health surface that surfaces the problem without someone knowing to look |
 | Find | Search and filters keyed on the identifier the operator actually holds |
 | Understand | A detail view with current state, transition history, related records, and notes |
-| Take the action | A command capability with server-side authorization and the safeguards its risk requires |
+| Act | A command capability with server-side authorization and the safeguards its risk requires |
 | Verify | Observable post-action state, job outcome, and provider or downstream reference |
 | Recover | Undo, restore, compensating command, or a documented and permitted recovery path |
 | Prove | Audit with actor, effective identity, reason, before and after values, and correlation IDs |
 
-Run the test per problem, not per page. Record every failing clause as an entry in `gaps[]` with a severity, and let it drive the slice order in [build-order.md](build-order.md).
+Run the test per problem, not per page. Record every failing step as an entry in `gaps[]` with a severity, and let it drive the slice order in [build-order.md](build-order.md).
 
 ## Anti-patterns
 
