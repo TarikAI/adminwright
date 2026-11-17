@@ -151,14 +151,16 @@
           "authorizationPolicies": [
             "policy/alpha.close"
           ],
-          "auditEvents": [],
+          "auditEvents": [
+            ""
+          ],
           "safeguards": [],
           "dataBinding": "postgres:alpha via AlphaService.close",
           "tests": [
             "tests/alpha.spec.ts"
           ],
           "evidence": [
-            "evidence/build.log"
+            "evidence/alpha-close-e2e.log"
           ],
           "owner": "impl",
           "implementedBy": "impl",
@@ -551,7 +553,10 @@
       "capturesActorTargetReasonResult": false,
       "capturesSafeBeforeAfter": false,
       "tamperProtected": false,
-      "evidence": []
+      "evidence": [],
+      "notApplicable": {
+        "tamperProtected": "three operators; no hash chain yet"
+      }
     },
     "safety": {
       "riskClassifiedActions": false,
@@ -657,6 +662,17 @@
       "appliesTo": [
         "*"
       ]
+    },
+    {
+      "id": "dec.legacy",
+      "kind": "not-applicable",
+      "decision": "No legacy purge",
+      "reason": "the vendor does it",
+      "evidence": [],
+      "status": "confirmed",
+      "appliesTo": [
+        "gamma.legacy"
+      ]
     }
   ],
   "gaps": [
@@ -674,6 +690,22 @@
       "description": "Accepted without saying why",
       "status": "accepted",
       "rationale": "",
+      "evidence": []
+    },
+    {
+      "id": "gap.closed",
+      "severity": "high",
+      "description": "Export ignores the row scope",
+      "status": "fixed",
+      "rationale": "",
+      "evidence": []
+    },
+    {
+      "id": "gap.waved",
+      "severity": "critical",
+      "description": "Audit rows can be deleted",
+      "status": "accepted",
+      "rationale": "ship it",
       "evidence": []
     }
   ],
