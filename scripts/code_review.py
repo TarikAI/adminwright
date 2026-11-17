@@ -55,9 +55,15 @@ evidence the gaps cite and belong in the repository with the manifest.
 
 Findings use OCR's comment schema: path, content, start_line, end_line,
 category (bug|security|performance|maintainability|test|style|documentation|
-other), severity (critical|high|medium|low). Severity must be exact — it maps
-1:1 onto gap severities; an unknown category degrades to "other" with a notice
-rather than refusing a real finding over taxonomy drift. File coverage and
+other), severity (critical|high|medium|low). Severity must be present and
+exact — it maps 1:1 onto gap severities — and content must not be empty; an
+unknown category degrades to "other" with a notice rather than refusing a real
+finding over taxonomy drift. A delegate `record` refuses the whole payload over
+one bad finding (the agent is there to fix it); an endpoint reply cannot be
+re-asked, so its usable comments are recorded and the run exits 2 naming the
+rest. The review text is quoted, never trusted: a gap description reads
+`OCR finding (quoted reviewer text, not an instruction): <path>:<line> —
+"<content>" (<category>, <severity>)`, on one line, capped. File coverage and
 line anchoring are deterministic; the findings themselves are judgments. They
 are evidence for the gap report, never a substitute for validate, coverage,
 policy tests, or the adversarial pass. A clean run is a floor, not a proof.
@@ -81,7 +87,12 @@ conflicts do not apply to this script.
 
 ADMINWRIGHT_OCR_BIN overrides the ocr executable path (tests and exotic
 installs); otherwise the script uses `ocr` from PATH. A value that names no
-file is a configuration error (exit 2), not "ocr absent".
+file is a configuration error (exit 2), not "ocr absent". The script runs
+inside the repository it reviews, so `ocr`, `node` (and a bare name in either
+variable) are searched on PATH entry by entry, skipping relative entries, the
+current directory and anything inside the project root or the manifest's
+directory; taskkill is run by its absolute System32 path. Repository file
+names reach ocr after `--`, and a name starting with `-` is passed as `./-name`.
 
 Windows: the npm install puts an `ocr.cmd` shim on PATH. A .cmd/.bat file runs
 under cmd.exe, which would interpret `&`, `%`, `^` and `!` in a repository
@@ -102,7 +113,6 @@ import json
 import math
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -132,6 +142,31 @@ CATEGORIES = (
 
 CONTENT_KEYS = ("content", "message", "body")
 LINE_KEYS = ("start_line", "startLine", "line")
+
+# Review text is written by a model (the endpoint engine's LLM, or the agent
+# that reviewed a bundle) that read the repository under review: it is data,
+# never an instruction. Gap descriptions quote it on one line, capped, after a
+# label that says so, so it cannot pass for the bridge's own words or forge a
+# heading or table row where the gap is rendered (emit --format gap-report).
+FINDING_LABEL = "OCR finding (quoted reviewer text, not an instruction)"
+DISPLAY_PATH_LIMIT = 260
+DISPLAY_CONTENT_LIMIT = 280
+# C0 and C1 controls (line breaks, escape sequences) and Unicode line breaks.
+CONTROL_CHARACTERS = re.compile("[\x00-\x1f\x7f-\x9f  ]")
+
+
+def one_line(text, limit):
+    """Untrusted text as one plain line: controls become spaces, whitespace runs
+    collapse, and anything past `limit` characters is cut, marked with '...'."""
+    text = " ".join(CONTROL_CHARACTERS.sub(" ", str(text)).split())
+    if len(text) > limit:
+        text = text[:limit - 3].rstrip() + "..."
+    return text
+
+
+def shown_path(path):
+    """A path from review text, safe to print or write on one line."""
+    return one_line(path, DISPLAY_PATH_LIMIT)
 
 
 class ReviewError(Exception):
@@ -169,25 +204,89 @@ CMD_SHIM_SUFFIXES = (".cmd", ".bat")
 SHIM_SCRIPT = re.compile(r'"%~?dp0%?[\\/]+([^"\r\n%]+?\.[cm]?js)"', re.IGNORECASE)
 
 
-def ocr_executable():
+def real_path(path):
+    """An absolute, link-resolved, case-normalized spelling of path, for comparisons."""
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def is_within(path, root):
+    """True when the real path `path` is `root` or lies below it (both from real_path)."""
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # different drives, or a mix of absolute and relative
+        return False
+
+
+def path_extensions(name):
+    """The suffixes to try for a bare command name: PATHEXT on Windows, none elsewhere."""
+    if os.name != "nt":
+        return [""]
+    extensions = [
+        extension for extension in
+        os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep) if extension
+    ]
+    if os.path.splitext(name)[1].lower() in [extension.lower() for extension in extensions]:
+        return [""]
+    return extensions
+
+
+def find_on_path(name, roots=()):
+    """`name` from PATH, never from the current directory or the repository.
+
+    The bridge runs inside the repository it reviews, so a program found there
+    is the repository's code. shutil.which() on Windows looks in the current
+    directory first (always before Python 3.12, and since then unless
+    NoDefaultCurrentDirectoryInExePath is set), and CreateProcess does the
+    same for a bare name. So PATH is searched here entry by entry, and an entry
+    is skipped when it is relative (it would resolve against the current
+    directory), when it is the current directory, or when it resolves inside
+    any of `roots` (the project root and the manifest's directory).
+    """
+    try:
+        here = real_path(os.getcwd())
+    except OSError:
+        here = None
+    untrusted = [real_path(root) for root in roots if root]
+    for entry in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry or not os.path.isabs(entry):
+            continue
+        resolved = real_path(entry)
+        if resolved == here or any(is_within(resolved, root) for root in untrusted):
+            continue
+        for extension in path_extensions(name):
+            candidate = os.path.join(entry, name + extension)
+            if os.path.isfile(candidate) and (os.name == "nt" or os.access(candidate, os.X_OK)):
+                return candidate
+    return None
+
+
+def names_a_path(value):
+    """Whether a configured executable is a path (used as given) or a bare name (searched)."""
+    return os.path.isabs(value) or os.sep in value or bool(os.altsep and os.altsep in value)
+
+
+def ocr_executable(roots=()):
     """The ocr command to run, or None when it is not installed.
 
     An ADMINWRIGHT_OCR_BIN that names no file is a misconfiguration and raises;
     it must not degrade to the "ocr is not on PATH" notice (exit 0), which
-    would hide the typo behind a pass that reviewed nothing.
+    would hide the typo behind a pass that reviewed nothing. A bare name, in
+    the variable or the default `ocr`, is searched on PATH by find_on_path,
+    never in the current directory or the repository (`roots`).
     """
     override = os.environ.get(ENV_OCR_BIN, "").strip()
     if override:
-        if Path(override).is_file():
+        if names_a_path(override) and Path(override).is_file():
             return override
-        found = shutil.which(override)  # a bare command name that is on PATH
+        found = None if names_a_path(override) else find_on_path(override, roots)
         if found:
             return found
         raise ReviewError(
             ENV_OCR_BIN + " is set to '" + override + "' but no such executable exists"
             " — fix the path, or unset it to use `ocr` from PATH"
         )
-    return shutil.which("ocr")
+    return find_on_path("ocr", roots)
 
 
 # The npm package's native binary. There is no ocr.exe: npm installs ocr.cmd,
@@ -209,15 +308,19 @@ def refuse_cmd_shim(shim, reason):
     )
 
 
-def find_node(shim_dir):
+def find_node(shim_dir, roots=()):
     """node for a resolved npm shim: override, the shim's own node.exe, then PATH.
 
     That is the order the npm shim itself uses (plus the override). Returns
-    None when node cannot be found; a wrong ADMINWRIGHT_NODE_BIN raises.
+    None when node cannot be found; a wrong ADMINWRIGHT_NODE_BIN raises. PATH is
+    searched by find_on_path: never the current directory or the repository.
     """
     override = os.environ.get(ENV_NODE_BIN, "").strip()
     if override:
-        found = override if Path(override).is_file() else shutil.which(override)
+        if names_a_path(override):
+            found = override if Path(override).is_file() else None
+        else:
+            found = find_on_path(override, roots)
         if not found:
             raise ReviewError(
                 ENV_NODE_BIN + " is set to '" + override + "' but no such executable exists"
@@ -226,13 +329,13 @@ def find_node(shim_dir):
     beside = Path(shim_dir) / "node.exe"
     if beside.is_file():
         return str(beside)
-    found = shutil.which("node")
+    found = find_on_path("node", roots)
     if found and Path(found).suffix.lower() not in CMD_SHIM_SUFFIXES:
         return found
     return None
 
 
-def resolve_cmd_shim(shim):
+def resolve_cmd_shim(shim, roots=()):
     """[node, ocr.js] for an npm-generated ocr.cmd; ReviewError when it is not one.
 
     The shim only exists to launch `node ocr.js %*`. Doing that ourselves keeps
@@ -256,26 +359,26 @@ def resolve_cmd_shim(shim):
         )
     if not script.is_file():
         raise refuse_cmd_shim(shim, "Its entry point '" + str(script) + "' does not exist.")
-    node = find_node(shim.parent)
+    node = find_node(shim.parent, roots)
     if not node:
         raise refuse_cmd_shim(shim, "`node` was not found next to it or on PATH.")
     return [node, str(script)]
 
 
-def command_prefix(executable):
+def command_prefix(executable, roots=()):
     """The argv prefix that runs ocr with no shell between us and its arguments."""
     if os.name != "nt":
         return [executable]
     suffix = Path(executable).suffix.lower()
     if suffix in CMD_SHIM_SUFFIXES:
-        return resolve_cmd_shim(executable)
+        return resolve_cmd_shim(executable, roots)
     if not suffix:
         # npm also drops an extensionless POSIX-shell shim beside ocr.cmd;
         # Windows cannot execute that one, so prefer its runnable sibling.
         for extension in (".cmd", ".exe"):
             sibling = Path(executable + extension)
             if sibling.is_file():
-                return command_prefix(str(sibling))
+                return command_prefix(str(sibling), roots)
     return [executable]
 
 
@@ -312,6 +415,19 @@ def ocr_timeout(args=None):
     return value
 
 
+def taskkill_path():
+    """Windows' own taskkill.exe, by absolute path.
+
+    A bare `taskkill` is looked up in the current directory first, which is
+    the repository under review; a planted taskkill.exe there would run on
+    every timeout or Ctrl-C.
+    """
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir") or ""
+    if not os.path.isabs(system_root):
+        system_root = "C:\\Windows"
+    return os.path.join(system_root, "System32", "taskkill.exe")
+
+
 def kill_tree(proc):
     """Stop proc and everything it started.
 
@@ -322,7 +438,7 @@ def kill_tree(proc):
     try:
         if os.name == "nt":
             subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True
+                [taskkill_path(), "/F", "/T", "/PID", str(proc.pid)], capture_output=True
             )
         else:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -368,20 +484,30 @@ def run_bounded(command, env, timeout):
     return subprocess.CompletedProcess(command, proc.returncode, stdout, errors)
 
 
-def run_ocr(arguments, repo=None, trailing=None, timeout=None):
+def positional(path):
+    """A repository path as a positional argument that no parser can take for an option."""
+    text = str(path)
+    return "./" + text if text.startswith("-") else text
+
+
+def run_ocr(arguments, repo=None, trailing=None, timeout=None, roots=()):
     """Build the ocr command: flags first, the positional file list last.
 
     Options placed after a greedy positional list are swallowed as positionals
-    by some CLI parsers, so --repo must never trail the file list.
+    by some CLI parsers, so --repo must never trail the file list. The file
+    names come from the repository under review, so they follow `--`: a file
+    named `--rule=evil.json` must stay a file, not replace the admin-console
+    rules. A name that starts with `-` is also written `./-name`, in case a
+    parser ignores the separator.
     """
-    executable = ocr_executable()
+    executable = ocr_executable(roots)
     if not executable:
         raise ReviewError("the ocr CLI is not on PATH")
-    command = command_prefix(executable) + [str(a) for a in arguments]
+    command = command_prefix(executable, roots) + [str(a) for a in arguments]
     if repo:
         command += ["--repo", str(repo)]
     if trailing:
-        command += [str(a) for a in trailing]
+        command += ["--"] + [positional(a) for a in trailing]
     env = dict(os.environ)
     env["OCR_NO_UPDATE"] = "1"
     if timeout is None:
@@ -413,7 +539,7 @@ def project_root_of(manifest):
     declared = ".."
     try:
         data = json.loads(manifest.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         data = None
     if isinstance(data, dict):
         value = data.get("projectRoot")
@@ -435,10 +561,19 @@ def repo_for(args, manifest):
     return root
 
 
+def untrusted_roots(args, manifest):
+    """The directories under review: never a place to find a program in (find_on_path)."""
+    roots = [project_root_of(manifest), Path(os.path.abspath(str(Path(manifest).parent)))]
+    if getattr(args, "project_root", None):
+        roots.append(Path(os.path.abspath(str(args.project_root))))
+    return roots
+
+
 def parse_json(text, what):
     try:
         return json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # RecursionError: a reply nested deeper than the parser's stack.
         raise ReviewError("could not parse " + what + " output as JSON")
 
 
@@ -559,13 +694,17 @@ def find_findings(node):
     Prefer a list under a known key (comments/findings/results) so a document
     that also echoes rule groups or file lists cannot win by appearing first;
     otherwise return the first list that satisfies the shape contract. A
-    known key that is empty or null (a failed ocr run says `"comments": null`)
-    means "no findings": the search stops there rather than mistaking some
-    other list of path-bearing objects for review comments.
+    non-empty list under a known key is the findings list whatever its items
+    look like: normalize_finding judges each item, so one comment without a
+    usable path (a PR-level summary, say) cannot make the whole list, and
+    every real finding in it, vanish into "0 finding(s)". A known key that is
+    empty or null (a failed ocr run says `"comments": null`) means "no
+    findings": the search stops there rather than mistaking some other list
+    of path-bearing objects for review comments.
     """
     if isinstance(node, dict):
         for key in FINDINGS_KEYS:
-            if is_findings_list(node.get(key)):
+            if isinstance(node.get(key), list) and node[key]:
                 return node[key]
         if any(key in node and node[key] in (None, []) for key in FINDINGS_KEYS):
             return []
@@ -583,6 +722,16 @@ def find_findings(node):
     return None
 
 
+def malformed_findings_key(document):
+    """The known findings key of a reply that holds neither a list nor null, else None."""
+    if not isinstance(document, dict):
+        return None
+    for key in FINDINGS_KEYS:
+        if key in document and document[key] is not None and not isinstance(document[key], list):
+            return key
+    return None
+
+
 def line_number(value):
     """An OCR line anchor as an int, or None when there isn't one.
 
@@ -594,8 +743,12 @@ def line_number(value):
         return None
     if isinstance(value, int):
         return value if value > 0 else None
-    if isinstance(value, str) and value.strip().isdigit():
-        number = int(value.strip())
+    # isdecimal, not isdigit: "²" is a digit that int() refuses.
+    if isinstance(value, str) and value.strip().isdecimal():
+        try:
+            number = int(value.strip())
+        except ValueError:
+            return None
         return number if number > 0 else None
     return None
 
@@ -605,34 +758,49 @@ def normalize_finding(item):
 
     The payload is authored by an LLM agent in delegate mode, so malformed
     input is the expected failure mode and must surface as ReviewError (exit
-    2), never as a crash. Severity must be exact — it maps 1:1 onto gap
-    severities; an unknown category degrades to "other" with a visible notice.
+    2), never as a crash. Severity must be present and exact — it maps 1:1
+    onto gap severities, and a default would quietly downgrade a critical
+    finding; a finding must say something (content, message or body). An
+    unknown category degrades to "other" with a visible notice.
+
+    The path and content are kept as written (the fingerprint and the bundle
+    check compare them exactly); persist_findings makes them safe to show.
     """
     if not isinstance(item, dict):
         raise ReviewError("each finding must be a JSON object with a path")
     path = item.get("path")
     if not isinstance(path, str) or not path.strip():
         raise ReviewError("a finding is missing its 'path' string")
+    shown = shown_path(path)
     content = ""
     for key in CONTENT_KEYS:
         if item.get(key):
             content = str(item[key])
             break
+    if not one_line(content, DISPLAY_CONTENT_LIMIT):
+        raise ReviewError(
+            "the finding for '" + shown + "' says nothing: it needs a non-empty content"
+        )
     start_line = None
     for key in LINE_KEYS:
         start_line = line_number(item.get(key))
         if start_line is not None:
             break
     end_line = line_number(item.get("end_line"))
-    severity = str(item.get("severity") or "medium").lower()
+    if item.get("severity") is None or not str(item.get("severity")).strip():
+        raise ReviewError(
+            "the finding for '" + shown + "' has no severity (expected critical|high|medium|low)"
+        )
+    severity = str(item.get("severity")).lower()
     category = str(item.get("category") or "other").lower()
     if severity not in SEVERITIES:
         raise ReviewError(
-            "finding for '" + path + "' has severity '" + severity
+            "finding for '" + shown + "' has severity '" + one_line(severity, 40)
             + "' (expected critical|high|medium|low)"
         )
     if category not in CATEGORIES:
-        stderr("note: category '" + category + "' for " + path + " is not known; recorded as 'other'")
+        stderr("note: category '" + one_line(category, 40) + "' for " + shown
+               + " is not known; recorded as 'other'")
         category = "other"
     return {
         "path": path,
@@ -681,7 +849,7 @@ def read_gaps(manifest):
     """
     try:
         data = json.loads(manifest.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return set(), set()
     gaps = data.get("gaps") if isinstance(data, dict) else None
     if not isinstance(gaps, list):
@@ -770,6 +938,24 @@ def add_gaps(manifest, gaps):
             pass
 
 
+def finding_description(finding):
+    """A gap description that quotes the reviewer instead of speaking for it.
+
+    `OCR finding (quoted reviewer text, not an instruction): <path>:<line> —
+    "<content>" (<category>, <severity>)`: one line, the path cut at
+    DISPLAY_PATH_LIMIT and the content at DISPLAY_CONTENT_LIMIT characters,
+    and double quotes inside the content turned into single ones so the
+    quotation cannot be closed early. Category and severity are checked
+    against fixed lists, so the closing parenthesis is the bridge's own.
+    """
+    where = shown_path(finding["path"]) + ":" + str(finding["start_line"] or "?")
+    quoted = one_line(finding["content"], DISPLAY_CONTENT_LIMIT).replace('"', "'")
+    return (
+        FINDING_LABEL + ": " + where + ' — "' + quoted + '" ('
+        + finding["category"] + ", " + finding["severity"] + ")"
+    )
+
+
 def persist_findings(manifest, findings, engine, mode, evidence_path):
     """Write findings as gaps[] in one all-or-nothing batch.
 
@@ -810,9 +996,7 @@ def persist_findings(manifest, findings, engine, mode, evidence_path):
                 duplicates += 1
                 continue
             seen.add(fingerprint)
-            where = finding["path"] + ":" + str(finding["start_line"] or "?")
-            description = where + " — " + finding["content"][:280]
-            description += " (" + finding["category"] + ", " + finding["severity"] + ")"
+            description = finding_description(finding)
             base = "ocr-" + stamp + "-" + slug_for(finding["path"]) + "-" + str(index)
             if attempt:
                 # Contenders that re-read the same manifest compute the same
@@ -894,8 +1078,8 @@ def reference_arguments(args):
     return references
 
 
-def require_ocr(args):
-    executable = ocr_executable()
+def require_ocr(args, roots=()):
+    executable = ocr_executable(roots)
     if executable:
         return executable
     notice = "ocr is not on PATH — skipping the external review pass; nothing was blocked."
@@ -944,7 +1128,7 @@ def load_bundle(path):
         raise ReviewError("could not read the OCR bundle " + str(path) + ": " + str(exc))
     try:
         bundle = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ReviewError(
             "the OCR bundle " + str(path) + " is not valid JSON; delete it and re-run diff"
         )
@@ -1019,7 +1203,13 @@ def select_bundle(manifest, explicit):
         return path, bundle
     live = []
     for path in bundle_paths(manifest):
-        bundle = load_bundle(path)
+        try:
+            bundle = load_bundle(path)
+        except ReviewError as exc:
+            # Someone else's truncated or hand-edited bundle must not block
+            # every record that does not name one; --bundle still refuses it.
+            stderr("note: ignoring an unreadable review bundle: " + str(exc))
+            continue
         if bundle.get("closed"):
             continue
         try:
@@ -1069,7 +1259,8 @@ def cmd_diff(args):
     manifest = Path(args.manifest)
     if not manifest.exists():
         raise ReviewError("manifest not found: " + str(manifest))
-    if require_ocr(args) is None:
+    roots = untrusted_roots(args, manifest)
+    if require_ocr(args, roots) is None:
         return EXIT_OK
     references = reference_arguments(args)
     rules = rule_arguments(args)
@@ -1078,7 +1269,8 @@ def cmd_diff(args):
 
     if args.engine == "delegate":
         preview = run_ocr(
-            ["delegate", "preview", "--format", "json"] + references + rules, repo, timeout=timeout
+            ["delegate", "preview", "--format", "json"] + references + rules, repo,
+            timeout=timeout, roots=roots,
         )
         if preview.returncode != 0:
             stderr((preview.stderr or "").strip() or "ocr delegate preview failed")
@@ -1097,6 +1289,7 @@ def cmd_diff(args):
             repo,
             trailing=[f["path"] for f in files],
             timeout=timeout,
+            roots=roots,
         )
         if rule_out.returncode != 0:
             stderr((rule_out.stderr or "").strip() or "ocr delegate rule failed")
@@ -1105,6 +1298,13 @@ def cmd_diff(args):
         if not isinstance(rule_data, dict):
             raise ReviewError("ocr delegate rule did not return a JSON object")
         groups = rule_data.get("groups", [])
+        # ocr echoes a `./-name` positional (see positional) as written; the
+        # bundle names files as preview reported them.
+        renamed = {positional(f["path"]): f["path"] for f in files if f["path"].startswith("-")}
+        for group in groups if renamed and isinstance(groups, list) else []:
+            if isinstance(group, dict) and isinstance(group.get("files"), list):
+                group["files"] = [renamed.get(name, name) if isinstance(name, str) else name
+                                  for name in group["files"]]
         refs = {}
         for key, value in (("from", args.from_ref), ("to", args.to_ref), ("commit", args.commit)):
             if value:
@@ -1137,6 +1337,7 @@ def cmd_diff(args):
         ["review", "--audience", "agent", "--format", "json"] + references + rules,
         repo,
         timeout=timeout,
+        roots=roots,
     )
     return persist_endpoint_result(manifest, review, "diff")
 
@@ -1145,14 +1346,15 @@ def cmd_scan(args):
     manifest = Path(args.manifest)
     if not manifest.exists():
         raise ReviewError("manifest not found: " + str(manifest))
-    if require_ocr(args) is None:
+    roots = untrusted_roots(args, manifest)
+    if require_ocr(args, roots) is None:
         return EXIT_OK
     command = ["scan", "--audience", "agent", "--format", "json"]
     if args.path:
         command += ["--path", args.path]
     command += rule_arguments(args)
     repo = repo_for(args, manifest)
-    scan = run_ocr(command, repo, timeout=ocr_timeout(args))
+    scan = run_ocr(command, repo, timeout=ocr_timeout(args), roots=roots)
     return persist_endpoint_result(manifest, scan, "scan")
 
 
@@ -1389,21 +1591,23 @@ class Verdict(object):
         self.classes = set()  # ocr's failure classifications
         self.selected = None  # files ocr selected, when the manifest says
         self.notes = []  # other ocr warnings
+        self.stateless = False  # the reply named no outcome at all
 
 
 def endpoint_verdict(document, returncode):
     """Classify an ocr review/scan reply.
 
     outcome:
-      complete     every selected file was reviewed (a reply that states no
-                   outcome at all counts too): record the findings.
+      complete     every selected file was reviewed: record the findings.
       partial      some files could not be reviewed: record the findings that
                    exist, list the others, exit 2.
       skipped      ocr selected nothing to review: exit 0.
-      unconfirmed  a state this bridge does not know, with exit 0: ocr's exit
-                   code says the coverage is usable, so the findings are
-                   recorded, but completeness cannot be confirmed: exit 2.
-      failed       a non-zero exit, a failed state, or no JSON at all: record
+      unconfirmed  a state this bridge does not know, or no state at all, with
+                   exit 0: the findings are recorded, but completeness cannot
+                   be confirmed: exit 2.
+      failed       a non-zero exit, a failed state, no JSON at all, a reply
+                   that is not a JSON object, or a findings key (comments,
+                   findings, results) holding neither a list nor null: record
                    nothing, exit 2.
 
     The previous check accepted only "completed", a word ocr never uses, and
@@ -1413,7 +1617,7 @@ def endpoint_verdict(document, returncode):
     ranked = []
     for field, state in reported_states(document):
         category = state_category(state)
-        label = field + " '" + state + "'"
+        label = field + " '" + one_line(state, 80) + "'"
         ranked.append((STATE_RANK[category], category, label))
         if category == "failed":
             verdict.reasons.append(label)
@@ -1421,19 +1625,72 @@ def endpoint_verdict(document, returncode):
         verdict.reasons.insert(0, "exit code " + str(returncode))
     elif document is None:
         verdict.reasons.append("no parseable JSON on stdout")
+    elif not isinstance(document, dict):
+        verdict.reasons.append("the reply is a JSON " + json_type(document) + ", not an object")
+    elif malformed_findings_key(document):
+        verdict.reasons.append(
+            "the reply's `" + malformed_findings_key(document) + "` is neither a list nor null"
+        )
     verdict.failed, verdict.unnamed, verdict.classes = failed_files(document)
     verdict.notes = warning_notes(document)
     verdict.selected = selected_count(document)
-    _rank, worst, verdict.state = max(ranked) if ranked else (1, "complete", "")
+    _rank, worst, verdict.state = max(ranked) if ranked else (None, "unstated", "")
     if verdict.reasons:
         verdict.outcome = "failed"
     elif worst == "unknown":
         verdict.outcome = "unconfirmed"
     elif worst == "partial" or verdict.failed or verdict.unnamed:
         verdict.outcome = "partial"
+    elif worst == "unstated":
+        # ocr has stated the outcome since 1.8.5 (and scan always has): a reply
+        # with no `status` and no `terminal_state` comes from something else
+        # (a wrong ADMINWRIGHT_OCR_BIN, a wrapper), and is not a clean review.
+        verdict.outcome = "unconfirmed"
+        verdict.stateless = True
     else:
         verdict.outcome = worst
     return verdict
+
+
+def json_type(value):
+    """The JSON name of a parsed value's type, for messages."""
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    return "null" if value is None else "object"
+
+
+def selected_paths(document):
+    """The paths ocr says it selected for review, or None when the reply does not name them.
+
+    A review's run manifest lists them under coverage.selected; scan has no
+    run manifest, and then nothing can be checked.
+    """
+    for node, is_root in result_nodes(document):
+        selected = None if is_root else node.get("selected")
+        if not isinstance(selected, list):
+            continue
+        paths = set()
+        for entry in selected:
+            path = entry.get("path") if isinstance(entry, dict) else entry
+            if not isinstance(path, str) or not path:
+                return None  # an entry without a path: nothing to check against
+            paths.add(normal_path(path))
+        return paths
+    return None
+
+
+def normal_path(path):
+    """A repository path in one spelling: forward slashes, no leading './'."""
+    path = path.replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
 
 
 def provider_problem(verdict, messages):
@@ -1485,6 +1742,14 @@ def report_partial(verdict, messages):
 
 
 def report_unconfirmed(verdict):
+    if verdict.stateless:
+        stderr(
+            "ERROR: the ocr reply states no outcome (no `status`, no `terminal_state`; ocr"
+            " has sent one since 1.8.5), so this is not a complete review. Is "
+            + ENV_OCR_BIN + " pointing at ocr itself, not a wrapper? Any findings above were"
+            " recorded, but coverage is not confirmed."
+        )
+        return
     stderr(
         "ERROR: ocr reported " + verdict.state + ", a state this bridge does not know (it acts"
         " on complete, partial, failed and skipped, and on scan's success,"
@@ -1513,7 +1778,7 @@ def persist_endpoint_result(manifest, proc, mode):
     if proc.stdout.strip():
         try:
             document = json.loads(proc.stdout)
-        except ValueError:
+        except (ValueError, RecursionError):
             document = None
     verdict = endpoint_verdict(document, proc.returncode)
     messages = tool_messages(document, proc.stderr)
@@ -1528,7 +1793,7 @@ def persist_endpoint_result(manifest, proc, mode):
         "ocr-" + mode + "-" + time.strftime("%Y%m%d-%H%M%S") + "-" + str(os.getpid()) + ".json"
     )
     write_json_atomic(raw, document)
-    findings = [normalize_finding(item) for item in found]
+    findings, rejected = screen_comments(found, selected_paths(document))
     written, duplicates = persist_findings(manifest, findings, "endpoint", mode, raw)
     print(
         "OCR " + mode + ": " + str(written) + " finding(s) recorded as gaps"
@@ -1536,15 +1801,74 @@ def persist_endpoint_result(manifest, proc, mode):
     )
     for note in verdict.notes:
         stderr("note: " + note)
+    incomplete = False
+    if rejected:
+        report_rejected(mode, rejected, len(found), raw)
+        incomplete = True
     if verdict.outcome == "partial":
         report_partial(verdict, messages)
-        return EXIT_USAGE
+        incomplete = True
     if verdict.outcome == "unconfirmed":
         report_unconfirmed(verdict)
+        incomplete = True
+    if incomplete:
         return EXIT_USAGE
     if written or duplicates:
         return EXIT_FINDINGS
     return EXIT_OK
+
+
+def screen_comments(found, selected):
+    """Split an endpoint reply's comments into (findings to record, reasons for the rest).
+
+    Nobody can re-ask the reviewing model, so one comment the bridge cannot
+    use (no path, no severity, nothing said, a file ocr did not select) must
+    not cost the others: each is judged alone, and the caller reports the
+    rejected ones and exits 2. `selected` is the set of paths ocr reviewed, or
+    None when the reply does not list them (scan).
+    """
+    findings = []
+    rejected = []
+    for item in found:
+        try:
+            finding = normalize_finding(item)
+        except ReviewError as exc:
+            rejected.append(str(exc))
+            continue
+        if selected is not None and normal_path(finding["path"]) not in selected:
+            rejected.append(
+                "the finding for '" + shown_path(finding["path"]) + "' names a file ocr did"
+                " not select for this review"
+            )
+            continue
+        findings.append(finding)
+    return findings, rejected
+
+
+def report_rejected(mode, rejected, total, raw):
+    stderr(
+        "ERROR: " + str(len(rejected)) + " of " + str(total) + " comment(s) in the ocr " + mode
+        + " reply could not be recorded, so the review is incomplete:"
+    )
+    for reason in rejected[:FAILED_LISTING_LIMIT]:
+        stderr("  " + reason)
+    if len(rejected) > FAILED_LISTING_LIMIT:
+        stderr("  ... and " + str(len(rejected) - FAILED_LISTING_LIMIT) + " more")
+    stderr(
+        "The other findings were recorded. Every comment, these included, is in " + str(raw)
+        + "; read the unrecorded ones there and file any that matter with `add --kind gap`."
+    )
+
+
+# "Skip it with a concrete reason": " " or "-" used to count, so every file
+# could be skipped for coverage_rate=100%. Words, not a mark: "deleted",
+# "vendored", "generated code" pass; "n/a", "skip", "-" do not.
+SKIP_REASON_MIN_LENGTH = 6
+
+
+def concrete_reason(reason):
+    text = one_line(reason, 1000) if isinstance(reason, str) else ""
+    return len(text) >= SKIP_REASON_MIN_LENGTH and sum(1 for ch in text if ch.isalpha()) >= 3
 
 
 def record_document(bundle_path, bundle, findings, skipped):
@@ -1597,6 +1921,12 @@ def cmd_record(args):
     for item in skipped_raw:
         if not isinstance(item, dict) or not item.get("path") or not item.get("reason"):
             raise ReviewError("every skipped entry needs a path and a reason")
+        if not concrete_reason(item["reason"]):
+            raise ReviewError(
+                "the skip of '" + shown_path(item["path"]) + "' needs a concrete reason (at least "
+                + str(SKIP_REASON_MIN_LENGTH) + " characters, in words), not '"
+                + one_line(item["reason"], 40) + "'"
+            )
         skipped.append({"path": str(item["path"]), "reason": str(item["reason"])})
     covered = {f["path"] for f in findings} | {s["path"] for s in skipped}
 
@@ -1609,13 +1939,14 @@ def cmd_record(args):
         if unknown:
             stderr("ERROR: these paths are not in the review bundle:")
             for path in unknown:
-                stderr("  " + path)
+                stderr("  " + shown_path(path))
             return EXIT_USAGE
         missing = [f for f in required if f["path"] not in covered]
         if missing:
             stderr("ERROR: these bundled files were neither reviewed nor skipped:")
             for f in missing:
-                stderr("  " + f["path"] + " (" + str(f.get("status", "changed")) + ")")
+                stderr("  " + shown_path(f["path"]) + " ("
+                       + one_line(f.get("status", "changed"), 40) + ")")
             return EXIT_USAGE
     else:
         # No `diff` bundle: there is no reviewable-file set to check the
@@ -1678,6 +2009,12 @@ def cmd_record(args):
     # The file to commit with the manifest: the gaps cite it.
     line += "; record=" + str(evidence_path)
     print(line)
+    if skipped_files and not reviewed:
+        # coverage_rate counts a skip as covered; say plainly that nothing was read.
+        stderr(
+            "note: 0 of " + str(len(bundle_files) if bundle_files is not None else skipped_files)
+            + " file(s) reviewed: every file was skipped, so this record is not a review"
+        )
     if written or duplicates:
         return EXIT_FINDINGS
     return EXIT_OK
@@ -1769,6 +2106,11 @@ def main():
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
+    if os.name == "nt":
+        # find_on_path keeps the current directory (the repository under
+        # review) out of our own lookups; this keeps it out of the lookups of
+        # ocr and of everything ocr starts, which inherit the variable.
+        os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
     parser = build_parser()
     args = parser.parse_args()
     try:
@@ -1783,6 +2125,10 @@ def main():
         return EXIT_USAGE
     except KeyboardInterrupt:
         stderr("Interrupted")
+        return EXIT_USAGE
+    except Exception as exc:  # noqa: BLE001 - the exit code is a contract
+        # A traceback exits 1, which callers read as "findings recorded".
+        stderr("ERROR: internal error: " + type(exc).__name__ + ": " + str(exc)[:500])
         return EXIT_USAGE
 
 
