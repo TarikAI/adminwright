@@ -56,30 +56,18 @@ UI, because the list query was correctly scoped — only the command was not.
 
 ## Proposed edit
 
-Target: `references/security-governance.md`, Authorization section.
+Target: `references/security-governance.md`.
 
-Replace:
+Add a `## Bulk authorization` section directly after the Authorization section, holding the
+Rule above: one opening paragraph (authorize per target, not per request, and why a single
+check on the batch is a high-severity defect) and the six bullets, worded as in the Rule.
 
-```text
-- Validate both action permission and object/tenant scope on every request.
-```
+Replaces: nothing. The Authorization bullet "Validate both action permission and
+object/tenant scope on every request." stays as written. It was incomplete for bulk
+commands, not wrong, and the new section is where per-object checks for a batch now live, so
+the rule has one home rather than a long bullet and a table row restating it.
 
-With:
-
-```text
-- Validate both action permission and object/tenant scope on every request, and separately
-  for every object that request touches. A bulk command authorizes each target
-  independently and executes only the permitted partition.
-```
-
-Add one row to the safeguard table in the Privileged actions section:
-
-```text
-| Per-target authorization with denied-count reported | Any multi-select or filter-driven command |
-```
-
-Trims: none required. The existing single-record wording stays correct; it was incomplete,
-not wrong. Net +3 lines, file 177 -> 195, budget 400.
+Trims: none required; the section adds about 19 lines, inside the file's 400-line budget.
 
 Not scoped to a profile, archetype, or stack. Scoped roles exist at every profile, and both
 sightings were on different archetypes and stacks. Scoping this rule to `regulated` would
@@ -106,3 +94,6 @@ have left the two observed defects unguarded.
 - 2026-08-06 consolidation: cited URL re-fetched and resolving. Retained as the worked example
   for this format. The rule is real guidance; the project identifiers and file paths under
   `Evidence` are illustrative.
+- 2026-11-17 consolidation: Proposed edit rewritten to describe the edit that actually landed
+  (a Bulk authorization section, not a changed bullet and a safeguard-table row), so the
+  worked example shows a Proposed edit that matches its target file.

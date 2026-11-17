@@ -82,7 +82,7 @@ The emitter derives these, and only these, from the manifest:
 | `integrations[]` | One row per integration: provider timeout, duplicate delivery, and reconciliation mismatch |
 | `workQueues[]` | One row per queue: a backlog past its SLA, an empty queue, and one item claimed by another operator |
 
-The plan names required fixtures. It does not write them, and it does not read transitions, screen states, capability `entityStates`, `risk` or queue SLA values. Add those by hand from the manifest: a record in every precondition state a command needs (`entityStates.from`, a transition's `from`) and one deliberately ineligible; a fixture that reaches each state in `screens[].states` (section 6); for `risk: high` or `critical` capabilities, a record reserved for the negative and replay tests; and records inside, near, and past each queue's SLA. Implement each in the project's own fixture mechanism.
+The plan names required fixtures. It does not write them, and it does not read transitions, screen states, capability `entityStates`, `risk` or queue SLA values. Add those by hand from the manifest: a record in every precondition state a command needs (`entityStates.from`, a transition's `from`) and one deliberately ineligible; a fixture that reaches each state in `screens[].states` ([Which fixture proves which screen state](#which-fixture-proves-which-screen-state)); for `risk: high` or `critical` capabilities, a record reserved for the negative and replay tests; and records inside, near, and past each queue's SLA. Implement each in the project's own fixture mechanism.
 
 ## Generating fixtures
 

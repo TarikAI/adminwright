@@ -1,6 +1,6 @@
 ---
 name: adminwright
-description: Designs, builds, extends, or audits a real admin console (admin panel, admin dashboard, back office, internal tool, ops or superadmin area, CRUD dashboard) for any platform and stack, backed by live data, server-side authorization, audit trails and tests instead of mock screens. Use when an admin surface must be inferred from a platform's domain, data model, APIs, roles, lifecycles and risks; when several agents build one console; or to verify that an existing admin system is connected, secure, auditable, accessible and operationally complete. Not for customer-facing product features or analytics-only charts.
+description: Designs, builds, extends, audits or repairs a real admin console (admin panel or dashboard, back office, internal operations tool where staff act on customer or platform data, support or moderation tooling, ops or superadmin area, admin API, CRUD dashboard) for any platform and stack, backed by live data, server-side authorization, audit trails and tests instead of mock screens. Use when an admin surface must be inferred from a platform's domain, data model, APIs, roles, lifecycles and risks; when several agents build one console; or to audit an existing admin system for being connected, secure, auditable, accessible and operationally complete, and repair what the audit finds. Not for customer-facing product features, analytics-only charts, or developer scripts that no operator uses.
 license: Apache-2.0
 compatibility: Python 3.9+ (standard library only) for scripts/. Any agent harness that can run shell commands.
 ---
@@ -30,8 +30,6 @@ this file only for its reference table and the phase you were given.
   framework's auth, policy, or job idioms is a defect.
 - Never ship a control that is not connected to an authorized server-side operation, and
   never rely on hidden navigation or client-side checks as authorization.
-- Implement vertical slices across data, service/API, authorization, UI, audit,
-  observability, and tests.
 - Prefer safe recovery over irreversible deletion. Add previews, confirmations, reason
   capture, step-up authentication, approvals, or undo according to risk.
 - The agent that implements a capability never marks it reviewed. Review is a separate pass
@@ -44,8 +42,8 @@ this file only for its reference table and the phase you were given.
 ## Conventions
 
 `<skill-dir>` means `${CLAUDE_SKILL_DIR}`, the directory that holds this file;
-`<project-root>` is the repository the console administers. The manifest is
-`<project-root>/.admin-console/manifest.json`, changed only through
+`<project-root>` is the repository the console administers. The manifest, `<manifest>` in
+commands, is `<project-root>/.admin-console/manifest.json`, changed only through
 `python <skill-dir>/scripts/admin_console_manifest.py` (`py -3` or `python3` where `python`
 is not on PATH). Take arguments from `<command> --help`, never from the script's source.
 Exit 0 is clean, 1 means findings at error severity, 2 a usage failure or a write
@@ -75,11 +73,11 @@ release gates.
 Copy this checklist into your worklog and tick it as each exit condition holds:
 
 ```text
-- [ ] Mode and profile stated; profile confirmed as a decision
+- [ ] Mode stated; profile proposed (the owner confirms it after Phase 1)
 - [ ] 1 Discover: stack docs read, listed in platform.researchSources[]
 - [ ] 2-3 Model: roles and capabilities before screens; validate --phase plan exits 0
-- [ ] 4 Design: navigation by operator job; every metric names its decision
-- [ ] 5 Build: walking skeleton, then each capability through all ten steps
+- [ ] 4 Design: navigation by operator job; every metric's x-metric filled
+- [ ] 5 Build: walking skeleton, agent contract written, then each capability through all ten steps
 - [ ] 6 Harden: safeguards, audit and states by risk
 - [ ] 7 Verify: validate --phase release and coverage exit 0; gap report; adversarial pass
 - [ ] 8 Learn: harvest and promote run; completion report written
@@ -89,14 +87,19 @@ Copy this checklist into your worklog and tick it as each exit condition holds:
 
 - **Build:** a new admin console or a major module, end to end.
 - **Extend:** new capabilities in an existing console, preserving its policies and component
-  vocabulary. Skip Phases 1 and 4, load the narrow-extension set, `add` and build the new
-  capabilities, and finish with Phase 7's gates.
+  vocabulary. With no manifest, run Phase 1 only far enough to `init`, and model the
+  existing console at `discovered`. Skip Phase 4, `add` and build the new capabilities, and
+  hold them to Phase 7: no release finding may name them, though the whole-console gate
+  passes only once nothing is left `discovered`.
 - **Audit:** compare an existing console with the domain and implementation, changing no
   product code but leaving durable artifacts: the manifest (initialized if absent) models what
-  you found at status `discovered`, with every gap in `gaps[]` and every observation about
-  this skill in `feedback[]`; the report comes from `emit --format gap-report --out
+  you found at status `discovered`, implementation fields included, with every gap in
+  `gaps[]` and every observation about this skill in `feedback[]`; `validate --phase plan`
+  exits 0; the report comes from `emit --format gap-report --out
   <project-root>/docs/admin-gap-report.md` and ends by naming repair mode as the next step.
-- **Repair:** implement verified audit findings and update evidence.
+- **Repair:** fix chosen audit gaps through planned, claimed, reviewed slices; a partial
+  repair reports per gap instead of declaring a release
+  ([build-order.md](references/build-order.md#repairing-from-an-audit)).
 
 If the request includes implementation, continue through
 verification without stopping after planning. Operator surfaces may be the admin UI, an admin
@@ -109,11 +112,12 @@ gate, never the truth requirement.
 
 | Profile | Use when | Consequence |
 |---|---|---|
-| `internal` | A small internal tool with named operators | Quality rules warn rather than block; accessibility and performance gates may be `not-applicable` with a recorded rationale |
+| `internal` | A small internal tool with named operators | Quality rules warn rather than block; the accessibility and performance gates, and the release flags for MFA, tamper-protected audit, keyboard and responsive checks, may be not applicable with a recorded reason ([list](references/verification.md#profiles-and-the-gate-matrix)); `standard` and `regulated` require them |
 | `standard` | Any console real users depend on | Evidence must resolve; all gates must pass |
 | `regulated` | Money, health, minors, or audited data | Adds test-token matching, separation of duties, privileged-read audit, and forbids unresolved assumptions |
 
-`init` records the profile as an assumed decision, `dec.profile`; confirm it with the owner.
+`init` records the profile as an assumed decision, `dec.profile`. Only a person confirms a
+decision or accepts a gap: propose, record `assumed`, and ask.
 
 ## Load references by phase
 
@@ -123,16 +127,15 @@ Load only what the current phase needs, and only the named section when a link n
 |---|---|
 | Full build | Phases 1–8 below, loading as each begins |
 | Narrow extension | [discovery.md](references/discovery.md), [stack-adapters.md](references/stack-adapters.md), plus the reference for the changed capability |
-| Audit only | [discovery.md](references/discovery.md), [capability-catalog.md](references/capability-catalog.md), [verification.md](references/verification.md), [security-governance.md](references/security-governance.md) |
-| Repair | [verification.md](references/verification.md) plus the reference covering each finding |
+| Audit only | [discovery.md](references/discovery.md), [capability-catalog.md](references/capability-catalog.md), [verification.md](references/verification.md), [security-governance.md](references/security-governance.md), [experience-design.md](references/experience-design.md#ux-acceptance-checks) |
+| Repair | [verification.md](references/verification.md), [build-order.md](references/build-order.md#repairing-from-an-audit), plus the reference covering each finding |
 | Release declaration | [verification.md](references/verification.md) and [security-governance.md](references/security-governance.md), always |
 
 ## Phase 1: Discover the platform
 
 Load [discovery.md](references/discovery.md). Inspect before inventing: reconcile docs,
-schemas and migrations, state machines, APIs, queues and jobs, integrations, auth policies,
-tenant scoping, customer routes that create admin obligations, existing admin surfaces, and
-the support scripts and manual SQL that reveal missing controls.
+schemas, state machines, APIs, jobs, integrations, auth policies, tenant scoping, existing
+admin surfaces, and the support scripts and manual SQL that reveal missing controls.
 
 Identify the stack and read its documentation ([stack-adapters.md](references/stack-adapters.md),
 [resource-index.md](references/resource-index.md)). Current behavior is evidence, not
@@ -151,18 +154,20 @@ whose exit condition fails. Otherwise create it:
 python <skill-dir>/scripts/admin_console_manifest.py init --project-root <project-root> --name "<platform name>" --archetype <archetype> --profile <profile>
 ```
 
-Before your first `add`, read `<skill-dir>/evals/fixtures/saas-clean/.admin-console/manifest.json`,
-a complete manifest that passes at `regulated`, and imitate its field shapes. The fields each
-capability needs, and when, are in
+Add in dependency order, roles, then entities, then capabilities, then screens: the write
+guard refuses a reference to anything not yet added. Imitate the field shapes of
+`<skill-dir>/evals/fixtures/saas-clean/.admin-console/manifest.json`, a complete manifest
+that passes at `regulated`. The fields each capability needs, and when, are in
 [verification.md](references/verification.md#capability-fields-the-validator-requires).
 
 ```text
-python <skill-dir>/scripts/admin_console_manifest.py add --manifest <project-root>/.admin-console/manifest.json --kind capability --entity user --json '{"id":"user.list","outcome":"Find an account","kind":"query","roles":["ops"]}'
-python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'entities[user].capabilities[user.list].status' --value planned
+python <skill-dir>/scripts/admin_console_manifest.py add --manifest <manifest> --kind role --json '{"id":"ops","name":"Operations","responsibilities":["Account support"],"scopes":["all"]}'
+python <skill-dir>/scripts/admin_console_manifest.py add --manifest <manifest> --kind entity --json '{"id":"user","name":"User","sourceOfTruth":"postgres:users","lifecycleStates":["active","suspended"],"retention":"7 years"}'
+python <skill-dir>/scripts/admin_console_manifest.py add --manifest <manifest> --kind capability --entity user --json '{"id":"user.list","outcome":"Find an account","kind":"query","roles":["ops"]}'
+python <skill-dir>/scripts/admin_console_manifest.py set --manifest <manifest> --path 'entities[user].capabilities[user.list].status' --value planned
 ```
 
-Change the manifest only with `add`, `set`, `remove` and `rename`, never by hand: their
-write guard refuses malformed edits while they are cheap to fix, and an unfinished model only
+Use `add`, `set`, `remove` and `rename`, never a hand edit: their write guard refuses malformed edits while they are cheap to fix, and an unfinished model only
 warns until release. Populate from evidence, not guesses. Leave an implementation field empty
 rather than filling it with placeholder text: the scanner treats placeholders as defects, and
 an empty field is honest. `not-applicable` needs a recorded rationale and `blocked` the exact
@@ -170,10 +175,9 @@ external dependency; neither may hide unfinished work.
 
 ## Phase 3: Derive capabilities
 
-For every entity and workflow answer: what must an operator notice, what decision must they
-make, what action must they take, what can fail or stall or conflict or expire or duplicate
-or be abused, how do they find the affected records, what permissions and scopes apply, what
-is the safe recovery path, and what evidence must remain.
+For every entity and workflow answer what an operator must notice, decide and do; what can
+fail, stall, conflict, expire, duplicate or be abused; how they find the records; which
+scopes apply; how they recover; and what evidence must remain.
 
 Do not create CRUD mechanically. Some entities are read-only; others need transitions,
 assignment, approvals, reconciliation, replay, suspension, redaction, or restoration rather
@@ -195,8 +199,9 @@ landing page an exception and decision surface. Keep high-risk settings and secu
 administration distinct from routine operations. Preserve context between overview, filtered
 list, record detail, related records, history, and action result.
 
-Every metric must declare its decision, source, freshness, owner, threshold, and drill-down
-destination. Remove metrics that support no action.
+Every metric is a query capability whose `x-metric` declares its owner, threshold,
+freshness, drill-down and action ([discovery.md](references/discovery.md#6-decision-to-metric-map)).
+Remove metrics that support no action.
 
 ## Phase 5: Build the spine, then the slices
 
@@ -205,7 +210,10 @@ Load [build-order.md](references/build-order.md) and
 
 Build the walking skeleton first (authentication, the role and scope spine, the audit spine,
 one read-only list on real data, one low-risk command end to end): retrofitting
-authorization, tenancy and audit onto finished screens is a rewrite, not a patch.
+authorization, tenancy and audit onto finished screens is a rewrite, not a patch. Then write
+[assets/agent-contract.template.md](assets/agent-contract.template.md), filled in, into the
+project's agent instruction file (`AGENTS.md`, `CLAUDE.md` or the equivalent): a skill
+governs a session, the contract governs the repository.
 
 For each capability afterward:
 
@@ -231,44 +239,39 @@ Do not mark a capability implemented if any required layer is simulated or missi
 Load [security-governance.md](references/security-governance.md) and
 [architecture.md](references/architecture.md).
 
-Apply least privilege and default deny; tamper-evident audit with actor, target, time,
-reason, correlation ID, result, and safe before/after values; per-target-row authorization in
-bulk operations; safe impersonation, export controls, PII redaction, retention, and consent
-boundaries; approval or dual control for high-impact actions; optimistic concurrency;
-idempotency for financial, messaging, provisioning, and integration commands; accessible
-keyboard operation and focus management; locale, timezone, and currency handling; defined
-performance budgets and pagination strategy; and maintenance, degraded and offline states.
+Apply least privilege and default deny, tamper-evident audit, per-target authorization in
+bulk operations, safe impersonation and exports, approval or idempotency by risk, keyboard
+operation, locale handling, performance budgets, and degraded states, as those references
+specify.
 
 ## Phase 7: Verify and close gaps
 
 Load [verification.md](references/verification.md) and
 [test-data.md](references/test-data.md).
 
-Seed production-shaped fixtures first: every lifecycle state, long and localized text,
-missing optionals, conflicts, partial job failures, cross-tenant neighbours.
+Seed production-shaped fixtures first, every lifecycle state and cross-tenant neighbour
+included.
 
 Run the project's build, type check, lint, tests, security checks, and browser tests. Then:
 
 ```text
-python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <project-root>/.admin-console/manifest.json --phase release
-python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <project-root>/.admin-console/manifest.json
-python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <project-root>/.admin-console/manifest.json --format gap-report --out <project-root>/docs/admin-gap-report.md
+python <skill-dir>/scripts/admin_console_manifest.py validate --manifest <manifest> --phase release
+python <skill-dir>/scripts/admin_console_manifest.py coverage --manifest <manifest>
+python <skill-dir>/scripts/admin_console_manifest.py emit --manifest <manifest> --format gap-report --out <project-root>/docs/admin-gap-report.md
 ```
 
 Both `validate` and `coverage` must exit 0 before any release declaration. `emit` also writes
 `authz-matrix`, `test-plan`, `seed-plan`, `nav-map` and `operator-handbook`.
 
-A reviewer that did not implement the capability signs it: `set reviewedBy <its id>`, then
-`reviewStatus reviewed`, which is refused while an open critical or high gap targets it. A
-`contested` capability returns to `unreviewed` through its implementer's fix, never straight
-to `reviewed`.
+The `qa` pass, which did not implement the capability, signs it: `set reviewedBy <its id>`,
+then `reviewStatus reviewed`, refused while an `open` or `blocked` critical or high gap
+targets it. A `contested` capability returns to `unreviewed` through its implementer's fix,
+never straight to `reviewed`.
 
 Then an agent that did not implement the work runs the
-[adversarial pass](references/verification.md#adversarial-qa-pass): obligations the manifest
-missed; actions still done by script, SQL or undocumented procedure; controls without
-operations and operations without controls; privileged operations without policy tests or
-audit; and guessed identifiers, direct API calls, cross-tenant reads, replayed commands and
-out-of-scope bulk targets.
+[adversarial pass](references/verification.md#adversarial-qa-pass), attacking the console
+rather than exercising it: missed obligations, work still done by script or SQL, controls
+without operations, guessed identifiers, cross-tenant reads, replayed commands.
 
 A green validate is a floor, not a proof. It cannot tell whether a test asserts the right
 thing or a policy is correct. Those remain yours.
@@ -279,11 +282,11 @@ Load [skill-evolution.md](references/skill-evolution.md).
 
 Record observations as you work in `feedback[]`, each with a `scope`: the one file or area of
 the skill it would change, as a path from the skill root (`SKILL.md`, `references/<file>.md`,
-`scripts`, `agents`). At the end,
-harvest them into the cross-project store and see what has earned promotion:
+`scripts`, `agents`). At the end, harvest them into the cross-project store and see what has
+earned promotion:
 
 ```text
-python <skill-dir>/scripts/admin_console_manifest.py harvest --manifest <project-root>/.admin-console/manifest.json --date <YYYY-MM-DD>
+python <skill-dir>/scripts/admin_console_manifest.py harvest --manifest <manifest> --date <YYYY-MM-DD>
 python <skill-dir>/scripts/admin_console_manifest.py promote
 ```
 
@@ -307,17 +310,8 @@ harness's messaging. Claim before you build (`claim --agent <id> --role <role> -
 (`validate --phase plan` after the architect, `review-scope` after each review, the release
 gates after qa) and never edits product code, because its fixes would skip review.
 
-## Persist the rules in the project
-
-Write [assets/agent-contract.template.md](assets/agent-contract.template.md) into the project
-as its agent instruction file (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, or the equivalent),
-filled in for this platform. A skill governs a session; the contract file governs the
-repository, so the next agent does not undo this one's work.
-
 ## Optional integrations
 
-Two tools sharpen the skill when present and change nothing when absent. Record their use in
-`decisions[]` and see [INTEGRATIONS.md](INTEGRATIONS.md). **DesignArchitect** (Phase 4) checks
-the UI affordance graph for holes, never visual design. **Open Code Review** (Phase 7 and
-audit), when `ocr` is on PATH, runs a line-anchored review through `scripts/code_review.py`
-whose findings become `gaps[]`: a floor, not a proof.
+DesignArchitect (Phase 4) and Open Code Review (Phase 7, audit) sharpen the skill when
+present and change nothing when absent; record their use in `decisions[]`. See
+[INTEGRATIONS.md](INTEGRATIONS.md).

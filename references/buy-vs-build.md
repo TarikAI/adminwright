@@ -20,7 +20,7 @@ Run this check during discovery, before modeling screens. It is cheap: read the 
 manifest, look for an existing admin, and ask whether the domain's complexity actually
 exceeds what a framework handles.
 
-The check has three outcomes: adopt, hand-build, or the hybrid in section 5. The hybrid is
+The check has three outcomes: adopt, hand-build, or [the hybrid](#the-hybrid-pattern). The hybrid is
 correct more often than either extreme.
 
 ## Check what the stack already ships
