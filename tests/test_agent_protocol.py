@@ -170,6 +170,51 @@ class TestDocumentedCommandsParse(unittest.TestCase):
         self.assertGreater(checked, 10)
         self.assertEqual(failures, [], "\n".join(failures))
 
+    def test_every_documented_review_scope_start_names_the_role(self):
+        # A-01: at dispatch time the reviewer is not yet in agents[], so a `--start`
+        # without `--role` cannot say which write surface applies. The orchestrator's
+        # independence check then never ran.
+        failures, checked = [], 0
+        for path in doc_files():
+            if path.name == "manifest-cli.md":
+                continue  # the CLI package owns that file and its form; drop this skip once both land
+            commands = list(fenced_commands(path)) + list(inline_commands(path))
+            for line, command in commands:
+                argv = tokens_of(command)
+                if argv[:1] == ["review-scope"] and "--start" in argv:
+                    checked += 1
+                    if "--role" not in argv:
+                        failures.append("%s:%d  `%s`" % (path.relative_to(SKILL_ROOT).as_posix(), line, command))
+            for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                for match in re.finditer(r"`(review-scope[^`]*--start[^`]*)`", text):
+                    if "--role" not in match.group(1):
+                        failures.append("%s:%d  `%s`" % (path.relative_to(SKILL_ROOT).as_posix(), number,
+                                                         match.group(1)))
+        self.assertGreater(checked, 0)
+        self.assertEqual(failures, [], "a review-scope --start without --role:\n" + "\n".join(failures))
+
+    def test_shared_lists_are_written_with_append(self):
+        # A-06: `set` on a list replaces it. An implementer's research source or qa's
+        # new test written without --append erases what other agents recorded.
+        shared = re.compile(r"\.(?:researchSources|tests|evidence)\b")
+        failures = []
+        for path in doc_files():
+            for line, command in list(fenced_commands(path)) + list(inline_commands(path)):
+                argv = tokens_of(command)
+                if argv[:1] != ["set"] or "--path" not in argv:
+                    continue
+                target = argv[argv.index("--path") + 1] if argv.index("--path") + 1 < len(argv) else ""
+                if shared.search(target) and "--append" not in argv and "--delete" not in argv:
+                    failures.append("%s:%d  `%s`" % (path.relative_to(SKILL_ROOT).as_posix(), line, command))
+        agent_failures = [f for f in failures if f.startswith("agents/") or "multi-agent.md" in f]
+        self.assertEqual(agent_failures, [], "shared lists set without --append:\n" + "\n".join(agent_failures))
+        # The two agents that write into lists others share show the exact form.
+        for name, needle in (("adminwright-implementer.md", "platform.researchSources --append"),
+                             ("adminwright-qa.md", ".tests' --append"),
+                             ("adminwright-qa.md", ".evidence' --append")):
+            self.assertTrue(needle in (SKILL_ROOT / "agents" / name).read_text(encoding="utf-8"),
+                            name + " does not show `set ... " + needle + "`")
+
     def test_the_checker_catches_a_bad_command(self):
         self.assertTrue(parse(tokens_of("claim --manifest m.json --agent a --role harvester --capability c")))
         self.assertTrue(option_problems(tokens_of("set --manifest m --path p --values x")))
@@ -250,6 +295,49 @@ class TestRoleProtocolWalk(TempProject):
         self.step(0, "set", "--path", "crossCutting.experience.evidence", "--append",
                   "--value", "evidence/ux-review.md")
         self.step(0, "review-scope", "--agent", "solo-ux", "--role", "ux-reviewer")
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_the_orchestrator_brackets_a_dispatched_reviewer(self):
+        # A-01: the orchestrator runs --start before dispatch, when the reviewer has not
+        # registered yet; the documented form names the role. The reviewer then
+        # registers itself, and the check after the pass needs no --role.
+        self.build_honest_manifest()
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("-c", "user.email=t@example.test", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                 "commit", "-q", "--no-verify", "-m", "base")
+        self.step(0, "review-scope", "--agent", "ux-billing", "--role", "ux-reviewer", "--start")
+        self.step(0, "add", "--kind", "agent", "--json", json.dumps(
+            {"id": "ux-billing", "role": "ux-reviewer", "ownsCapabilities": [], "ownsScreens": [],
+             "status": "active"}))
+        (self.root / "evidence" / "ux-review.md").write_text("Walked 4 states as ops\n", encoding="utf-8")
+        self.step(0, "set", "--path", "crossCutting.experience.evidence", "--append",
+                  "--value", "evidence/ux-review.md")
+        self.step(0, "review-scope", "--agent", "ux-billing")
+
+    def test_a_contested_fix_round_and_a_repair_are_claimable_by_an_implementer(self):
+        # A-07 / D-03: the implementer's entry accepts `planned` (a first build or a
+        # repair the architect scheduled) and `implemented` + `contested` (a fix round).
+        cap = "entities[user].capabilities[user.list]"
+        data = self.build_honest_manifest()
+        for capability in data["entities"][0]["capabilities"]:
+            capability.update({"reviewStatus": "unreviewed", "reviewedBy": "", "owner": "",
+                               "implementedBy": "impl-1", "status": "implemented"})
+        self.write(data)
+        self.step(0, "add", "--kind", "gap", "--json", json.dumps(
+            {"id": "gap.scope", "severity": "high", "description": "List ignores tenant scope",
+             "status": "open", "rationale": "", "evidence": [], "capability": "user.list"}))
+        self.step(0, "claim", "--agent", "qa-1", "--role", "qa", "--capability", "user.list")
+        self.step(0, "set", "--path", cap + ".reviewStatus", "--value", "contested")
+        self.step(0, "release-claim", "--agent", "qa-1")
+        # The fix round: the original implementer claims the contested capability.
+        self.step(0, "claim", "--agent", "impl-1", "--role", "implementer", "--capability", "user.list")
+        self.step(0, "set", "--path", cap + ".status", "--value", "in-progress")
+        self.step(0, "set", "--path", "gaps[gap.scope].evidence", "--value", "evidence/tests.log")
+        self.step(0, "set", "--path", "gaps[gap.scope].status", "--value", "fixed")
+        self.step(0, "set", "--path", cap + ".status", "--value", "implemented")
+        self.step(0, "set", "--path", cap + ".reviewStatus", "--value", "unreviewed")
+        self.step(0, "release-claim", "--agent", "impl-1")
 
 
 if __name__ == "__main__":

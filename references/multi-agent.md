@@ -60,22 +60,24 @@ The `harvester` is a sixth pass, not a role. It never registers in `agents[]` an
   - every entity carries capabilities at `status: discovered` or better;
   - every capability has `outcome`, `kind`, `roles`, `risk`, `entityStates`;
   - the capabilities the build order schedules are `planned` (nobody else moves them there);
-  - the build order, with its file-ownership table, is a `decisions[]` entry;
+  - the build order is the decision `dec.build-order` described in [build-order.md](build-order.md), with its file-ownership table in `docs/admin-build-order.md`;
   - `validate --phase plan` exits 0.
 - **Writes:**
-  - `platform`, `roles[]`, `entities[]`, capability skeletons, `screens[]`, `workQueues[]`, `integrations[]`, `qualityGates[]` ids and thresholds, `decisions[]`;
-  - the empty `crossCutting` structure, whose sections belong to other roles.
+  - `platform`, `roles[]`, `entities[]`, capability skeletons, `screens[]`, `workQueues[]`, `integrations[]`, `qualityGates[]` ids and thresholds, `decisions[]`, `gaps[]`, `feedback[]`;
+  - the empty `crossCutting` structure, whose sections belong to other roles;
+  - `docs/admin-build-order.md` and the project's agent contract file.
 - **First pass:** it claims nothing, because nothing exists yet and it runs alone. In extend or repair mode it claims the existing capabilities it changes.
-- **File ownership:** the build-order decision lists each fan-out slice's owned directories and files. Shared items are marked as serialized: the migrations directory, lockfiles, design-system primitives, the navigation registry, `crossCutting`. There is one row for each pair of slices that touch the same file.
+- **Repair mode:** an audit leaves capabilities at `discovered`. The architect moves each capability an audit gap targets to `planned` and records the repair order in `dec.build-order`; that is how audit findings reach an implementer. Code that existed before the audit was written by nobody the manifest knows, so record its origin in a decision that `appliesTo` the capability; the repairing implementer's `implementedBy` then covers only its fix.
+- **File ownership:** the file-ownership table gives each fan-out slice its owned directories and files. Shared items are marked as serialized: the migrations directory, lockfiles, design-system primitives, the navigation registry, `crossCutting`. There is one row for each pair of slices that touch the same file.
 
 ### implementer
 
-- **Entry:** the capability is `planned`, its spine dependencies are `implemented`, and `claim` succeeded.
+- **Entry:** `claim` succeeded, and the capability is either `planned` (a first build, or a repair the architect scheduled) with its spine dependencies `implemented`, or `implemented` with `reviewStatus: contested` (a fix round, limited to the paired gaps; see [The contest loop](#the-contest-loop-and-conflict-resolution)).
 - **Exit:**
   - `dataBinding`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `safeguards`, `tests` and `evidence` are real;
   - every referenced file exists and is non-empty;
   - `status: implemented`, with `reviewStatus` left `unreviewed`.
-- **Writes:** capability implementation fields, `screens[].status`, `declaredStatic[]`, `decisions[]` for choices made, `gaps[]` it cannot close. It changes only the paths its slice owns; for anything else it files a gap and returns `NEEDS_CONTEXT`.
+- **Writes:** capability implementation fields, `screens[].status`, `declaredStatic[]`, `decisions[]` for choices made, `gaps[]` it cannot close, and `platform.researchSources[]` for the documentation it read, append only (`set --path platform.researchSources --append --value-file <payload>`), because a plain `set` replaces the architect's list. It changes only the paths its slice owns; for anything else it files a gap and returns `NEEDS_CONTEXT`.
 
 ### ux-reviewer
 
@@ -98,7 +100,7 @@ The `harvester` is a sixth pass, not a role. It never registers in `agents[]` an
 - **Entry:** the authentication, authorization, tenancy and audit spine is `implemented`, and `emit --format authz-matrix` produces output.
 - **Exit:**
   - `crossCutting.authentication`, `.authorization`, `.audit` and `.safety` carry evidence;
-  - every `high` or `critical` capability has safeguards, audit events and a negative test;
+  - every `high` or `critical` capability has safeguards, audit events and a negative test, or a gap that names which of them is missing (security files it; an implementer writes the test);
   - every risk that needs acceptance is proposed, not accepted;
   - `review-scope` is clean.
 - **Writes:** those four sections, `roles[].separationOfDuties`, `gaps[]`, and proposed risk acceptances. A proposed acceptance is a `decisions[]` entry with `status: assumed` (naming the risk, the mitigations and the approving role) plus a `blocked` gap asking for a human decision. A dispatched agent cannot ask the human, so only the main session, having asked, sets a decision to `confirmed`. See [security-governance.md](security-governance.md).
@@ -109,12 +111,12 @@ The `harvester` is a sixth pass, not a role. It never registers in `agents[]` an
 - **Exit:**
   - `coverage` has been run and its findings filed;
   - role-matrix and negative tests exist and were run against the built system;
-  - every negative test on a high or critical capability was shown failing with its guard disabled and passing with it in place;
+  - every negative test on a high or critical capability was shown failing with its guard removed and passing with it in place. The red run happens in a disposable copy of the project (a temp copy of the working tree, or a scratch `git worktree add <tmp> HEAD` when the code under test is committed), never in the working tree: removing a guard there is a product-code edit, and a restore that is not byte-identical, or a run that stops midway, leaves the console changed. The copy is thrown away after the run and never writes the manifest; it is not the agent's workspace, so the rule against giving agents their own worktrees still holds;
   - `qualityGates[]` are `passed` or `failed` with evidence;
   - `reviewStatus` is set;
   - `review-scope` is clean for every review pass since the last gate;
   - for a release, `validate --phase release` and `coverage` exit 0 and the gap report is emitted.
-- **Writes:** `qualityGates[]`, `crossCutting.observability` and `.data`, `gaps[]`, `reviewedBy` then `reviewStatus`, and `tests[]` and `evidence[]` entries for new test files it wrote. It adds tests and never edits an existing one; a test that must change is a gap for an implementer. See [verification.md](verification.md) and [test-data.md](test-data.md).
+- **Writes:** `qualityGates[]`, `crossCutting.observability` and `.data`, `gaps[]`, `reviewedBy` then `reviewStatus`, and `tests[]` and `evidence[]` entries for new test files it wrote, with `set --append` so the implementer's entries stay. It adds tests and never edits an existing one; a test that must change is a gap for an implementer. See [verification.md](verification.md) and [test-data.md](test-data.md).
 
 Each `crossCutting` section has one owner: `security` owns `authentication`, `authorization`, `audit` and `safety`; `ux-reviewer` owns `experience`; `qa` owns `observability` and `data`. Add to evidence lists with `set --append`, which takes a union and never drops another entry.
 
@@ -135,13 +137,13 @@ Honest review is a fresh read of the artifact from disk, checked against a list 
 
 | Transition | Who | Enforced |
 |---|---|---|
-| `unreviewed` → `reviewed` | `qa`, with `reviewedBy` set first to an id that never implemented the capability | refused while an open blocking gap targets it (`reviewed-with-blocking-gap`) |
+| `unreviewed` → `reviewed` | `qa`, with `reviewedBy` set first to an id that never implemented the capability | refused while a blocking gap targets it (`reviewed-with-blocking-gap`) |
 | `unreviewed` or `reviewed` → `contested` | `qa`, after filing the gap | refused without an open gap naming the capability (`contested-needs-gap`) |
 | `contested` → `unreviewed` | the implementer, once the gap is `fixed` or disputed with evidence on the gap | – |
 | `contested` → `reviewed` | nobody | refused (`review-transition`) |
 | gap `fixed` → confirmed or reopened | a fresh agent of the role that filed it (scoped re-review) | – |
 
-A **blocking** finding is critical or high, and either violates a manifest requirement or comes with a reproduction. Anything else is advisory: filed, but it never holds up a review. Calibrate severity by impact:
+A **blocking** finding is any `critical` or `high` gap that is `open` or `blocked` and targets the capability, through its `capability` field or by naming the capability's id in its description or rationale. The validator refuses `reviewed` while one exists, whether or not it carries a reproduction, so severity alone decides: a `medium` or `low` gap is advisory, filed but never holding up a review. Calibrate severity by impact, and file `critical` or `high` only with a reproduction or a file reference that shows the defect; a suspicion you cannot yet show is `medium`, with what would confirm it.
 
 | Finding | Severity |
 |---|---|
@@ -217,13 +219,13 @@ Dispatch each pass with everything it needs, because it sees nothing else:
 ```text
 Agent: adminwright:adminwright-<role> (Claude Code) | adminwright-<role> (elsewhere)
 Project root: <absolute path>   Manifest: <path>   Mode: build|extend|audit|repair   Profile: <p>
-Agent id: <role>-<slug>, fresh for each pass   Scope: <capability ids or domain> and the paths it owns
-Base: <git rev-parse HEAD>   Plan of record: <decision id or file>
+Agent id: <prefix>-<slug>, fresh for each pass (architect, impl, ux, sec, qa)   Scope: <capability ids or domain> and the paths it owns
+Base: <git rev-parse HEAD>   Plan of record: dec.build-order and docs/admin-build-order.md, or the plan the user supplied
 Harvester only: a digest of the conversation (user corrections, wrong guidance, skipped phases)
 Return: the STATUS line, at most 12 lines, then the worklog path
 ```
 
-For a reviewer, run `review-scope --agent <id> --start` before dispatching it. When a pass returns, do not relay its report; check it yourself before starting the next pass:
+For a reviewer, run `review-scope --agent <id> --role <role> --start` before dispatching it. The reviewer has not registered yet at that moment, so `--role` says which write surface the check applies. When a pass returns, do not relay its report; check it yourself before starting the next pass:
 
 | After | Run |
 |---|---|
@@ -233,6 +235,8 @@ For a reviewer, run `review-scope --agent <id> --start` before dispatching it. W
 | qa, for a release | `validate --phase release` and `coverage`, which must exit 0 |
 
 The orchestrating session never edits product code: its fixes would skip review. A decision only a human can make comes back as an `assumed` decision and a `blocked` gap. Ask the human, then record the answer yourself.
+
+Dispatch the harvester as its own agent type (`adminwright:adminwright-harvester` in Claude Code), with the digest. A fork of your session inherits the chat and so needs no digest, but it is not the harvester: it never loads the harvester's file, model or tool settings. If a harness can only fork, tell the fork to read the harvester's agent file and follow it, and not to dispatch agents.
 
 ## Fan-out patterns
 
@@ -263,7 +267,9 @@ Do not give adminwright agents their own worktrees (`isolation: worktree`, `/bat
 2. The implementer fixes only the paired gaps, logs the covering test with its command and output, marks each gap `fixed`, and returns the capability to `unreviewed`. If it disputes a finding instead, it records the evidence on the gap.
 3. A fresh re-review marks each paired gap ADDRESSED or NOT ADDRESSED and checks only the fix for new breakage. "Attempted" is not addressed.
 
-Out-of-scope observations become new advisory gaps and never open a new round. A round ends in a reopened gap, and two rounds end the loop: the gap goes to `blocked` with both positions stated, and the human decides. Nobody adjudicates before that cap, and every ruling is a `decisions[]` entry. A gap becomes `accepted` only on the human's word, recorded as a confirmed decision naming the approver; an agent never accepts a gap it filed or caused.
+Out-of-scope observations become new advisory gaps and never open a new round. A round ends in a reopened gap, and two rounds end the loop: the gap goes to `blocked` with both positions stated, and the human decides. Nobody adjudicates before that cap, and every ruling is a `decisions[]` entry.
+
+Only a person accepts a gap. No agent sets a gap `accepted`, whoever filed or caused it: a reviewer or the security pass proposes the acceptance (an `assumed` decision and a `blocked` gap), and the main session asks the person. On their word it records a confirmed `risk-acceptance` decision whose `appliesTo` names the gap and which says who confirmed it, then sets the gap's `status` to `accepted` with that rationale. A `blocked` critical or high gap still blocks review until then.
 
 **Divergent decisions.** Both entries stay. Add yours; the tie-breaker sets the losing entry's `status` to `superseded` and names the replacement in the winner's `reason`.
 

@@ -11,8 +11,7 @@ make sure the next one is built better. Your input is one finished or stopped ru
 is durable learning:
 
 - observations banked in the cross-project store;
-- lessons recorded;
-- when the bar is cleared, the skill's own files improved.
+- lessons opened, with a proposed edit, for someone else to adopt or reject.
 
 The field history you exist to prevent: the first field tests ran two audits and a build
 across seven projects and harvested nothing.
@@ -23,22 +22,23 @@ Your dispatch names the project root, the manifest path, and a **digest of the c
 the user's corrections, guidance that proved wrong or missing, phases that were skipped and
 why, anything the user had to say twice. A dispatched agent cannot see the chat, so the digest
 is the only way that learning reaches you. Without it, still harvest the files, report the
-conversation as not harvested, and return `STATUS: NEEDS_CONTEXT`. In Claude Code the
-orchestrator may instead run this pass as a fork of its own session, which inherits the chat.
+conversation as not harvested, and return `STATUS: NEEDS_CONTEXT`. If you are a fork of the
+orchestrator's session told to follow this file, the chat itself is your digest; you still
+dispatch no agents.
 
 ## Locate the skill
 
-`${CLAUDE_PLUGIN_ROOT}` is the adminwright skill directory (a relative path starts at the
-project root); below it is written `<skill>`. If that directory does not exist here — the
-token arrived unexpanded, or an installed copy names the placeholder `<skill>` or another
-machine's path — use the first of these that contains `scripts/admin_console_manifest.py`:
-the path in `.adminwright/skill-dir` under the project root, which the installer writes for
-this machine; a path in your dispatch prompt or the project's AGENTS.md/CLAUDE.md;
-`.claude/skills/adminwright`, `.agents/skills/adminwright` or `skills/adminwright` under the
-project root; `~/.claude/skills/adminwright` or `~/.agents/skills/adminwright`;
-`~/.claude/plugins/marketplaces/tarikai`; else search for `admin_console_manifest.py`.
-Unresolvable: return `STATUS: BLOCKED` — never improvise the skill from memory. Manifest
-commands take this form (`py -3` or `python3` where `python` is not on PATH):
+`${CLAUDE_PLUGIN_ROOT}` is the adminwright skill directory, called `<skill>` below; a
+relative path starts at the project root. If that directory does not exist here (the token
+arrived unexpanded, or names another machine's path), use the first of these that contains
+`scripts/admin_console_manifest.py`: the path in `.adminwright/skill-dir` under the project
+root, which the installer writes for this machine; a path in your dispatch prompt or the
+project's AGENTS.md or CLAUDE.md; `.claude/skills/adminwright`, `.agents/skills/adminwright`
+or `skills/adminwright` under the project root; `~/.claude/skills/adminwright` or
+`~/.agents/skills/adminwright`; `~/.claude/plugins/marketplaces/tarikai`; else
+search for `admin_console_manifest.py`. If none has it, return `STATUS: BLOCKED`: guidance
+rebuilt from memory is not this skill. Run manifest commands as (`py -3` or `python3` where
+`python` is not on PATH):
 
 ```text
 python <skill>/scripts/admin_console_manifest.py <command> ...
@@ -76,16 +76,33 @@ The store lives outside every project: `$ADMINWRIGHT_HOME`, or `~/.adminwright` 
 those that clear the bar: **seen on two or more distinct projects, or a correction of guidance
 that was factually wrong.**
 
-## Adopt what cleared the bar
+## Open lessons for what cleared the bar
 
-For each accepted candidate, record the lesson:
+Opening a lesson proposes a change; adopting it is someone else's call. The reviewer who
+adopts must not be the agent that opened the lesson, which is the same independence rule
+the console's own reviews follow.
+
+First run `lesson list` and read the `adopted` and `rejected` lessons. If a candidate matches
+a rejected one, add new evidence from a distinct project to that lesson or drop the
+candidate; never open a second file for the same idea. For each remaining candidate, open
+the lesson with one `--platform` per entry of the manifest's `platform.archetypes` and per
+stack seam in `platform.stack` the rule depends on, because a lesson with no platforms
+cannot be adopted:
 
 ```text
-python <skill>/scripts/admin_console_manifest.py lesson add --title "<rule>" --category <gap|friction|incorrect-guidance|new-pattern|tooling> --scope <candidate-scope> --trigger "<what happened>" --rule "<the durable rule>" --date <YYYY-MM-DD>
+python <skill>/scripts/admin_console_manifest.py lesson list
+python <skill>/scripts/admin_console_manifest.py lesson add --title "<rule>" --category <gap|friction|incorrect-guidance|new-pattern|tooling> --scope <candidate-scope> --trigger "<what happened>" --rule "<the durable rule>" --platform <archetype> --platform <stack-seam> --date <YYYY-MM-DD>
 ```
+
+Then fill the new lesson file's `## Proposed edit`: the file, the text it replaces and the
+replacement. A lesson with an empty `Proposed edit` cannot be adopted either.
 
 A lesson's scope is the file whose guidance failed, and that includes the agents: a pass that
 keeps skipping a step or fighting the harness is a defect in `agents/adminwright-<role>.md`.
+
+Never run `lesson adopt` or `lesson reject`, and never pass `--status` to `lesson add`. Report
+each lesson id you opened, for a person or another agent to adopt (`lesson adopt --by
+<reviewer>`) or reject (`lesson reject --reason <reason>`).
 
 **Where edits may land.** Edit references and agents only in a git checkout of the skill
 itself. Check first that `git -C <skill> rev-parse --show-toplevel` is `<skill>`: a copy
@@ -94,11 +111,13 @@ replaces on update. Outside a checkout, `lesson add` writes to
 `$ADMINWRIGHT_HOME/outbox/lessons/` and says how to send the lesson upstream; report each
 intended edit (file, text replaced, replacement) instead of making it.
 
-In a checkout:
+In a checkout you may make the edit the lesson proposes, so its reviewer has a diff to judge:
 
 1. Re-read the whole file before editing it.
 2. State the rule, the trigger that revealed it, and the failure it prevents.
 3. Prefer tightening a paragraph to appending a section: a file that only grows stops being read.
+
+Then stop. The lesson stays `proposed` until its reviewer adopts or rejects it.
 
 An edit to `agents/*.md` must keep `tests/test_agent_protocol.py` passing. It must also make
 clear that copies installed by `install_agents.py` are stale until the installer is rerun. A
@@ -127,7 +146,8 @@ what this run taught, and what will be different next time because of it. Then g
 
 - observations per source (manifest, worklogs, digest, reports), and how many were unrecorded;
 - the harvest and promote results;
-- lessons adopted and files edited, flagging any installed agent copies now stale;
+- the lesson ids opened, each awaiting a reviewer, and the files edited, flagging any
+  installed agent copies now stale;
 - candidates left waiting for a second project;
 - proposed script checks.
 

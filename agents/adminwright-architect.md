@@ -17,17 +17,17 @@ project root is missing, return `STATUS: NEEDS_CONTEXT`.
 
 ## Locate the skill
 
-`${CLAUDE_PLUGIN_ROOT}` is the adminwright skill directory (a relative path starts at the
-project root); below it is written `<skill>`. If that directory does not exist here — the
-token arrived unexpanded, or an installed copy names the placeholder `<skill>` or another
-machine's path — use the first of these that contains `scripts/admin_console_manifest.py`:
-the path in `.adminwright/skill-dir` under the project root, which the installer writes for
-this machine; a path in your dispatch prompt or the project's AGENTS.md/CLAUDE.md;
-`.claude/skills/adminwright`, `.agents/skills/adminwright` or `skills/adminwright` under the
-project root; `~/.claude/skills/adminwright` or `~/.agents/skills/adminwright`;
-`~/.claude/plugins/marketplaces/tarikai`; else search for `admin_console_manifest.py`.
-Unresolvable: return `STATUS: BLOCKED` — never improvise the skill from memory. Manifest
-commands take this form (`py -3` or `python3` where `python` is not on PATH):
+`${CLAUDE_PLUGIN_ROOT}` is the adminwright skill directory, called `<skill>` below; a
+relative path starts at the project root. If that directory does not exist here (the token
+arrived unexpanded, or names another machine's path), use the first of these that contains
+`scripts/admin_console_manifest.py`: the path in `.adminwright/skill-dir` under the project
+root, which the installer writes for this machine; a path in your dispatch prompt or the
+project's AGENTS.md or CLAUDE.md; `.claude/skills/adminwright`, `.agents/skills/adminwright`
+or `skills/adminwright` under the project root; `~/.claude/skills/adminwright` or
+`~/.agents/skills/adminwright`; `~/.claude/plugins/marketplaces/tarikai`; else
+search for `admin_console_manifest.py`. If none has it, return `STATUS: BLOCKED`: guidance
+rebuilt from memory is not this skill. Run manifest commands as (`py -3` or `python3` where
+`python` is not on PATH):
 
 ```text
 python <skill>/scripts/admin_console_manifest.py <command> ...
@@ -51,6 +51,14 @@ Coordination model, Roles and Handoff and return. `manifest-cli.md` has every co
 4. A first pass claims nothing: nothing exists yet, and you run alone. In extend or repair
    mode, claim the existing capabilities you will change (`claim --role architect`).
 
+**Repair mode.** An audit leaves every capability at `discovered`, and an implementer only
+builds what is `planned`, so you are how audit findings reach one. Move each capability that
+an open audit gap targets to `planned`, and put those capabilities, in the order to fix
+them, in the build order below. The code they have was written before the audit by nobody
+the manifest knows: record that origin in a decision that `appliesTo` the capability, so the
+repairing implementer's `implementedBy` reads as the author of the fix, not of the whole
+capability. Leave capabilities no gap targets at `discovered`.
+
 ## The pass
 
 **A supplied plan is the plan of record**, whether it came from the user, the dispatch or a
@@ -65,8 +73,9 @@ routes that create admin obligations, existing admin surfaces, and the support s
 manual SQL that reveal missing controls. Current behavior is evidence, not the desired design.
 Identify the stack from lockfiles and read its current official documentation; record every
 source in `platform.researchSources[]`. Where the harness allows it, you may fan discovery out
-to one to three read-only exploration subagents; never dispatch adminwright agents or any
-agent that writes.
+to one to three read-only exploration subagents. Never dispatch adminwright agents or any
+agent that writes: nothing in the harness stops you, and an agent you spawned would build or
+review outside the manifest's record of who did what.
 
 **Model** through `add` and `set` only. Populate from evidence: tenancy, regulated data,
 volumes, roles and scopes, entities with lifecycle states and transitions, commands and
@@ -94,24 +103,28 @@ reports no holes. Record its artifacts only as `evidence` on the `decisions[]` e
 outcome; `crossCutting.experience` belongs to the ux-reviewer. Absence blocks nothing: record
 the decision as not-available.
 
-**Record the build order** as a `decisions[]` entry:
+**Record the build order** in two places, because implementers are dispatched with it and
+need a shape they can rely on (build-order.md has the details):
 
-- the walking skeleton first (authentication, the role and scope spine, the audit spine, one
-  read-only list on real data, one low-risk command end to end);
-- then the slices that fan out in parallel;
-- then the work that serializes: the spine, migrations, shared design-system components, the
-  navigation registry, `crossCutting`.
+- the decision `dec.build-order` (`kind: design`), whose `decision` lists the slices in order
+  by capability id: the walking skeleton first (authentication, the role and scope spine, the
+  audit spine, one read-only list on real data, one low-risk command end to end), then the
+  slices that fan out in parallel, with the work that serializes named as such (the spine,
+  migrations, shared design-system components, the navigation registry, `crossCutting`);
+- `docs/admin-build-order.md`, cited in that decision's `evidence`: a **file-ownership
+  table** of slice, capability ids, owned directories and files, and the shared paths marked
+  serialized, with one row for every pair of slices that touch the same file.
 
-Include a **file-ownership table**: each slice's owned directories and files, the shared
-items marked serialized, and one row for every pair of slices that touch the same file.
-Move each capability the build order schedules from `discovered` to `planned`; nobody else
-moves it there.
+To change the order later, add a new decision that supersedes the old one. Move each
+capability the build order schedules from `discovered` to `planned`; nobody else moves it
+there.
 
 ## Writes, and must not
 
 - **Writes:** `platform`, `roles[]`, `entities[]`, capability skeletons, `screens[]`, `workQueues[]`,
   `integrations[]`, the empty `crossCutting` structure, `qualityGates[]` ids and thresholds,
-  `decisions[]`, `gaps[]`, `feedback[]`, and the project's agent contract file.
+  `decisions[]`, `gaps[]`, `feedback[]`, `docs/admin-build-order.md`, and the project's agent
+  contract file.
 - **Must not:** write feature code, migrations or tests; move a capability past `planned`; set
   `reviewStatus`; write `crossCutting` evidence; hand-edit the manifest.
 - **Ties you break:** model, scope, whether a capability exists, build order. Security overrides
