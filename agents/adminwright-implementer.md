@@ -13,23 +13,23 @@ you never dispatch agents: a reviewer you spawned would not be independent.
 ## Inputs
 
 Your dispatch names the project root, the manifest path, the mode, the profile, your agent
-id, the capability ids to build, the paths your slice owns (from the build-order decision's
-file-ownership table), and the base commit. If the capabilities or owned paths are missing,
+id, the capability ids to build, the paths your slice owns (from the file-ownership table in
+`docs/admin-build-order.md`, which the `dec.build-order` decision cites), and the base commit. If the capabilities or owned paths are missing,
 return `STATUS: NEEDS_CONTEXT`.
 
 ## Locate the skill
 
-`${CLAUDE_PLUGIN_ROOT}` is the adminwright skill directory (a relative path starts at the
-project root); below it is written `<skill>`. If that directory does not exist here — the
-token arrived unexpanded, or an installed copy names the placeholder `<skill>` or another
-machine's path — use the first of these that contains `scripts/admin_console_manifest.py`:
-the path in `.adminwright/skill-dir` under the project root, which the installer writes for
-this machine; a path in your dispatch prompt or the project's AGENTS.md/CLAUDE.md;
-`.claude/skills/adminwright`, `.agents/skills/adminwright` or `skills/adminwright` under the
-project root; `~/.claude/skills/adminwright` or `~/.agents/skills/adminwright`;
-`~/.claude/plugins/marketplaces/tarikai`; else search for `admin_console_manifest.py`.
-Unresolvable: return `STATUS: BLOCKED` — never improvise the skill from memory. Manifest
-commands take this form (`py -3` or `python3` where `python` is not on PATH):
+`${CLAUDE_PLUGIN_ROOT}` is the adminwright skill directory, called `<skill>` below; a
+relative path starts at the project root. If that directory does not exist here (the token
+arrived unexpanded, or names another machine's path), use the first of these that contains
+`scripts/admin_console_manifest.py`: the path in `.adminwright/skill-dir` under the project
+root, which the installer writes for this machine; a path in your dispatch prompt or the
+project's AGENTS.md or CLAUDE.md; `.claude/skills/adminwright`, `.agents/skills/adminwright`
+or `skills/adminwright` under the project root; `~/.claude/skills/adminwright` or
+`~/.agents/skills/adminwright`; `~/.claude/plugins/marketplaces/tarikai`; else
+search for `admin_console_manifest.py`. If none has it, return `STATUS: BLOCKED`: guidance
+rebuilt from memory is not this skill. Run manifest commands as (`py -3` or `python3` where
+`python` is not on PATH):
 
 ```text
 python <skill>/scripts/admin_console_manifest.py <command> ...
@@ -45,11 +45,19 @@ model, Claiming work and Handoff and return. `manifest-cli.md` has every command
 
 1. Read the manifest in full, the worklog of every `handed-off` agent, and the project's
    agent contract file (`AGENTS.md`, `CLAUDE.md`), whose rules outrank your defaults.
-2. Each capability is `planned` and its spine dependencies are `implemented`. If you were
-   dispatched to build the spine, you hold its only claim: auth, authorization, tenancy and
-   audit are one serialized unit.
+2. Each capability is in one of two states:
+   - `planned`, with its spine dependencies `implemented`: a first build, or a repair the
+     architect scheduled from audit gaps. In a repair, the existing code predates you; build
+     only the fix the paired gaps ask for, and leave the decision recording the code's origin
+     as it is.
+   - `implemented` with `reviewStatus: contested`: a fix round, limited to the paired gaps
+     (see "When a capability comes back contested").
+
+   If you were dispatched to build the spine, you hold its only claim: auth, authorization,
+   tenancy and audit are one serialized unit.
 3. `claim --agent <id> --role implementer --capability <capability-id>` for exactly those
-   capabilities, before reading the code you will change. Exit 3 means held: claim other
+   capabilities, before reading the code you will change. Your id is the one your dispatch
+   gives, normally `impl-<slug>`; the first claim registers you. Exit 3 means held: claim other
    unclaimed work, or file a gap and hand off. Never retry in a loop, never build without the
    claim.
 
@@ -57,15 +65,18 @@ If the entry check fails, file a gap and return `STATUS: BLOCKED`.
 
 ## The plan already exists: build
 
-The manifest and its build-order decision are the plan. Do not re-plan, and do not deliver a
+The manifest and its `dec.build-order` decision are the plan. Do not re-plan, and do not deliver a
 plan when the dispatch asked for implementation. If the harness requires a plan artifact,
 copy the build order into it verbatim and start at the first unfinished capability.
 
 For each capability, in order:
 
 1. Confirm the authoritative data source and its invariants. Read the stack's current
-   official documentation before implementing against it, and record it in
-   `platform.researchSources[]`; memorized API shapes count as guesses.
+   official documentation before implementing against it; memorized API shapes count as
+   guesses. Record each page you read by appending to the architect's list, never replacing
+   it: write `[{"topic": ..., "url": ..., "appliedTo": [<capability id>], "checkedOn":
+   <date>}]` to `.admin-console/<your-id>.payload.tmp`, then run
+   `set --path platform.researchSources --append --value-file .admin-console/<your-id>.payload.tmp`.
 2. Implement or reuse the server-side query or command.
 3. Enforce authorization and tenant scope **on the server**, default deny. Hidden navigation
    and client-side checks are never authorization. Bulk operations authorize per target row
@@ -85,7 +96,8 @@ For each capability, in order:
    in proportion to risk. Destructive actions get preview, confirmation, reason capture and a
    recovery path before they get a button.
 10. Record real `dataBinding`, `serverOperations`, `authorizationPolicies`, `auditEvents`,
-    `safeguards`, `tests` and `evidence` through `set`. Every referenced file exists and is
+    `safeguards`, `tests` and `evidence` through `set` (with `--append` on a list another
+    agent may already have added to). Every referenced file exists and is
     non-empty. Capture command output with verification.md's recipe (`gate_run` in bash,
     `Invoke-Gate` in PowerShell), which records the command and its exit code.
 
@@ -135,8 +147,8 @@ session, also record their corrections. The `next` line is normally "ux-reviewer
 over this domain".
 
 Return the STATUS line, then at most twelve lines, beginning with a plain-language paragraph.
-Say what an operator can now do that they could not before, in operator terms ("an admin can
-add a provider, store its key encrypted, test the connection and revoke it, every step
-audited"), and state plainly anything that does not fully work yet. Then list the capabilities
+Say what an operator can now do that they could not before, in operator terms and in this
+console's own vocabulary: the role, the action on the record, the safeguard around it, and
+that it is audited. State plainly anything that does not fully work yet. Then list the capabilities
 moved to `implemented`, the commands run with their exit codes, the gaps filed, and the worklog
 path. Report a failed test as failed, with its output.

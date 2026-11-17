@@ -32,16 +32,21 @@ the runs.
 
 | Case | Passes when |
 |---|---|
-| `architect-plans-before-building` | The architect writes a manifest with roles and a high-risk command, and records a build order. It creates nothing under `src/` |
+| `architect-plans-before-building` | The architect writes a manifest with roles and a high-risk command, and records a build order as a decision. It creates nothing under `src/` and leaves the scaffolded source files byte for byte |
 | `implementer-builds-on-real-data` | The implementer claims `tenant.list`. It replaces the hard-coded tenants with the real query, checks the staff session in the API route, and leaves the capability unreviewed |
-| `security-files-gaps-fixes-nothing` | The security reviewer files a critical or high gap against `tenant.suspend`, whose code has none of the checks the manifest claims. It leaves that code untouched and does not sign off |
-| `qa-contests-instead-of-signing` | With a high gap open, qa sets `contested`. It never marks the capability `reviewed`, including by editing the manifest by hand |
+| `security-files-gaps-fixes-nothing` | The orchestrator records the reviewer's starting point with `review-scope --start`. The security reviewer files a critical or high gap against `tenant.suspend`, whose code has none of the checks the manifest claims. It leaves that code untouched and does not sign off |
+| `qa-contests-instead-of-signing` | The qa agent is dispatched, registers through the CLI, and sets `contested` with a high gap open. It never marks the capability `reviewed`, and the main session never writes the manifest with its file tools (a hand edit by the dispatched agent itself is not visible to these graders) |
 | `harvester-asks-for-the-conversation` | Dispatched without a conversation digest, the harvester still banks the manifest's feedback, then returns `NEEDS_CONTEXT` |
 
 The shell cases judge an agent by what it leaves in the workspace (the manifest and the
 product files) and by the `STATUS:` line it returns, which reaches the trace as the Agent
 tool's result. They do not count the tool calls a dispatched agent makes inside its own
 context, which the main session's transcript may not include.
+
+A `trace` grader sees every message, tool results included, so a Read of `multi-agent.md`
+puts the words `STATUS: DONE` and `NEEDS_CONTEXT` in the trace. The status graders therefore
+require the line to start a message or a line; `tests/test_behavior_evals.py` runs each one
+against the skill's documents and the case prompts and fails if any of them matches.
 
 `_fixtures/` holds the Support Desk project (a Next.js and Prisma help desk whose admin page is
 decorative), an overlay for a handed-off `tenant.suspend`, and `scaffold-lib.sh`. Each case's
@@ -67,6 +72,23 @@ claude plugin eval . --tag smoke --scaffold --trust-plugin --no-publish --max-co
 claude plugin eval . --tag shell --scaffold --allow-tools Bash Write Edit --trust-plugin --no-publish --max-cost-usd 60
 ```
 
+**Before the first shell run, check the sandbox once.** Shell grants run Bash in a sandbox
+whose docs say the home directory is unreadable, and the plugin under test, with the
+`scripts/admin_console_manifest.py` every agent calls, lives under a home directory both
+locally and on a CI runner. The docs do not say whether the plugin's own directory is
+exempt. If it is not, every shell case fails at its first CLI call and the whole set's
+budget buys scores that measure nothing. So run one case, one arm, once, keep the
+workspace, and read the dispatched agent's first `admin_console_manifest.py` call in the
+transcript:
+
+```bash
+claude plugin eval . --case architect-plans-before-building --runs 1 --ablation none --scaffold --allow-tools Bash Write Edit --trust-plugin --no-publish --keep-temp
+```
+
+If the call was denied, the fix is in the scaffold, not the agents: have `scaffold-lib.sh`
+copy `scripts/` and the references into the workspace and write that copy's path to
+`.adminwright/skill-dir`, which every agent's "Locate the skill" reads first.
+
 While changing one case, run one arm once, then confirm at the default three runs:
 
 ```bash
@@ -79,7 +101,10 @@ Every run and every `llm` grader is a real model call on your account:
 
 Keep `--max-cost-usd` on. Reports go to `evals/behavior/results/<timestamp>/`, which git
 ignores. The manual workflow `.github/workflows/behavior-evals.yml` runs the suite on Linux
-with the repository's `ANTHROPIC_API_KEY` secret.
+with the repository's `ANTHROPIC_API_KEY` secret, which only the step that checks it and the
+step that runs the suite can read. Left empty, its cost ceiling follows the tag: 10 for
+smoke, 60 for shell, 70 for all. A ceiling below that stops the run partway (exit 2,
+`partial: true`).
 
 ## Adding a case
 

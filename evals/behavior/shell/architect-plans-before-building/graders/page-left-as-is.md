@@ -1,0 +1,7 @@
+---
+# The architect writes no feature code. file_exists sees only files a run creates, so an
+# edit to this scaffolded file is caught here: it must match the fixture exactly.
+type: regex
+target: { source: file, path: src/app/admin/tenants/page.tsx }
+pattern: '^"use client";\r?\n\r?\n\/\/ fixture:tenants-page-v1\r?\nconst tenants = \[\r?\n  \{ id: "t_1", name: "Acme Corp", plan: "Enterprise", mrr: 4200, status: "active" \},\r?\n  \{ id: "t_2", name: "Globex", plan: "Pro", mrr: 990, status: "active" \},\r?\n  \{ id: "t_3", name: "Initech", plan: "Starter", mrr: 49, status: "past_due" \},\r?\n\];\r?\n\r?\nexport default function TenantsPage\(\{ user \}: \{ user: \{ role: string \} \}\) \{\r?\n  if \(user\.role !== "admin"\) return <p>Not allowed<\/p>;\r?\n  return \(\r?\n    <table>\r?\n      <thead>\r?\n        <tr><th>Tenant<\/th><th>Plan<\/th><th>MRR<\/th><th>Status<\/th><th \/><\/tr>\r?\n      <\/thead>\r?\n      <tbody>\r?\n        \{tenants\.map\(\(tenant\) => \(\r?\n          <tr key=\{tenant\.id\}>\r?\n            <td>\{tenant\.name\}<\/td>\r?\n            <td>\{tenant\.plan\}<\/td>\r?\n            <td>\$\{tenant\.mrr\}<\/td>\r?\n            <td>\{tenant\.status\}<\/td>\r?\n            <td>\r?\n              <button onClick=\{\(\) => alert\(`Suspended \$\{tenant\.name\}`\)\}>Suspend<\/button>\r?\n            <\/td>\r?\n          <\/tr>\r?\n        \)\)\}\r?\n      <\/tbody>\r?\n    <\/table>\r?\n  \);\r?\n\}\r?\n$'
+---

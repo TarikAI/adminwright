@@ -53,6 +53,9 @@ TARGETS = {"last_message", "trace", "files", "mock_calls"}
 # workspace by design. Every other file-based grader must fail there.
 PRESERVATION = {
     ("architect-plans-before-building", "no-feature-code"),
+    ("architect-plans-before-building", "page-left-as-is"),
+    ("architect-plans-before-building", "route-left-as-is"),
+    ("architect-plans-before-building", "server-left-as-is"),
     ("implementer-builds-on-real-data", "not-self-reviewed"),
     ("security-files-gaps-fixes-nothing", "defect-left-in-place"),
     ("security-files-gaps-fixes-nothing", "not-signed-off"),
@@ -226,6 +229,182 @@ class TestScaffolds(unittest.TestCase):
                             else " is listed as a preservation check but fails on the untouched workspace"))
                 finally:
                     shutil.rmtree(str(workspace), ignore_errors=True)
+
+
+    def test_a_manifest_rewritten_by_hand_does_not_pass_the_qa_case(self):
+        # A-10: `contested` alone passes on a manifest the main session rewrote with its
+        # file tools. The process grader only a CLI run satisfies must fail on it.
+        directory = SUITE / "shell" / "qa-contests-instead-of-signing"
+        _prompt, _body, case, graders = load_case(directory)
+        workspace = scaffold(directory, case)
+        try:
+            manifest = workspace / ".admin-console" / "manifest.json"
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            for entity in data["entities"]:
+                for capability in entity.get("capabilities", []):
+                    if capability["id"] == "tenant.suspend":
+                        capability["reviewStatus"] = "contested"
+            manifest.write_text(json.dumps(data, indent=2), encoding="utf-8", newline="\n")
+            self.assertTrue(initial_outcome(workspace, graders["contested"][0]))
+            self.assertFalse(initial_outcome(workspace, graders["verdict-through-the-cli"][0]),
+                             "a hand-written verdict must not pass the process grader")
+        finally:
+            shutil.rmtree(str(workspace), ignore_errors=True)
+
+
+def grader(case, name):
+    return frontmatter(SUITE / "shell" / case / "graders" / (name + ".md"))[0]
+
+
+def regex_passes(data, text):
+    found = bool(js_regex(data["pattern"], data.get("flags")).search(text))
+    return not found if data.get("match") == "not_contains" else found
+
+
+def doc_corpus():
+    """Every file a session may read while running the suite: the skill, its references,
+    the agents and the case prompts."""
+    paths = [SKILL_ROOT / "SKILL.md", SKILL_ROOT / "INTEGRATIONS.md", SKILL_ROOT / "README.md"]
+    paths += sorted((SKILL_ROOT / "references").glob("*.md"))
+    paths += sorted((SKILL_ROOT / "agents").glob("*.md"))
+    paths += sorted(SUITE.rglob("prompt.md"))
+    return [(p, p.read_text(encoding="utf-8")) for p in paths if p.is_file()]
+
+
+@unittest.skipIf(yaml is None, "PyYAML is not installed")
+class TestGradersRejectWrongAnswers(unittest.TestCase):
+    """Each grader the audit found passing on a wrong answer, checked against that answer
+    without a model (A-02, A-09, A-10, A-11). Each also passes a right answer, so the
+    tightening did not make it impossible."""
+
+    def test_trace_graders_do_not_match_the_documentation(self):
+        # A-02: `target: trace` sees tool results. One Read of multi-agent.md or
+        # agents/README.md put `STATUS: DONE` and `NEEDS_CONTEXT` in the trace.
+        trace_graders = []
+        for directory in case_dirs():
+            for name, (data, _text) in load_case(directory)[3].items():
+                if data.get("type") == "regex" and data.get("target") == "trace":
+                    trace_graders.append((directory.name + "/" + name, data))
+        self.assertGreaterEqual(len(trace_graders), 5)
+        corpus = doc_corpus()
+        for label, data in trace_graders:
+            for path, text in corpus:
+                for shape, seen in (("raw", text), ("json", json.dumps(text)),
+                                    ("tool result", json.dumps({"content": [{"type": "text", "text": text}]}))):
+                    with self.subTest(grader=label, doc=path.name, shape=shape):
+                        self.assertFalse(regex_passes(data, seen),
+                                         label + " passes on a read of " + path.name)
+        # The old, unanchored form failed this check: the corpus does quote the words.
+        joined = json.dumps("\n".join(text for _p, text in corpus))
+        self.assertTrue(re.search(r"STATUS: (?:DONE|DONE_WITH_CONCERNS)", joined))
+        self.assertTrue(re.search(r"NEEDS_CONTEXT", joined))
+
+    def test_trace_graders_pass_a_real_status_line(self):
+        returned = json.dumps({"content": [{"type": "text", "text": "STATUS: %s\nThe console ..."}]})
+        for case, statuses in (("architect-plans-before-building", ["DONE", "DONE_WITH_CONCERNS"]),
+                               ("security-files-gaps-fixes-nothing", ["DONE", "BLOCKED"]),
+                               ("harvester-asks-for-the-conversation", ["NEEDS_CONTEXT"])):
+            name = "needs-context" if case.startswith("harvester") else "returned-a-status"
+            for status in statuses:
+                self.assertTrue(regex_passes(grader(case, name), returned % status), case + " " + status)
+                self.assertTrue(regex_passes(grader(case, name), "Done.\nSTATUS: " + status + "\n"), case)
+        self.assertFalse(regex_passes(grader("harvester-asks-for-the-conversation", "needs-context"),
+                                      json.dumps("If you have no digest, return NEEDS_CONTEXT.")))
+
+    def test_the_architect_may_not_rewrite_scaffolded_source(self):
+        # A-09: file_exists sees only files the run created, so an edit to the decorative
+        # page passed `no-feature-code`. Each scaffolded file now has to match exactly.
+        base = SUITE / "_fixtures" / "support-desk"
+        for name, relative in (("page-left-as-is", "src/app/admin/tenants/page.tsx"),
+                               ("route-left-as-is", "src/app/api/admin/tenants/route.ts"),
+                               ("server-left-as-is", "src/server/tenants.ts")):
+            data = grader("architect-plans-before-building", name)
+            self.assertEqual(data["target"]["path"], relative)
+            original = (base / relative).read_text(encoding="utf-8")
+            self.assertTrue(regex_passes(data, original), name)
+            self.assertTrue(regex_passes(data, original.replace("\n", "\r\n")), name + " with CRLF")
+            for wrong in (original.replace("return", "return /* wired */", 1),
+                          original + "export const extra = 1;\n",
+                          "// wired to the real query\n" + original,
+                          "export default function Page() { return null; }\n"):
+                self.assertFalse(regex_passes(data, wrong), name + " passes on an edited file")
+
+    def test_the_session_check_needs_a_call_and_a_refusal(self):
+        # A-11: the bare word `session` in a comment scored weight 2.
+        data = grader("implementer-builds-on-real-data", "server-checks-the-session")
+        original = (SUITE / "_fixtures" / "support-desk" / "src/app/api/admin/tenants/route.ts").read_text(
+            encoding="utf-8")
+        self.assertFalse(regex_passes(data, "// TODO: session check\n" + original))
+        self.assertFalse(regex_passes(data, original.replace("export", "const session = null;\nexport", 1)))
+        right = ('import { auth } from "@/server/auth";\n' + original.replace(
+            "{\n", "{\n  const session = await auth();\n"
+            "  if (!session) return new Response(null, { status: 401 });\n", 1))
+        self.assertTrue(regex_passes(data, right))
+
+    def test_a_risky_command_is_one_capability(self):
+        # A-11: "kind":"command" and "risk":"high" could come from different capabilities.
+        data = grader("architect-plans-before-building", "roles-and-a-risky-command")
+        roles = '"roles": [{"id": "admin"}], '
+        split = roles + ('"capabilities": [{"id": "a.list", "kind": "query", "risk": "high"}, '
+                         '{"id": "a.suspend", "kind": "command", "risk": "low"}]')
+        self.assertFalse(regex_passes(data, split))
+        joined = roles + ('"capabilities": [{"id": "a.suspend", "kind": "command", '
+                          '"entityStates": {"from": ["ACTIVE"], "to": ["SUSPENDED"]}, "risk": "high"}]')
+        self.assertTrue(regex_passes(data, joined))
+        reversed_order = roles + '"capabilities": [{"risk": "critical", "roles": ["admin"], "kind": "command"}]'
+        self.assertTrue(regex_passes(data, reversed_order))
+
+    def test_the_build_order_is_a_decision(self):
+        # A-11: `spine` in a later gap or feedback entry satisfied the old pattern.
+        data = grader("architect-plans-before-building", "build-order-recorded")
+        wrong = ('"decisions": [{"id": "dec.profile", "decision": "standard profile"}], '
+                 '"gaps": [{"id": "g-1", "description": "the auth spine is missing"}]')
+        self.assertFalse(regex_passes(data, wrong))
+        self.assertTrue(regex_passes(data, '"decisions": [{"id": "dec.build-order", "decision": "tenant.list, then tenant.suspend"}]'))
+        self.assertTrue(regex_passes(data, '"decisions": [{"id": "d-7", "decision": "Walking skeleton first: staff sign-in"}]'))
+
+
+@unittest.skipIf(yaml is None, "PyYAML is not installed")
+class TestEvalWorkflow(unittest.TestCase):
+    """The manual workflow spends real money with a repository secret (T-18, A-17)."""
+
+    def setUp(self):
+        self.path = SKILL_ROOT / ".github" / "workflows" / "behavior-evals.yml"
+        self.workflow = yaml.safe_load(self.path.read_text(encoding="utf-8"))
+
+    def test_the_api_key_reaches_only_the_steps_that_need_it(self):
+        for job_id, job in self.workflow["jobs"].items():
+            self.assertNotIn("secrets.", json.dumps(job.get("env") or {}), job_id + ": job-level env")
+            for step in job["steps"]:
+                if "secrets." in json.dumps(step):
+                    self.assertIn(step.get("name"), ("Require the API key secret", "Run the suite"),
+                                  "a secret reaches step " + str(step.get("name") or step.get("uses")))
+                    self.assertNotIn("uses", step, "a secret reaches a third-party action")
+
+    def test_every_global_npm_install_names_a_version(self):
+        installs = 0
+        for job in self.workflow["jobs"].values():
+            for step in job["steps"]:
+                for command in re.findall(r"npm install -g [^\n&|;]+", step.get("run", "")):
+                    installs += 1
+                    for package in command.split()[3:]:
+                        if not package.startswith("-"):
+                            self.assertRegex(package, r"^@?[^@\s]+@\d+\.\d+\.\d+$", command)
+        self.assertGreater(installs, 0)
+
+    def test_the_default_cost_ceiling_covers_the_shell_estimate(self):
+        # A-17: a 25-dollar default stopped a shell run partway, wasting it.
+        run_step = [s for s in self.workflow["jobs"]["evals"]["steps"] if s.get("name") == "Run the suite"][0]
+        readme = (SUITE / "README.md").read_text(encoding="utf-8")
+        shell_estimate = int(re.search(r"--tag shell [^\n]*--max-cost-usd (\d+)", readme).group(1))
+        default = str(self.workflow[True if True in self.workflow else "on"]["workflow_dispatch"]["inputs"]
+                      ["max_cost_usd"].get("default", ""))
+        if default:
+            self.assertGreaterEqual(int(default), shell_estimate)
+        else:
+            defaults = dict(re.findall(r"(smoke|shell|all)\) MAX_COST=(\d+)", run_step["run"]))
+            self.assertGreaterEqual(int(defaults["shell"]), shell_estimate)
+            self.assertGreater(int(defaults["all"]), int(defaults["shell"]))
 
 
 def initial_outcome(workspace, grader):

@@ -1,6 +1,8 @@
 ---
+# The STATUS line must start a returned message or a line of one. The protocol docs quote
+# the same words after a backtick, so a Read of them never satisfies this.
 type: regex
 target: trace
-pattern: 'STATUS: (?:DONE|DONE_WITH_CONCERNS|BLOCKED)'
+pattern: '(?:"|\\n|\n)STATUS: (?:DONE|DONE_WITH_CONCERNS|BLOCKED)\b'
 arm: with-only
 ---

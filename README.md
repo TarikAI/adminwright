@@ -163,8 +163,9 @@ the never-promote list, and the "was it the skill or was it me?" test.
 
 The `adminwright-harvester` agent automates the whole loop as the final pass of every run:
 it sweeps the manifest, the worklogs, *and the session's conversation* for observations,
-banks them, and — when the bar clears — edits the skill's references **and the agent
-prompts themselves**. The agents are part of the write surface on purpose: a pass that
+banks them, and — when the bar clears — opens a lesson with a proposed edit to the skill's
+references **or the agent prompts themselves**, for someone other than the harvester to
+adopt or reject. The agents are part of the write surface on purpose: a pass that
 keeps skipping a step or a harness that fights the workflow is a defect in the role prompt,
 and fixing it there is how the agents get better with every project instead of repeating
 the same friction.
@@ -237,7 +238,7 @@ break admin consoles in each.
 This repository is also a Claude Code plugin marketplace. Installing it this way makes the
 skill available in every project on the machine. Install once, then pick up new commits
 deliberately: Claude Code leaves auto-update **off** for third-party marketplaces by default
-([docs](https://code.claude.com/docs/en/discover-plugins#configure-auto-updates)).
+([docs](https://code.claude.com/docs/en/discover-plugins#keep-plugins-updated)).
 
 ```bash
 claude plugin marketplace add TarikAI/adminwright
@@ -249,7 +250,7 @@ claude plugin install adminwright@tarikai
 
 Then invoke it with `/adminwright:adminwright`, or just describe the admin work and let the
 model reach for it. To pick up new commits later, run
-`claude plugin marketplace update tarikai` followed by `claude plugin update adminwright`,
+`claude plugin marketplace update tarikai` followed by `claude plugin update adminwright@tarikai`,
 or turn auto-update on for the `tarikai` marketplace: in the CLI, `/plugin`, **Marketplaces**,
 `tarikai`, **Enable auto-update**; anywhere, by adding `"autoUpdate": true` to the entry that
 `marketplace add` wrote to `~/.claude/settings.json`:
@@ -288,9 +289,14 @@ python /path/to/adminwright/scripts/install_agents.py --harness <name> --project
 | opencode | the project's `.agents/skills/adminwright/` (or `.opencode/skills/`) | `.opencode/agents/` (as subagents) |
 | OpenAI Codex | the project's `.agents/skills/adminwright/` | `.codex/agents/*.toml` + `.adminwright/agents/` + `AGENTS.md` block |
 | Google Antigravity | the project's `.agents/skills/adminwright/` | `.agents/agents/<name>/agent.md` + `.adminwright/agents/` + `AGENTS.md` block |
-| Gemini CLI | the project's `.agents/skills/adminwright/` (or `.gemini/skills/`) | `.gemini/agents/` + `.adminwright/agents/` + `GEMINI.md` block |
+| Gemini CLI (replaced by Antigravity CLI for unpaid-tier and Google One users since 18 June 2026: use `--harness antigravity` there) | the project's `.agents/skills/adminwright/` (or `.gemini/skills/`) | `.gemini/agents/` + `.adminwright/agents/` + `GEMINI.md` block |
 | Cursor | the project's `.agents/skills/adminwright/` (or `.cursor/skills/`) | `.cursor/agents/` + `.adminwright/agents/` + `.cursor/rules/adminwright.mdc` |
 | Pi, anything else | Pi: the project's `.agents/skills/adminwright/`; otherwise point the agent at `SKILL.md` | `.adminwright/agents/` (harness `pi` adds the `AGENTS.md` block; `generic` prints it) |
+
+Rerun the installer after each update of the skill. It leaves alone, and names, any
+installed file you edited since it last wrote it (`--force` overwrites), and `--dry-run`
+shows what it would write without writing. In Codex, the agents in `.codex/agents/` load
+only once you trust the project.
 
 In Claude Code a copy in `~/.claude/skills/adminwright/` loads as the plugin
 `adminwright@skills-dir`. It never updates itself, and once the marketplace plugin is installed
