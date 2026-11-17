@@ -35,10 +35,15 @@ permissions:
   contents: read
   pull-requests: write
 
+concurrency:
+  group: ocr-advisory-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ocr-advisory:
     name: ocr advisory review
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # 'true' or 'false', never a secret value.
       HAS_OCR: ${{ secrets.OCR_LLM_URL != '' && secrets.OCR_LLM_TOKEN != '' }}

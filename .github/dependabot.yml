@@ -15,5 +15,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # One pull request per week for every action bump, instead of one per action.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     ignore:
       - dependency-name: "alibaba/open-code-review"

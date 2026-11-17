@@ -22,7 +22,7 @@ is accepted along with a fix timeline.
 ## What counts as a vulnerability here
 
 Adminwright is a skill and a validator, not a running service, so the threat model is narrow.
-Two things genuinely matter:
+Three things genuinely matter:
 
 **1. A validator bypass.** Any way to make a manifest backed by mock data, fabricated
 evidence, or disconnected controls pass `validate --phase release` cleanly. This is the
@@ -39,10 +39,18 @@ the project root, and evidence files whose contents said "TODO: replace with rea
 arguments. Anything that makes it write outside the project directory, read a file it was not
 pointed at, or execute input would be a real vulnerability.
 
+**3. A flaw in the reference schema pack.** Every console built with this skill copies
+`assets/admin-core-schema/`, so a way to defeat a control the pack claims to enforce
+(append-only audit rows, the hash chain, separation of duties on approvals, the
+`grants.sql` privileges, search-path pinning) is inherited by each of them. That is in
+scope here, unlike a vulnerability in one console's own code. Report it by the private
+route above, not in a public issue.
+
 ## What does not count
 
 - Guidance you disagree with. Open an issue; see [CONTRIBUTING.md](CONTRIBUTING.md).
-- An admin console built *using* this skill having a vulnerability. The skill raises the floor;
+- An admin console built *using* this skill having a vulnerability in its own code (a flaw
+  in the copied schema pack is class 3 above). The skill raises the floor;
   it does not audit your code. High-risk and regulated platforms need qualified human security
   review, as [references/security-governance.md](references/security-governance.md) states.
 - A crash on malformed input, unless it writes something or leaks a path. It should exit 2 with
