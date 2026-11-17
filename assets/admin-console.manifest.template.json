@@ -4,7 +4,7 @@
   "profile": "standard",
   "projectRoot": "..",
   "platform": {
-    "id": "",
+    "id": "<name>-<6 hex>",
     "name": "",
     "summary": "",
     "archetypes": [],
@@ -144,7 +144,19 @@
       "rationale": ""
     }
   ],
-  "decisions": [],
+  "decisions": [
+    {
+      "id": "dec.profile",
+      "kind": "profile",
+      "decision": "Run at the standard profile",
+      "reason": "chosen when the manifest was created; not yet confirmed with the owner",
+      "evidence": [],
+      "status": "assumed",
+      "appliesTo": [
+        "*"
+      ]
+    }
+  ],
   "gaps": [],
   "declaredStatic": [],
   "feedback": [],

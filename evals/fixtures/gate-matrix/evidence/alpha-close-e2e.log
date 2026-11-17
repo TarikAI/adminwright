@@ -1,0 +1,4 @@
+$ playwright test alpha-close
+1 failed: alpha.close returns 500
+
+# exit code: 1

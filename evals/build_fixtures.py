@@ -498,9 +498,10 @@ def build_matrix():
                         risk="critical", entityStates={"from": ["new"], "to": ["done"]},
                         uiRoutes=["/admin/alpha"], serverOperations=["AlphaService.close"],
                         authorizationPolicies=["policy/alpha.close"],
-                        auditEvents=[],                     # audit-events-missing
+                        auditEvents=[""],                   # audit-events-missing: a blank member is none
                         dataBinding="postgres:alpha via AlphaService.close",
-                        tests=["tests/alpha.spec.ts"], evidence=["evidence/build.log"],
+                        tests=["tests/alpha.spec.ts"],
+                        evidence=["evidence/alpha-close-e2e.log"],   # evidence-records-failure
                         reviewStatus="unreviewed"),
          ]},
         {"id": "beta", "name": "Beta", "sourceOfTruth": "postgres:beta",
@@ -611,11 +612,20 @@ def build_matrix():
     write(root, "evidence/audit-run.log",                                       # gate-evidence-failed
           "$ npm audit --omit=dev\n# started: 2026-09-24T09:00:00Z\n"
           "3 vulnerabilities (1 high)\n\n# exit code: 1\n")
+    write(root, "evidence/alpha-close-e2e.log",                                 # evidence-records-failure
+          "$ playwright test alpha-close\n1 failed: alpha.close returns 500\n\n# exit code: 1\n")
+    cross["audit"].update({"tamperProtected": False,                            # crosscutting-flag-waived
+                           "notApplicable": {"tamperProtected": "three operators; no hash chain yet"}})
     m["decisions"] = [
         {"id": "dec.profile", "decision": "Profile", "reason": "",             # decision-reason-missing
          "evidence": [], "status": "confirmed", "appliesTo": ["nonexistent"]}, # decision-applies-to-unknown
         {"id": "dec.scope", "decision": "Scope", "reason": "Not yet asked",    # decision-assumed
          "evidence": [], "status": "assumed", "appliesTo": ["*"]},
+        # decision-self-confirmed: an agent waives a capability and names nobody who agreed,
+        # so gamma.legacy stays not-applicable-undecided
+        {"id": "dec.legacy", "kind": "not-applicable", "decision": "No legacy purge",
+         "reason": "the vendor does it", "evidence": [], "status": "confirmed",
+         "appliesTo": ["gamma.legacy"]},
     ]
     m["declaredStatic"] = [
         {"id": "static.binding", "value": "rates", "reason": "fixed by contract", "approvedBy": "cfo",
@@ -639,6 +649,10 @@ def build_matrix():
          "status": "open", "rationale": "", "evidence": []},                    # gap-unresolved, reviewed-with-blocking-gap
         {"id": "gap.accepted", "severity": "low", "description": "Accepted without saying why",
          "status": "accepted", "rationale": "", "evidence": []},                # gap-rationale-missing
+        {"id": "gap.closed", "severity": "high", "description": "Export ignores the row scope",
+         "status": "fixed", "rationale": "", "evidence": []},                   # gap-fix-unproven
+        {"id": "gap.waved", "severity": "critical", "description": "Audit rows can be deleted",
+         "status": "accepted", "rationale": "ship it", "evidence": []},         # gap-acceptance-undecided
     ]
     save(root, m)
     return root

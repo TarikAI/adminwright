@@ -9,6 +9,7 @@ case is something a truthful agent actually wrote and the validator actually rej
 
 import json
 import unittest
+from pathlib import Path
 
 from cli_helpers import TempProject, acm, run
 
@@ -427,6 +428,202 @@ class TestScreensAreAddedIncrementally(TempProject):
         self.assertIn("ERROR: [screen-incomplete]", out)
         _code, out, _err = self.validate(phase="plan")
         self.assertIn("WARN: [screen-incomplete]", out)
+
+
+USER_SPEC = (
+    "test('user.list via /admin/users', async () => {\n"
+    "  expect((await listUsers({tenantId: 't-1'})).length).toBe(3);\n"
+    "});\n"
+)
+
+
+class FalseBlockCase(TempProject):
+    """The honest console, judged in process, at release."""
+
+    profile = "regulated"
+
+    def setUp(self):
+        super().setUp()
+        self.data = self.build_honest_manifest()
+        self.cap = self.capability_of(self.data)
+
+    def put(self, rel, body):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+    def result(self, profile="regulated"):
+        return acm.validate_manifest(self.data, "release", self.root, profile,
+                                     manifest_dir=self.manifest.parent)
+
+    def errors(self, profile="regulated"):
+        return {item["rule"] for item in self.result(profile).errors}
+
+    def rule_names(self, profile="regulated"):
+        return {item["rule"] for item in self.result(profile).items}
+
+
+class TestTestPathsAreNotScanned(FalseBlockCase):
+    """R-15 -- a test file's path is never placeholder-scanned; its content never was."""
+
+    def test_honest_test_names_with_mock_or_fake_pass(self):
+        self.put("src/test/java/UserControllerMockMvcTest.java",
+                 "class UserControllerMockMvcTest {\n  @Test\n  void userList() {\n"
+                 "    assertEquals(3, controller.list(\"user.list\").size());\n  }\n}\n")
+        self.put("tests/user-fake-clock.spec.ts", USER_SPEC)
+        self.put("tests/fakes/authz.spec.ts",
+                 "test('role matrix', () => {\n  expect(can('ops', 'user.list', {})).toBe(true);\n});\n")
+        self.cap["tests"] = ["tests/user-fake-clock.spec.ts",
+                             "src/test/java/UserControllerMockMvcTest.java"]
+        self.data["screens"][0]["tests"] = ["tests/user-fake-clock.spec.ts"]
+        self.data["crossCutting"]["authorization"]["policyTests"] = ["tests/fakes/authz.spec.ts"]
+        for profile in ("internal", "standard", "regulated"):
+            self.assertEqual(self.errors(profile), set(), profile)
+
+    def test_a_mock_binding_is_still_caught(self):
+        self.cap["dataBinding"] = "mockUserRepository.findAll"
+        self.assertIn("placeholder-scan", self.errors("internal"))
+
+
+class TestImplementationFieldsAreScanned(FalseBlockCase):
+    """R-11 -- the fields that say where data comes from are scanned like their neighbours."""
+
+    def test_queue_source_integration_operations_and_command_prose(self):
+        self.data["workQueues"] = [{
+            "id": "refunds", "purpose": "Review refunds", "roles": ["ops"],
+            "source": "mockRefundQueue.fakeItems", "priorityRule": "oldest first", "sla": "4h",
+            "actions": ["approve"], "status": "planned", "rationale": "", "tests": [],
+        }]
+        self.data["integrations"] = [{
+            "id": "stripe", "direction": "outbound", "sourceOfTruth": "Stripe",
+            "operations": ["stubStripeClient.cancel", "fakeInvoices.read"],
+            "failureHandling": "retry", "reconciliation": "nightly", "monitoring": "alerts",
+            "status": "planned", "rationale": "", "tests": [],
+        }]
+        self.cap.update({"idempotency": "TODO: mock idempotency key",
+                         "recovery": "placeholder - not implemented", "concurrency": "fake lock"})
+        paths = {item["path"] for item in self.result("internal").errors
+                 if item["rule"] == "placeholder-scan"}
+        for expected in ("workQueues[refunds].source", "integrations[stripe].operations[0]",
+                         "integrations[stripe].operations[1]", "idempotency", "recovery",
+                         "concurrency"):
+            self.assertTrue(any(path.endswith(expected) for path in paths), (expected, paths))
+
+    def test_spanish_todo_in_command_prose_is_a_word(self):
+        self.cap["recovery"] = "restaurar todo el registro desde la copia de seguridad"
+        self.assertNotIn("placeholder-scan", self.rule_names("internal"))
+
+
+PYTEST_VERBOSE = (
+    "$ pytest -v\n"
+    "============ test session starts ============\n"
+    "tests/test_auth.py::test_rejects_fake_session_token PASSED [ 50%]\n"
+    "tests/test_users.py::test_user_list_scoped PASSED [100%]\n"
+    "============ 2 passed in 0.31s ============\n\n# exit code: 0\n"
+)
+
+
+class TestVerboseTestLogs(FalseBlockCase):
+    """R-16 -- a test's title in run output is its name, not data an operator sees."""
+
+    def test_verbose_reporters_naming_fake_tests_pass(self):
+        for body in (
+            PYTEST_VERBOSE,
+            "$ vitest run --reporter=verbose\n ✓ tests/auth.spec.ts > rejects a fake session token 3ms\n"
+            " × tests/auth.spec.ts > uses a stub gateway 2ms\n Tests 6 passed (6)\n",
+            "$ go test -v ./...\n=== RUN   TestRejectsFakeToken\n--- PASS: TestRejectsFakeToken (0.00s)\n"
+            "ok  \texample.com/admin\t0.01s\n",
+            "$ npx playwright test --reporter=list\n  ✓  1 [chromium] › auth.spec.ts:3:5 › "
+            "rejects a mock session (1.2s)\n  6 passed (12.4s)\n",
+            "$ node --test\nok 1 - rejects a fake session token\n# pass 6\n",
+        ):
+            self.put("evidence/tests.log", body)
+            self.assertNotIn("placeholder-scan", self.rule_names("regulated"), body)
+
+    def test_output_that_names_a_mock_source_is_still_flagged(self):
+        self.put("evidence/tests.log", "$ pytest -v\nrendered 12 rows from mockUsers\n\n# exit code: 0\n")
+        self.assertIn("placeholder-scan", self.errors("internal"))
+
+    def test_one_registration_covers_every_citation_of_a_log(self):
+        self.put("evidence/tests.log", "vitest run\n  mock server started for the smoke check\n"
+                                       "  Tests 6 passed (6)\n")
+        found = [item for item in self.result().errors if item["rule"] == "placeholder-scan"]
+        self.assertEqual(len(found), 2, found)  # the capability's evidence and the tests gate
+        for path in ("evidence/tests.log#content", "qualityGates[tests].evidence[0]#content"):
+            self.data["declaredStatic"] = [{
+                "id": "static.testslog", "path": path, "value": "captured log",
+                "reason": "the smoke check really starts a mock server", "approvedBy": "cto",
+                "evidence": [],
+            }]
+            names = self.rule_names("regulated")
+            self.assertNotIn("placeholder-scan", names, path)
+            self.assertNotIn("declared-static-unused", names, path)
+
+
+class TestTestShapes(FalseBlockCase):
+    """R-17, R-18 -- support folders and Deno tests."""
+
+    def test_a_spec_under_a_support_domain_folder_is_a_test(self):
+        self.put("tests/support/user.spec.ts", USER_SPEC)
+        self.cap["tests"] = ["tests/support/user.spec.ts"]
+        self.data["screens"][0]["tests"] = ["tests/support/user.spec.ts"]
+        self.assertEqual(self.errors("regulated"), set())
+
+    def test_support_helpers_are_still_not_tests(self):
+        shape = acm.looks_like_test_file
+        body = "describe('commands', () => { expect(1).toBe(cy.x()); });\n"
+        self.assertFalse(shape(Path("cypress/support/commands.ts"), body))
+        self.assertFalse(shape(Path("spec/support/helpers.rb"), "describe 'x' do\nend\n"))
+        self.assertTrue(shape(Path("tests/support/tickets.spec.ts"), body))
+
+    def test_a_deno_test_is_a_test(self):
+        self.put("tests/user_test.ts",
+                 "import { assertEquals } from 'jsr:@std/assert';\n"
+                 "Deno.test('user.list returns the tenant users', async () => {\n"
+                 "  const res = await listUsers();\n  assertEquals(res.length, 2);\n});\n")
+        self.cap["tests"] = ["tests/user_test.ts"]
+        self.assertEqual(self.errors("regulated"), set())
+        self.assertTrue(acm.looks_like_test_file(
+            Path("tests/x_test.ts"), "Deno.test.ignore('x', () => { assertEquals(f(), 1); });\n"))
+
+
+class TestEvidenceNames(FalseBlockCase):
+    """R-19, R-20 -- an evidence file is judged with its folder, and on what it says."""
+
+    def test_licence_scans_and_written_reviews_in_evidence_are_evidence(self):
+        self.put("evidence/license-check.log",
+                 "$ license-checker --summary\n├─ MIT: 412\n└─ Apache-2.0: 37\n")
+        self.put("evidence/security.md", "Security review 2026-11-17\n- 14 endpoints, 0 findings\n")
+        for gate in self.data["qualityGates"]:
+            if gate["id"] == "security":
+                gate["evidence"] = ["evidence/security.log", "evidence/license-check.log",
+                                    "evidence/security.md"]
+        self.assertEqual(self.errors("regulated"), set())
+
+    def test_project_documents_are_still_refused(self):
+        reason = acm.non_evidence_reason
+        for relative in ("README.md", "LICENSE", "docs/CHANGELOG.md", "SECURITY.md",
+                         "package.json", "evidence/package.json"):
+            self.assertNotEqual(reason(Path(relative), "gate", relative), "", relative)
+
+    def test_specific_one_line_evidence_is_informative(self):
+        vague = acm.is_uninformative
+        self.assertFalse(vague("axe-core 4.10: 0 violations across 14 admin routes, checked at 320px and 1440px"))
+        self.assertFalse(vague("Audit sweep: 18/18 privileged mutations verified with actor, target, reason, correlationId"))
+        for text in ("tests passed", "done, all good", "command completed, exit 0", "OK"):
+            self.assertTrue(vague(text), text)
+
+
+class TestDigitLookalikes(unittest.TestCase):
+    """R-23 -- a digit standing in for a letter inside a word does not hide a placeholder."""
+
+    def test_leetspeak_is_caught_and_real_digits_are_not(self):
+        for text in ("postgres:tenants via M0ckTenantRepository.findAll", "F4keTenantService.list",
+                     "stubb3dQuery"):
+            self.assertIsNotNone(acm.placeholder_match(text), text)
+        for text in ("s3://bucket/tenants", "PostgreSQL 16", "k8s job runner", "v1/tenants",
+                     "ipv4 allow-list", "oauth2 client", "base64 payload", "x509 certificate"):
+            self.assertIsNone(acm.placeholder_match(text), text)
 
 
 if __name__ == "__main__":

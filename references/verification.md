@@ -40,7 +40,7 @@ Mark a capability `implemented` only when every required link exists.
 
 Evidence is a repository path that exists, is non-empty, and contains the assertion it claims. A boolean set to `true` is not evidence. A status string is not evidence. An entry may instead be an `http://` or `https://` address, `command:<a command line to re-run>` or `manual:<a human observation>`. Only paths are opened, so none of those three can satisfy a required list on its own: a list made only of them fails `evidence-not-resolvable` (a warning at `internal`, an error at `standard` and `regulated`). A `manual:` entry also raises `manual-evidence` (a warning at `internal` and `standard`, an error at `regulated`).
 
-What is content-scanned: test files (`tests[]`, `policyTests`, and the `tests` of screens, queues and integrations) are checked for shape and assertions but never scanned for placeholder words. Run output listed as `evidence` (capability, gate, `crossCutting` and fixed-gap evidence) is scanned by whole word. Manifest implementation fields are scanned hardest, including inside identifiers. The word lists, the skipped framework idioms and the `declaredStatic` escape for a captured log are in [test-data.md](test-data.md).
+What is content-scanned: test files (`tests[]`, `policyTests`, and the `tests` of screens, queues and integrations) are checked for shape and assertions but never scanned for placeholder words, and neither are their paths (`UserControllerMockMvcTest.java` is a test's honest name). Run output listed as `evidence` (capability, gate, `crossCutting` and fixed-gap evidence) is scanned by whole word, except the lines a test runner prints about one test (`::test_x PASSED`, `✓ title`, `--- PASS: TestX`, `ok 1 - title`), because a test's title is its name. Manifest implementation fields are scanned hardest, including inside identifiers: `dataBinding`, the operation lists, `workQueues[].source`, `integrations[].operations`, and as prose a command's `idempotency`, `recovery` and `concurrency`. The word lists, the skipped framework idioms and the `declaredStatic` escape for a captured log are in [test-data.md](test-data.md); one `#content` entry naming the file (`evidence/tests.log#content`) covers every place that cites it.
 
 Evidence paths are repository-relative and resolve against the manifest's `projectRoot` (written by `init`, relative to the folder holding the manifest; absent means that folder's parent), so `validate`, `add`, `set` and `claim` judge a path the same way from any working directory. A path that resolves outside the project is refused. `add` and `set` rewrite backslashes as `/` in `tests`, `evidence` and `policyTests` and say so.
 
@@ -56,17 +56,34 @@ Evidence paths are repository-relative and resolve against the manifest's `proje
 | `auditEvents` | `kind` is `command`, `job` or `export` | at least one event |
 | `safeguards`, `recovery` | `risk` is `high` or `critical` | non-empty |
 | `implementedBy` | `status: implemented` | who built it; stamped by `claim --role implementer`, never cleared by `release-claim` |
-| `reviewStatus`, `reviewedBy` | release | `reviewed` needs a `reviewedBy` that is not the implementer (an error at `regulated`, a warning at `standard`); set `reviewedBy` before `reviewStatus`. At every profile, `reviewed` is refused while an open critical or high gap targets the capability, `contested` needs an open gap naming it, and `contested` never becomes `reviewed` directly |
+| `reviewStatus`, `reviewedBy` | release | `reviewed` needs a `reviewedBy` that is not the implementer, compared after folding case, edge punctuation, invisible and look-alike characters; once `agents[]` lists anyone, it must also be a registered agent whose role is `qa`, `security` or `ux-reviewer` (`reviewer-identity`, an error at `regulated`, a warning at `standard`); set `reviewedBy` before `reviewStatus`. At every profile, `reviewed` is refused while an open critical or high gap targets the capability, `contested` needs an open gap naming it, and `contested` never becomes `reviewed` directly |
 | `contestedBy` | a reviewer contested it | the contester may not also be the `reviewedBy` that clears it (`contest-self-cleared`) |
-| `rationale` | `status` is `blocked`, `deferred` or `not-applicable` | a `not-applicable` capability needs nothing else; a command, job or export also needs a confirmed decision that names it |
+| `rationale` | `status` is `blocked`, `deferred` or `not-applicable` | a `not-applicable` capability needs nothing else; a command, job or export also needs a confirmed decision that names it. A `not-applicable` query is not the entity's query (`entity-query-missing`) |
 
 `implementedBy` is compared with `reviewedBy` together with `owner` and every implementer that ever held the capability (`agents[].previouslyOwned`), so releasing a claim never launders self-review.
 
 Elsewhere in the manifest:
 
 - **`platform.domainTerms`** declares domain nouns that read like placeholders, such as a lab's `Sample`, a task app's `Todo` or an exam product's `Mock exam`. Each term must name an entity by its id or name (`domain-term-unbacked`), so `mock` cannot be declared away without modelling a Mock.
-- **`decisions[].kind`** is one of `profile`, `not-applicable`, `risk-acceptance`, `buy-vs-build`, `design` or `other`. A `not-applicable` gate other than `tests` and `security` (which never are), and a `not-applicable` command, job or export, each need a confirmed decision of kind `not-applicable` whose `appliesTo` names it.
+- **`decisions[].kind`** is one of `profile`, `not-applicable`, `risk-acceptance`, `buy-vs-build`, `design` or `other`. A `not-applicable` gate other than `tests` and `security` (which never are, at any profile: `gate-always-required`), and a `not-applicable` command, job, export, integration or work queue, each need a confirmed decision of kind `not-applicable` whose `appliesTo` names it.
+- **`decisions[].confirmedBy`** names the person who confirmed a `not-applicable` or `risk-acceptance` decision (name, role, date). Only a person waives a gate or accepts risk, so a confirmed decision of those kinds without one, or naming a registered agent or the owner, implementer or reviewer of a capability it covers, does not count and is `decision-self-confirmed`. The validator cannot prove a person typed the name; it makes an agent write a false name rather than flip a status, which is a lie a reviewer can catch. A dispatched agent never writes `confirmedBy`: it leaves the decision `assumed` and asks. A file a decision cites in `evidence` must exist.
 - **Keys the schema does not declare** are `unknown-field`, except keys beginning `x-`, which hold project-specific data.
+
+### crossCutting flags the release gate requires
+
+At `--phase release` each flag below must be `true` (`crosscutting-flag`, an error at every profile), and each section needs `evidence` (`crosscutting-evidence`). A flag you cannot set truthfully is a gap, not a value to set.
+
+| Section | Always | Also when |
+|---|---|---|
+| `authentication` | `implemented`, `mfaForPrivilegedRoles`†, `sessionRevocation` | `stepUpForSensitiveActions`: an implemented capability is `high` or `critical` |
+| `authorization` | `serverEnforced`, `defaultDeny`, `objectAndScopeChecks` | |
+| `audit` | `privilegedMutations`, `capturesActorTargetReasonResult`, `tamperProtected`† | `capturesSafeBeforeAfter`: an implemented command, job or export; `privilegedReadsWhenRequired`: `regulated`, or `standard` with `platform.regulatedData` (`privileged-read-audit`) |
+| `safety` | `riskClassifiedActions`, `recoveryDefined` | `highRiskApprovalOrStepUp`: an implemented `high` or `critical` capability; `bulkPreviewAndPartialFailure`: an implemented job or export |
+| `data` | `releaseUsesRealSources`, `sensitiveFieldsClassified`, `retentionDefined` | `tenantIsolationTested`: tenancy `multi-tenant` or `hybrid` |
+| `experience` | `keyboardCriticalFlowsTested`†, `responsiveCriticalFlowsTested`†, `localizationRequirementsHandled` | a console with no screens and no `ui` capability needs only the last |
+| `observability` | `adminApiInstrumented`, `highRiskActionsDetectable`, `correlationIdsExposedSafely` | `jobsAndIntegrationsMonitored`: any work queue, integration or implemented job |
+
+† At `internal` only, a flag marked † may instead carry a rationale, `crossCutting.<section>.notApplicable.<flag>` (for example `crossCutting.audit.notApplicable.tamperProtected: "three operators; append-only grants, no hash chain"`). That is `crosscutting-flag-waived`: a warning at `internal`, an error at `standard` and `regulated`, where the flag stays required. No other flag can be waived. Every implemented screen also needs `responsive: true` and `accessibilityStatus: implemented` at every profile (`screen-responsive`, `screen-accessibility`).
 
 ## The completeness test
 
@@ -97,10 +114,13 @@ Record the failing step in `gaps[]` with the workflow name. A workflow that fail
 - **Tiered rules:** the `accessibility` and `performance` gates may be `not-applicable` with a rationale only at `internal`; privileged reads of regulated data must be audited at `regulated`, and at `standard` when `platform.regulatedData` is non-empty.
 - **Completeness rules** (starred in the table) describe an unfinished model, not a malformed one, so before `--phase release` they warn whatever the profile says. A half-built manifest is not blocked; a released one is.
 
-Choosing a profile is a recorded decision, not a default. Write it into `decisions[]` with `status: confirmed` and a reason drawn from evidence: data sensitivity, `platform.regulatedData`, tenancy and whether tenants are external customers, blast radius of the highest-risk command, operator population, and any contractual or audit obligation. `init` records the choice as an `assumed` decision, `dec.profile` (`appliesTo: ["*"]`, the whole manifest), so an unexamined default cannot pass unnoticed: `decision-assumed` warns at `standard` and fails the release gate at `regulated` until the decision is confirmed with a real reason.
+Choosing a profile is a recorded decision, not a default. Write it into `decisions[]` with a reason drawn from evidence, and have the owner confirm it: data sensitivity, `platform.regulatedData`, tenancy and whether tenants are external customers, blast radius of the highest-risk command, operator population, and any contractual or audit obligation. `init` records the choice as an `assumed` decision, `dec.profile` (`appliesTo: ["*"]`, the whole manifest), so an unexamined default cannot pass unnoticed: `decision-assumed` warns at `standard` and fails the release gate at `regulated` until the decision is confirmed with a real reason. Name the profile as `<profile> profile` in the decision sentence; a sentence naming several profiles any other way is `profile-decision-mismatch`.
+
+Record the reason first. Set `confirmed` only after a person has answered; a dispatched agent leaves the decision `assumed` and files a `blocked` gap asking for it:
 
 ```text
-python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'decisions[dec.profile].reason' --value 'multi-tenant, external customers, card data in scope; confirmed with the product owner'
+python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'decisions[dec.profile].reason' --value '<the evidence: data classes, tenancy, blast radius>'
+python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'decisions[dec.profile].confirmedBy' --value '<name, role, YYYY-MM-DD of the person who answered>'
 python <skill-dir>/scripts/admin_console_manifest.py set --manifest <project-root>/.admin-console/manifest.json --path 'decisions[dec.profile].status' --value confirmed
 ```
 
@@ -108,7 +128,7 @@ Honest tiering is the point. A team must be able to pass truthfully at its tier 
 
 Two rules keep lower tiers honest:
 
-- A lower profile lowers the gate, never the truth requirement. Every rule that is `warn` at your profile is a real finding. Triage each one and either fix it or record it in `gaps[]` with `status: accepted` and a rationale.
+- A lower profile lowers the gate, never the truth requirement. Every rule that is `warn` at your profile is a real finding. Triage each one: fix it, or file it in `gaps[]` and leave it `open` for a person. An agent proposes an acceptance; only a person accepts. A `critical` or `high` gap may be `accepted` only with a confirmed `risk-acceptance` decision whose `appliesTo` names the gap and whose `confirmedBy` names that person (`gap-acceptance-undecided`, an error at every profile); then set the gap's `status` and `rationale`. A `critical` or `high` gap set to `fixed` must cite the run that proves the fix (`gap-fix-unproven`); an OCR gap's own review record is not that proof.
 - The placeholder scan and the unregistered-static rule are `error` at every profile. There is no tier at which fake data in the release path is acceptable. The only escape is `declaredStatic[]` with a reason and an approver.
 
 Escalate the profile when any of these becomes true: `regulatedData` is non-empty, tenancy is multi-tenant with external customers, a command moves money or grants access, or an external audit obligation applies.
@@ -123,13 +143,14 @@ A gate is only as strong as the file it cites, so the validator judges the whole
 - Nothing under `.admin-console/` counts as evidence (`evidence-inside-manifest-dir`): the manifest is the claim, not proof of it.
 - A file cited as a test must be shaped like one and contain a real assertion. The shape is the runner's own convention for the file's language, such as `*.spec.ts`, `test_*.py`, `*_test.go`, `*_spec.rb` or `*Test.php`, or a runner's marker inside a source file that runner executes. JVM, .NET and Swift files also need a test annotation and a test name or test folder. A log or a note is never a test, whatever its name. Comments, `import { assert }`, `console.assert`, Kotlin `check()` and Rust `.expect()` are not assertions, and a tautology such as `expect(true).toBe(true)` does not count. At `regulated` a spec cited by N capabilities needs at least N assertions, unless it is parametrised (`it.each`, `@pytest.mark.parametrize`, `[Theory]`, a Go table loop).
 - Test files are not placeholder-scanned; the boundary is where a path appears, not what the file contains.
-- A test file is not gate evidence (`evidence-is-test-file`), one file may not be the evidence for more than two gates or for a gate and a `crossCutting` section (`evidence-shared`), and one spec may not be the test for more than three capabilities, or for capabilities, screens and `policyTests` at once (`test-file-shared`).
-- A cited test must name its capability (`evidence-token-match`): the capability id or one of its `serverOperations`, never a `uiRoute`, because every capability on a screen shares the route. A warning at `standard`, an error at `regulated`.
+- A test file is not gate evidence (`evidence-is-test-file`), and one file may not be the evidence for more than two gates (unless it shows each gate's `command` running) or for a gate and a `crossCutting` section (`evidence-shared`). One spec may be the test for any number of capabilities, screens and `policyTests`, provided it names each capability it proves, by id or a server operation (`test-file-shared`); at `regulated` it also needs one assertion per capability unless it is parametrised (`test-asserts-nothing`).
+- A cited test must name its capability (`evidence-token-match`): the capability id or one of its `serverOperations`, never a `uiRoute`, because every capability on a screen shares the route. Only identifier-shaped operations count (`TenantService.suspend`, `ns::fn`, `suspend_tenant`, a command of plain words), never code such as `expect(res.status)`. A screen's test names its id as a word, or its route when the route is at least four characters. A warning at `standard`, an error at `regulated`.
 - A gate's evidence must mention the gate id or a word from the gate's optional `command` field (`gate-evidence-unrelated`, a warning at `standard`, an error at `regulated`): record `command: "tsc --noEmit"` and the log of that command qualifies.
-- Evidence is the output of a run (`evidence-not-output`): project and configuration files (`package.json`, lockfiles, `*.config.ts`, CI workflows) are never evidence, and source code is never gate evidence.
-- A `passed` gate whose log ends with a non-zero `# exit code:` line is `gate-evidence-failed`, an error at every profile: the run the log records failed.
-- `declaredStatic[].path` may name a value, never a claim about the implementation: `dataBinding`, `sourceOfTruth`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `tests`, `evidence`, `dataSources`, `policyTests` and `uiRoutes` are refused (`declared-static-forbidden-path`). An `approvedBy` that names an agent, or the capability's own implementer or reviewer, is `declared-static-self-approved`. `emit --format gap-report` and `report` list every exemption with its reason and approver.
-- A `not-applicable` command, job or export must be named by a confirmed `decisions[].appliesTo` (`not-applicable-undecided`); the validate summary prints `not-applicable: N`.
+- Evidence is the output of a run (`evidence-not-output`): project and configuration files (`package.json`, lockfiles, `*.config.ts`, CI workflows, a root `README` or `LICENSE`) and anything under `.git/`, `node_modules/` or a virtualenv are never evidence, and source code is never gate, capability or fixed-gap evidence. A document such as `security.md` counts when it sits in an `evidence/`, `artifacts/` or `reports/` folder.
+- A `passed` gate whose log ends with a non-zero `# exit code:` line is `gate-evidence-failed`; any other evidence that records one is `evidence-records-failure`. Both are errors at every profile: the run the log records failed.
+- `declaredStatic[].path` may name a value, never a claim about the implementation: `dataBinding`, `sourceOfTruth`, `serverOperations`, `authorizationPolicies`, `auditEvents`, `tests`, `evidence`, `dataSources`, `policyTests`, `uiRoutes`, `entrypoints`, an integration's `operations` and a work queue's `source` are refused (`declared-static-forbidden-path`). An `approvedBy` that names an agent, or the capability's own implementer or reviewer, is `declared-static-self-approved`. `emit --format gap-report` and `report` list every exemption with its reason and approver.
+- A `not-applicable` command, job, export, integration or work queue must be named by a confirmed `decisions[].appliesTo` that records `confirmedBy` (`not-applicable-undecided`); the validate summary prints `not-applicable: N`.
+- `validate --project-root` must name a folder that contains the manifest, and so must `projectRoot`, with or without a `.git` above it (`project-root-outside`).
 
 ## Test layers
 
@@ -290,7 +311,7 @@ Release validation must fail when any of these apply:
 - Required screen states are not covered
 - Build or required quality gate is not passed
 - Evidence paths do not exist
-- Known critical/high gap is unresolved without an accepted-risk decision
+- Known critical/high gap is unresolved, fixed without evidence, or accepted without a person's confirmed risk-acceptance decision
 
 Never report completion with a non-zero gate and a narrative explanation.
 
@@ -367,7 +388,7 @@ It cannot verify:
 
 Residual responsibilities stay with the agent:
 
-1. Read the body of each cited test. Confirm it asserts the outcome, not the absence of an exception. The validator refuses a cited test that has neither a test-style file name nor a test-runner call, and one with no assertion once comments are stripped (assertion words are matched as whole words, so `import { assert }` and a comment about adding assertions do not count). It refuses evidence only when the whole file is one short line claiming success. All three are floors, and clearing a floor is not the same as being right.
+1. Read the body of each cited test. Confirm it asserts the outcome, not the absence of an exception. The validator refuses a cited test that has neither a test-style file name nor a test-runner call, and one with no assertion once comments are stripped (assertion words are matched as whole words, so `import { assert }` and a comment about adding assertions do not count). It refuses evidence only when the whole file is one short line claiming success and naming no count, route or identifier. All three are floors, and clearing a floor is not the same as being right.
 2. Break the guard locally and confirm the test fails, for at least every `high` and `critical` capability.
 3. Follow `dataBinding` to the query and confirm it reaches the declared source of truth.
 4. Execute the command and read the audit record it produced, rather than trusting the declaration.
@@ -414,8 +435,4 @@ Avoid a page-by-page screenshot dump. Summarize by operational domain and link t
 
 ## External review pass (optional)
 
-`scripts/code_review.py` bridges Alibaba Open Code Review (OCR) into the manifest when the `ocr` CLI is available. It is optional and advisory: absent, blocked, or failing, it changes no gate above. Two engines: the **delegate** engine (default) computes the reviewable file set and the rules, and the reviewing agent reviews each file itself and returns findings through `record`; the **ocr** engine has OCR's configured LLM review and persists directly. `diff` serves Build and Repair; `scan` serves Audit and needs the ocr engine, because delegate mode has no full-file scan.
-
-Each finding persists as a `gaps[]` entry with `source: "ocr"` (via `add --kind gap`, one all-or-nothing batch), so it surfaces in `emit --format gap-report` like any other finding. The validator ignores OCR-sourced gaps when deciding whether a lifecycle state has an accepted escape, so review text that mentions a state name cannot silence a lifecycle check. Exit codes: 0 clean or nothing reviewable, 1 findings recorded, 2 usage, IO or validation failure, including a review that failed or could not cover every file. Exit 3 is unused: claim conflicts do not apply to this script.
-
-What this pass guarantees and what it does not: file coverage and line anchoring are deterministic; the findings themselves are judgments, the delegate engine's from the reviewing agent and the endpoint engine's from its configured LLM. They are evidence for the gap report, never a replacement for the adversarial pass, the permission matrix, policy tests, or `validate` and `coverage`. A clean run is a floor, not a proof. Setup, environment variables, bundles, coverage accounting and the Windows notes are in [../INTEGRATIONS.md](../INTEGRATIONS.md).
+`scripts/code_review.py` bridges Alibaba Open Code Review (OCR) into the manifest when the `ocr` CLI is available. It is optional and advisory: absent, blocked, or failing, it changes no gate above. Each finding persists as a `gaps[]` entry with `source: "ocr"`, which never counts as a lifecycle escape, and whose own review record is never proof of a fix. Its findings are evidence for the gap report, never a replacement for the adversarial pass, the permission matrix, policy tests, or `validate` and `coverage`. Engines, setup, exit codes and coverage accounting are in [../INTEGRATIONS.md](../INTEGRATIONS.md).

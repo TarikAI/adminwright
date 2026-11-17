@@ -550,6 +550,15 @@
               "items": {
                 "type": "string"
               }
+            },
+            "notApplicable": {
+              "type": "object",
+              "description": "Profile internal only: why a flag that is not true does not apply (crosscutting-flag-waived, a warning at internal and an error above it).",
+              "properties": {
+                "mfaForPrivilegedRoles": {
+                  "type": "string"
+                }
+              }
             }
           }
         },
@@ -601,6 +610,15 @@
               "type": "array",
               "items": {
                 "type": "string"
+              }
+            },
+            "notApplicable": {
+              "type": "object",
+              "description": "Profile internal only: why a flag that is not true does not apply (crosscutting-flag-waived, a warning at internal and an error above it).",
+              "properties": {
+                "tamperProtected": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -670,6 +688,18 @@
               "type": "array",
               "items": {
                 "type": "string"
+              }
+            },
+            "notApplicable": {
+              "type": "object",
+              "description": "Profile internal only: why a flag that is not true does not apply (crosscutting-flag-waived, a warning at internal and an error above it).",
+              "properties": {
+                "keyboardCriticalFlowsTested": {
+                  "type": "string"
+                },
+                "responsiveCriticalFlowsTested": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -792,7 +822,11 @@
               "design",
               "other"
             ],
-            "description": "What the decision is about. 'profile' records the chosen profile and must name manifest.profile; 'not-applicable' is the only kind that can justify a not-applicable command, job or export, or a not-applicable required quality gate (its appliesTo names them); 'risk-acceptance' is a human accepting a gap. Absent means 'other'."
+            "description": "What the decision is about. 'profile' records the chosen profile and must name manifest.profile; 'not-applicable' is the only kind that can justify a not-applicable command, job, export, integration or work queue, or a not-applicable required quality gate (its appliesTo names them); 'risk-acceptance' is a human accepting a critical or high gap (its appliesTo names the gap). Absent means 'other'."
+          },
+          "confirmedBy": {
+            "type": "string",
+            "description": "The person who confirmed the decision (name, role, date). Required on a confirmed 'not-applicable' or 'risk-acceptance' decision, and never the id of an agent of the build (decision-self-confirmed)."
           }
         }
       }
