@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the run it supersedes. Runs on main are never
+# cancelled, so every commit that lands keeps its own result.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: tests (${{ matrix.os }}, py${{ matrix.python }})
@@ -208,6 +214,9 @@ jobs:
       PGPASSWORD: postgres
       ADMINWRIGHT_PG_TEST: "1"
       ADMINWRIGHT_NPM_TEST: "1"
+      # A missing psql, npm, npx, Django or psycopg fails these tests instead of skipping
+      # them, so the job cannot pass green having tested nothing.
+      ADMINWRIGHT_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

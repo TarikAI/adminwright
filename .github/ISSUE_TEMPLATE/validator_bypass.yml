@@ -1,6 +1,6 @@
 name: Validator bypass
 description: A manifest built on mocks, fake evidence, or disconnected controls passes release validation
-labels: [bypass, high-priority]
+labels: [bug]
 body:
   - type: markdown
     attributes:

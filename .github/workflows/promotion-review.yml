@@ -16,6 +16,7 @@ permissions:
 jobs:
   candidates:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,10 +26,29 @@ jobs:
       - name: Collect community promotion candidates
         id: collect
         run: |
+          # This job reads only community/observations/. Its store is a fresh, empty
+          # directory, and a group made only of community records is never eligible, so
+          # with no contributed bundles there is nothing to review: say so in the job
+          # summary and leave the standing issue alone instead of rewriting it.
+          if ! ls community/observations/*.json >/dev/null 2>&1; then
+            echo 'has_input=false' >> "$GITHUB_OUTPUT"
+            {
+              echo '### Promotion review: nothing to review'
+              echo ''
+              echo 'There are no contributed bundles in `community/observations/`, and this job'
+              echo 'runs against an empty store, so there is nothing to weigh. The standing'
+              echo 'review issue was left unchanged. To review your own store, run `promote`'
+              echo 'locally.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo 'has_input=true' >> "$GITHUB_OUTPUT"
           mkdir -p /tmp/store
           echo "" > /tmp/store/observations.jsonl
+          # No `|| true`: a crash or a usage failure (exit 2) must fail the job.
           ADMINWRIGHT_HOME=/tmp/store python scripts/admin_console_manifest.py \
-            promote --include-community --min-projects 2 > /tmp/candidates.md || true
+            promote --include-community --min-projects 2 > /tmp/candidates.md
+          cat /tmp/candidates.md >> "$GITHUB_STEP_SUMMARY"
           {
             echo 'body<<CANDIDATES'
             cat /tmp/candidates.md
@@ -41,17 +61,20 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Open or update the standing review issue
+        if: steps.collect.outputs.has_input == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const body = process.env.BODY;
+            const body = process.env.BODY.trim();
             const title = 'Promotion review: current candidates';
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner, repo: context.repo.repo,
               state: 'open', labels: 'lesson',
             });
             const existing = issues.find(i => i.title === title);
-            if (existing) {
+            if (existing && (existing.body || '').trim() === body) {
+              core.info(`#${existing.number} is already current; not rewriting it`);
+            } else if (existing) {
               await github.rest.issues.update({
                 owner: context.repo.owner, repo: context.repo.repo,
                 issue_number: existing.number, body,
