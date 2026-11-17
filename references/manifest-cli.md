@@ -115,19 +115,21 @@ Tool restrictions on reviewers are advisory in Claude Code and absent in other h
 
 <!-- doc-test: skip -->
 ```text
-python <skill-dir>/scripts/admin_console_manifest.py review-scope --manifest <project-root>/.admin-console/manifest.json --agent <reviewer-id> --start
+python <skill-dir>/scripts/admin_console_manifest.py review-scope --manifest <project-root>/.admin-console/manifest.json --agent <reviewer-id> --role <role> --start
 python <skill-dir>/scripts/admin_console_manifest.py review-scope --manifest <project-root>/.admin-console/manifest.json --agent <reviewer-id>
 ```
 
-- Run `--start` when the pass is dispatched. It records what was already uncommitted, so another agent's unfinished work is not blamed on the reviewer.
+- Run `--start` when the pass is dispatched. The reviewer registers itself during its pass, so `--role` (`ux-reviewer`, `qa` or `security`) names the write surface; it is recorded with the starting point. `--start` records what was already uncommitted, so another agent's unfinished work is not blamed on the reviewer, and what the manifest cites as evidence at that moment.
+- A second `--start` for the same id is refused. `--start --restart` replaces the starting point, and every later check reports how many times it was restarted, so a restart you did not make is visible.
 - Run the check when the pass returns. A reviewer may change:
   - the manifest and the tool's working files;
-  - its own worklog;
-  - files the manifest cites as evidence (logs, reports, screenshots; never source or project configuration);
+  - its own worklog; the worklogs of other registered reviewers are not counted against it, and are named;
+  - files the manifest cited as evidence when the pass began (logs, reports, screenshots; never source or project configuration), and files the pass created and cited that are logs, reports or images;
   - `docs/admin-*.md`;
   - for `qa` only, test files that did not exist when the pass began.
+- Git-ignored files are checked only when their names mark them as configuration (`.env*`, `*.local*`, `*.ini`, `*.conf`, `*.toml`, `*.yaml`, `*config*.json` and similar); other ignored files, such as build output, are not.
 - Exit 1 lists everything else. Revert it, or have an implementer adopt it under a claim, and file the gaps.
-- `--base <commit>` compares with a commit instead of `--start`. `--ignore <glob>` excuses paths a concurrently running builder changed. `--role` names the pass when the agent is not in `agents[]`.
+- `--base <commit>` compares with a commit instead of `--start` (evidence is read from the manifest at that commit; ignored files are not checked). `--ignore <glob>` excuses paths a concurrently running builder changed.
 
 ## Files, commits and monorepos
 

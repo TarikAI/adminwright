@@ -7223,6 +7223,83 @@ def scope_baseline_path(manifest_path, agent_id):
     return manifest_path.parent / "locks" / (re.sub(r"[^A-Za-z0-9._-]", "_", agent_id) + ".scope.json")
 
 
+def scope_mirror_path(top, manifest_path, agent_id):
+    """A second copy of a baseline inside the git directory, outside the working tree.
+
+    `locks/` is the reviewer's own write surface and git-ignored, so deleting the
+    baseline there and starting again would reset it unseen. The copy in the git
+    directory is what a check trusts when the two disagree.
+    """
+    git_dir = Path(git_text(top, "rev-parse", "--absolute-git-dir").strip())
+    key = hashlib.sha256(
+        (comparable_path(manifest_path) + "\0" + agent_id).encode("utf-8")
+    ).hexdigest()[:16]
+    return git_dir / "adminwright" / "review-scope" / (key + ".json")
+
+
+def read_scope_baseline(path):
+    try:
+        stored = loads_bounded(path.read_text(encoding="utf-8"))
+        if not isinstance(stored, dict) or not isinstance(stored.get("head"), str):
+            raise ValueError("no head")
+        dict(stored["paths"])
+        return stored
+    except (ValueError, KeyError, TypeError, OSError, RecursionError) as exc:
+        raise ManifestError("unreadable review-scope baseline " + str(path) + ": " + str(exc)
+                            + "; record a new one with `review-scope --start --restart`")
+
+
+# Git-ignored files a reviewer must not change: configuration, which an ignore rule
+# hides from `git status` (`.env`, `*.local*`, settings files). Build output and
+# caches are not listed, so running the project's checks never trips the check.
+IGNORED_CONFIG_PATTERN = re.compile(
+    r"(?:^|/)(?:\.env(?:\.[^/]*)?|[^/]*\.local(?:\.[^/]+)?|[^/]*\.(?:ini|conf|cfg|properties|toml|ya?ml)"
+    r"|[^/]*(?:config|settings)[^/]*\.(?:json|js|cjs|mjs|ts))$",
+    re.I,
+)
+IGNORED_CONFIG_MAX_BYTES = 1024 * 1024
+# A file first cited as evidence during the pass is editable only when the pass
+# created it and it is one of these: a log, a report, a screenshot.
+NEW_EVIDENCE_SUFFIXES = frozenset((
+    ".log", ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".csv", ".json",
+    ".html", ".har", ".xml",
+))
+
+
+def ignored_config_hashes(top, manifest_dir):
+    """{repository-relative path: sha256} of git-ignored configuration files."""
+    listed = scope_paths(top, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
+                         "--no-empty-directory", "-z")
+    hashes = {}
+    for rel in sorted(listed):
+        if rel.endswith("/") or not IGNORED_CONFIG_PATTERN.search(rel):
+            continue
+        candidate = top / rel
+        if inside_manifest_dir(candidate.resolve(), manifest_dir):
+            continue
+        try:
+            if candidate.stat().st_size > IGNORED_CONFIG_MAX_BYTES:
+                continue
+        except OSError:
+            continue
+        hashes[rel] = working_hash(candidate)
+    return hashes
+
+
+def cited_evidence_at(top, base, manifest_path, root):
+    """Evidence the manifest cited at commit `base`, or an empty set when it was not committed."""
+    try:
+        rel = Path(os.path.relpath(str(manifest_path), str(top))).as_posix()
+    except ValueError:
+        return set()
+    try:
+        text = git_text(top, "show", base + ":" + rel)
+        manifest = loads_bounded(text)
+    except (ManifestError, ValueError, RecursionError):
+        return set()
+    return cited_evidence_files(manifest, root) if isinstance(manifest, dict) else set()
+
+
 def cmd_review_scope(args):
     """Check from git what a reviewer pass changed, instead of trusting its report.
 
@@ -7241,47 +7318,129 @@ def cmd_review_scope(args):
     manifest_path = resolve_manifest_path(args.manifest)
     manifest = load_json(manifest_path)
     record = find_agent(manifest, args.agent)
-    role = text_of(record.get("role")) if record else (args.role or "")
-    if role not in REVIEWER_ROLES:
-        stderr(
-            "review-scope checks a reviewer pass; agent '" + args.agent + "' "
-            + ("has role '" + role + "'" if record else "is not in agents[]; pass --role")
-            + " (reviewer roles: " + ", ".join(REVIEWER_ROLES) + ")"
-        )
-        return 2
+    registered = text_of(record.get("role")) if record else ""
     root = Path(args.project_root).resolve() if args.project_root else project_root_of(manifest_path, manifest)
     top = Path(git_text(root, "rev-parse", "--show-toplevel").strip()).resolve()
-    untracked = scope_paths(top, "ls-files", "--others", "--exclude-standard", "-z")
+    if subprocess.run(["git", "-C", str(top), "rev-parse", "--verify", "-q", "HEAD"],
+                      capture_output=True).returncode != 0:
+        stderr("review-scope: the repository " + str(top) + " has no commits yet; commit once "
+               "before dispatching a reviewer, so its pass has a starting point.")
+        return 2
     baseline_file = scope_baseline_path(manifest_path, args.agent)
+    mirror_file = scope_mirror_path(top, manifest_path, args.agent)
+    manifest_dir = manifest_path.parent.resolve()
 
     if args.start:
+        # At dispatch the reviewer has not registered yet: --role names the write
+        # surface; a registered reviewer's own role is used when --role is absent.
+        role = args.role or registered
+        if registered and args.role and registered != args.role:
+            stderr("review-scope: agent '" + args.agent + "' is registered as " + registered
+                   + ", not " + args.role + "; dispatch the review under another agent id.")
+            return 2
+        if role not in REVIEWER_ROLES:
+            stderr(
+                "review-scope: agent '" + args.agent + "' "
+                + ("has role '" + role + "', which is not a reviewer" if role else "is not registered yet")
+                + "; pass --role <" + "|".join(REVIEWER_ROLES) + "> to say which reviewer's write "
+                "surface applies, e.g. `review-scope --agent " + args.agent + " --role qa --start`."
+            )
+            return 2
+        previous = None
+        for existing in (mirror_file, baseline_file):
+            if existing.is_file():
+                try:
+                    previous = read_scope_baseline(existing)
+                except ManifestError:
+                    previous = {}
+                break
+        if previous is not None and not args.restart:
+            stderr(
+                "review-scope: a starting point for '" + args.agent + "' already exists; a second "
+                "--start would absorb whatever the pass has changed since. Check the pass with "
+                "`review-scope --agent " + args.agent + "`, or pass --restart to replace it "
+                "(the check then reports the restart)."
+            )
+            return 2
+        untracked = scope_paths(top, "ls-files", "--others", "--exclude-standard", "-z")
         head = git_text(top, "rev-parse", "HEAD").strip()
         dirty = scope_paths(top, "diff", "--name-only", "--no-renames", "-z", head, "--") | untracked
-        baseline = {"head": head, "paths": {rel: working_hash(top / rel) for rel in sorted(dirty)}}
-        baseline_file.parent.mkdir(parents=True, exist_ok=True)
-        write_json(baseline_file, baseline)
-        print("review-scope: recorded the starting point for " + args.agent + " at " + head[:12]
-              + " (" + str(len(dirty)) + " path(s) already uncommitted)")
+        restarts = 0
+        if previous is not None:
+            try:
+                restarts = int(previous.get("restarts", 0)) + 1
+            except (TypeError, ValueError):
+                restarts = 1
+        baseline = {
+            "head": head,
+            "role": role,
+            "restarts": restarts,
+            "paths": {rel: working_hash(top / rel) for rel in sorted(dirty)},
+            "evidence": sorted(cited_evidence_files(manifest, root)),
+            "ignored": ignored_config_hashes(top, manifest_dir),
+        }
+        for target in (baseline_file, mirror_file):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            write_json(target, baseline)
+        print("review-scope: recorded the starting point for " + args.agent + " (" + role + ") at "
+              + head[:12] + " (" + str(len(dirty)) + " path(s) already uncommitted"
+              + ("; restart " + str(restarts) if restarts else "") + ")")
         return 0
 
+    notes = []
+    ignored_before = None
     if args.base:
         try:
             base = git_text(top, "rev-parse", "--verify", args.base + "^{commit}").strip()
         except ManifestError:
             raise ManifestError("--base '" + args.base + "' is not a commit in " + str(top))
         before = {}
+        role = registered or args.role or ""
+        started_with = cited_evidence_at(top, base, manifest_path, root)
+        notes.append("git-ignored configuration is not checked with --base")
     else:
-        if not baseline_file.is_file():
+        source = mirror_file if mirror_file.is_file() else baseline_file
+        if not source.is_file():
             stderr(
-                "No starting point for '" + args.agent + "': run `review-scope --start` for it when "
-                "the pass is dispatched, or pass --base <commit the pass started from>."
+                "No starting point for '" + args.agent + "': run `review-scope --agent " + args.agent
+                + " --role <role> --start` when the pass is dispatched, or pass --base <commit the "
+                "pass started from>."
             )
             return 2
+        stored = read_scope_baseline(source)
+        if source == mirror_file and baseline_file.is_file():
+            try:
+                if read_scope_baseline(baseline_file) != stored:
+                    notes.append("the baseline in " + str(baseline_file) + " was changed after it was "
+                                 "recorded; the copy kept in the git directory was used")
+            except ManifestError:
+                notes.append("the baseline in " + str(baseline_file) + " is unreadable; the copy kept "
+                             "in the git directory was used")
+        base, before = stored["head"], dict(stored["paths"])
+        role = text_of(stored.get("role")) or registered or args.role or ""
+        if registered and registered != role:
+            notes.append("agent '" + args.agent + "' registered as " + registered + " but was dispatched "
+                         "as " + role + "; judged as " + role)
+        if isinstance(stored.get("evidence"), list):
+            started_with = set(str_items(stored["evidence"]))
+        else:  # a baseline recorded before evidence was kept: read the manifest at its commit
+            started_with = cited_evidence_at(top, base, manifest_path, root)
+        if isinstance(stored.get("ignored"), dict):
+            ignored_before = stored["ignored"]
         try:
-            stored = json.loads(baseline_file.read_text(encoding="utf-8"))
-            base, before = stored["head"], dict(stored["paths"])
-        except (ValueError, KeyError, TypeError, OSError) as exc:
-            raise ManifestError("unreadable review-scope baseline " + str(baseline_file) + ": " + str(exc))
+            restarts = int(stored.get("restarts", 0))
+        except (TypeError, ValueError):
+            restarts = 0
+        notes.insert(0, "baseline recorded at " + base[:12] + (
+            " (restarted " + str(restarts) + " time(s) with --restart)" if restarts else " (never restarted)"))
+    if role not in REVIEWER_ROLES:
+        stderr(
+            "review-scope checks a reviewer pass; agent '" + args.agent + "' "
+            + ("has role '" + role + "'" if role else "is not registered and no role was recorded")
+            + "; pass --role <" + "|".join(REVIEWER_ROLES) + "> to say which reviewer's write surface applies."
+        )
+        return 2
+    untracked = scope_paths(top, "ls-files", "--others", "--exclude-standard", "-z")
     changed_since = scope_paths(top, "diff", "--name-only", "--no-renames", "-z", base, "--") | untracked
     added_since = scope_paths(top, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", base, "--")
     touched = []
@@ -7291,12 +7450,24 @@ def cmd_review_scope(args):
             continue  # uncommitted before the pass began and not changed by it
         touched.append(rel)
     created = {rel for rel in (added_since | untracked) if before.get(rel) is None}
+    ignored_changes = []
+    if ignored_before is not None:
+        ignored_now = ignored_config_hashes(top, manifest_dir)
+        for rel in sorted(set(ignored_before) | set(ignored_now)):
+            if ignored_before.get(rel) != ignored_now.get(rel):
+                ignored_changes.append(rel)
 
-    manifest_dir = manifest_path.parent.resolve()
     own_worklogs = {
         os.path.normcase(str(manifest_dir / folder / (args.agent + ".md"))) for folder in ("worklog", "worklogs")
     }
-    evidence = cited_evidence_files(manifest, root)
+    # Reviewers run in parallel (ux and security over one domain): another
+    # registered reviewer's worklog is its own write, not this reviewer's.
+    other_reviewers = {
+        text_of(agent.get("id")) for _p, agent in iter_named(manifest, "agents")
+        if text_of(agent.get("role")) in REVIEWER_ROLES and text_of(agent.get("id")) != args.agent
+    }
+    excused = []
+    evidence_now = cited_evidence_files(manifest, root)
     violations = []
     for rel in touched:
         candidate = (top / rel).resolve()
@@ -7304,19 +7475,37 @@ def cmd_review_scope(args):
         if any(fnmatch.fnmatchcase(rel, pattern.replace("\\", "/")) for pattern in args.ignore or ()):
             continue
         if candidate.parent.name in ("worklog", "worklogs") and candidate.parent.parent == manifest_dir:
-            if key not in own_worklogs:
-                violations.append(rel + "  (another agent's worklog)")
+            if key in own_worklogs:
+                continue
+            if candidate.suffix.lower() == ".md" and candidate.stem in other_reviewers:
+                excused.append(rel)
+                continue
+            violations.append(rel + "  (another agent's worklog)")
             continue
         if inside_manifest_dir(candidate, manifest_dir, manifest_path):
             continue
         if REPORT_PATH_PATTERN.search(rel):
             continue
-        if (
-            key in evidence
-            and candidate.suffix.lower() not in SOURCE_SUFFIXES
-            and not non_evidence_reason(candidate, "gate")
-        ):
-            continue
+        # Evidence is what the manifest cited when the pass began. The manifest is
+        # in the reviewer's own write surface, so a file it cites only now is
+        # editable only if the pass created it and it is a log, report or image.
+        if key in started_with or key in evidence_now:
+            if (
+                key in started_with
+                and candidate.suffix.lower() not in SOURCE_SUFFIXES
+                and not non_evidence_reason(candidate, "gate")
+            ):
+                continue
+            if (
+                rel in created
+                and candidate.suffix.lower() in NEW_EVIDENCE_SUFFIXES
+                and not non_evidence_reason(candidate, "gate")
+                and not IGNORED_CONFIG_PATTERN.search(rel)
+            ):
+                continue
+            if key not in started_with:
+                violations.append(rel + "  (cited as evidence only during the pass)")
+                continue
         if role == "qa" and rel in created:
             body = read_head(candidate) if candidate.is_file() else ""
             if looks_like_test_file(candidate, body, rel) or TEST_DIR_PATTERN.search(rel):
@@ -7327,6 +7516,14 @@ def cmd_review_scope(args):
             violations.append(rel + "  (an existing test: qa adds tests, an implementer changes them)")
             continue
         violations.append(rel)
+    for rel in ignored_changes:
+        if not any(fnmatch.fnmatchcase(rel, pattern.replace("\\", "/")) for pattern in args.ignore or ()):
+            violations.append(rel + "  (git-ignored configuration)")
+    for note in notes:
+        stderr("review-scope: " + note)
+    if excused:
+        stderr("review-scope: not counted against " + args.agent + ", the worklogs of other registered "
+               "reviewers: " + ", ".join(excused))
     if violations:
         stderr(
             "review-scope: " + args.agent + " (" + role + ") changed " + str(len(violations))
@@ -8889,9 +9086,12 @@ def build_parser():
     scope_parser.add_argument("--agent", required=True, help="the reviewer's agent id")
     scope_parser.add_argument("--start", action="store_true",
                               help="record the starting point (uncommitted work already present) at dispatch")
+    scope_parser.add_argument("--restart", action="store_true",
+                              help="with --start: replace an existing starting point (the check reports it)")
     scope_parser.add_argument("--base", help="compare with this commit instead of a recorded --start")
     scope_parser.add_argument("--role", choices=REVIEWER_ROLES,
-                              help="the pass's role when the agent is not in agents[] (single-agent runs)")
+                              help="the reviewer's role, which sets its write surface; needed with --start "
+                                   "at dispatch, before the reviewer registers itself in agents[]")
     scope_parser.add_argument("--ignore", action="append", metavar="GLOB",
                               help="repository-relative paths another agent changed during this pass")
     scope_parser.add_argument("--project-root", help="defaults to the manifest's project root")

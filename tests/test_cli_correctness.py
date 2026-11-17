@@ -649,5 +649,121 @@ class TestProtectedOutputs(TempProject):
         self.assertIn("Observations: 3", out, err)
 
 
+GIT_IDENTITY = ["-c", "user.email=t@example.test", "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+
+
+@unittest.skipIf(__import__("shutil").which("git") is None, "git is not installed")
+class TestReviewScope(TempProject):
+    """A-01, A-03, C-05, C-06, C-17, C-18 -- the orchestrator's independence check."""
+
+    def git(self, *args):
+        done = subprocess.run(["git", "-C", str(self.root)] + list(args), capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
+
+    def setUp(self):
+        super().setUp()
+        self.build_honest_manifest()
+        (self.root / "src").mkdir()
+        (self.root / "src" / "service.ts").write_text("export const x = 1;\n", encoding="utf-8")
+        (self.root / "prisma").mkdir()
+        (self.root / "prisma" / "schema.prisma").write_text("model User { id Int @id }\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text(".env\n", encoding="utf-8")
+        (self.root / ".env").write_text("FEATURE_X=0\n", encoding="utf-8")
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git(*(GIT_IDENTITY + ["commit", "-q", "--no-verify", "-m", "base"]))
+
+    def scope(self, expected, *args):
+        code, out, err = self.cli("review-scope", *args)
+        self.assertEqual(code, expected, " ".join(map(str, args)) + "\n" + out + err)
+        self.assertNotIn("Traceback", err)
+        return out + err
+
+    def test_start_works_at_dispatch_before_the_reviewer_registers(self):
+        # A-01: the documented form names the role; without it the message says so.
+        message = self.scope(2, "--agent", "ux-1", "--start")
+        self.assertIn("--role", message)
+        self.assertIn("write surface", message)
+        self.scope(0, "--agent", "ux-1", "--role", "ux-reviewer", "--start")
+        # The reviewer registers during its pass; the check needs no --role afterwards.
+        self.cli("claim", "--agent", "ux-1", "--role", "ux-reviewer", "--capability", "user.list")
+        self.scope(0, "--agent", "ux-1")
+
+    def test_a_second_start_never_replaces_the_baseline_silently(self):
+        # C-05
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start")
+        (self.root / "src" / "service.ts").write_text("export const x = 2;\n", encoding="utf-8")
+        self.assertIn("src/service.ts", self.scope(1, "--agent", "qa-1"))
+        self.assertIn("--restart", self.scope(2, "--agent", "qa-1", "--role", "qa", "--start"))
+        self.assertIn("src/service.ts", self.scope(1, "--agent", "qa-1"), "the first baseline stands")
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start", "--restart")
+        self.assertIn("restarted 1 time", self.scope(0, "--agent", "qa-1"))
+
+    def test_deleting_the_baseline_in_locks_does_not_reset_it(self):
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start")
+        (self.root / "src" / "service.ts").write_text("export const x = 2;\n", encoding="utf-8")
+        for path in (self.manifest.parent / "locks").glob("*.scope.json"):
+            path.unlink()
+        self.assertIn("--restart", self.scope(2, "--agent", "qa-1", "--role", "qa", "--start"))
+        self.assertIn("src/service.ts", self.scope(1, "--agent", "qa-1"))
+
+    def test_citing_a_file_during_the_pass_does_not_make_it_editable(self):
+        # C-06: the P9 sequence.
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start")
+        self.cli("add", "--kind", "gap", "--json", json.dumps(
+            {"id": "gap.qa-notes", "severity": "low", "description": "qa notes for user list",
+             "capability": "user.list", "evidence": ["prisma/schema.prisma", "src/service.ts"]}))
+        (self.root / "prisma" / "schema.prisma").write_text("model User { id String @id }\n",
+                                                            encoding="utf-8")
+        (self.root / "src" / "service.ts").write_text("export const x = 0;\n", encoding="utf-8")
+        message = self.scope(1, "--agent", "qa-1")
+        self.assertIn("prisma/schema.prisma", message)
+        self.assertIn("src/service.ts", message)
+
+    def test_evidence_cited_before_the_pass_and_new_reports_stay_editable(self):
+        self.scope(0, "--agent", "qa-1", "--role", "qa", "--start")
+        (self.root / "evidence" / "tests.log").write_text("tests run\n  0 errors across 120 files\n",
+                                                          encoding="utf-8")
+        (self.root / "evidence" / "qa-review.md").write_text("Walked the list as ops\n", encoding="utf-8")
+        self.cli("set", "--path", "crossCutting.experience.evidence", "--append",
+                 "--value", "evidence/qa-review.md")
+        self.scope(0, "--agent", "qa-1")
+
+    def test_an_edit_to_ignored_configuration_is_seen(self):
+        # C-17
+        self.scope(0, "--agent", "sec-1", "--role", "security", "--start")
+        (self.root / ".env").write_text("FEATURE_X=1\n", encoding="utf-8")
+        self.assertIn(".env", self.scope(1, "--agent", "sec-1"))
+
+    def test_parallel_reviewers_do_not_fail_on_each_others_worklogs(self):
+        # A-03
+        self.scope(0, "--agent", "ux-1", "--role", "ux-reviewer", "--start")
+        self.scope(0, "--agent", "sec-1", "--role", "security", "--start")
+        for agent, role in (("ux-1", "ux-reviewer"), ("sec-1", "security")):
+            self.cli("claim", "--agent", agent, "--role", role, "--capability", "user.list")
+        worklogs = self.manifest.parent / "worklog"
+        worklogs.mkdir()
+        (worklogs / "ux-1.md").write_text("ux-1 pass\n", encoding="utf-8")
+        (worklogs / "sec-1.md").write_text("sec-1 pass\n", encoding="utf-8")
+        self.assertIn("sec-1", self.scope(0, "--agent", "ux-1"), "the excused worklog is named")
+        self.scope(0, "--agent", "sec-1")
+        # A worklog of an id that is no registered reviewer is still a violation.
+        (worklogs / "impl-9.md").write_text("forged\n", encoding="utf-8")
+        self.assertIn("impl-9.md", self.scope(1, "--agent", "ux-1"))
+
+    def test_a_repository_without_commits_says_what_to_do(self):
+        # C-18
+        fresh = self.tmp / "fresh"
+        fresh.mkdir()
+        code, _o, err = run("init", "--project-root", fresh, "--name", "Fresh")
+        self.assertEqual(code, 0, err)
+        subprocess.run(["git", "-C", str(fresh), "init", "-q"], check=True)
+        code, out, err = run("review-scope", "--manifest", fresh / ".admin-console" / "manifest.json",
+                             "--agent", "qa-1", "--role", "qa", "--start")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("no commits yet", err)
+
+
 if __name__ == "__main__":
     unittest.main()
