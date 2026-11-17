@@ -765,5 +765,239 @@ class TestReviewScope(TempProject):
         self.assertIn("no commits yet", err)
 
 
+class ClaimCase(TempProject):
+    """A manifest with user.list and the dotted ids that collided: user.list.qa, user.list.bulk."""
+
+    def setUp(self):
+        super().setUp()
+        data = self.build_honest_manifest()
+        base = self.capability_of(data)
+        base.update({"owner": "", "implementedBy": "", "reviewStatus": "unreviewed", "reviewedBy": ""})
+        for cid in ("user.list.qa", "user.list.bulk"):
+            data["entities"][0]["capabilities"].append(dict(json.loads(json.dumps(base)), id=cid))
+        self.write(data)
+        self.locks = self.manifest.parent / "locks"
+
+    def step(self, expected, *args):
+        code, out, err = self.cli(*args)
+        self.assertEqual(code, expected, " ".join(map(str, args)) + "\n" + out + err)
+        self.assertNotIn("Traceback", err)
+        return out + err
+
+    def claim(self, expected, agent, role, cid="user.list", *extra):
+        return self.step(expected, "claim", "--agent", agent, "--role", role, "--capability", cid, *extra)
+
+    def held_by(self, agent):
+        return sorted(p.name for p in self.locks.glob("*.lock")
+                      if p.read_text(encoding="utf-8").strip() == agent)
+
+
+class TestLockNames(ClaimCase):
+    """C-08 -- a builder lock of `a.qa` and the qa review lock of `a` were one file."""
+
+    def test_a_builder_of_a_dotted_id_does_not_block_a_review_of_its_prefix(self):
+        self.claim(0, "impl-1", "implementer", "user.list.qa")
+        self.claim(0, "qa-1", "qa", "user.list")
+        self.assertEqual(self.held_by("qa-1"), ["user.list@qa.lock"])
+
+    def test_a_lock_in_the_old_naming_is_still_honoured_and_migrated(self):
+        self.locks.mkdir(exist_ok=True)
+        (self.locks / "user.list.qa.lock").write_text("qa-old\n", encoding="utf-8")
+        self.step(0, "add", "--kind", "agent", "--json", json.dumps(
+            {"id": "qa-old", "role": "qa", "ownsCapabilities": [], "ownsScreens": [],
+             "status": "active"}))
+        # Ambiguous by name (user.list.qa is also a capability): the holder's role decides.
+        self.claim(3, "qa-2", "qa")
+        (self.locks / "user.list.security.lock").write_text("sec-old\n", encoding="utf-8")
+        self.claim(3, "sec-2", "security")
+        self.assertEqual(self.held_by("sec-old"), ["user.list@security.lock"])
+        self.assertEqual(self.held_by("qa-old"), ["user.list@qa.lock"])
+        self.step(0, "release-claim", "--agent", "qa-old")
+        self.assertEqual(self.held_by("qa-old"), [])
+        self.claim(0, "qa-2", "qa")
+
+
+class TestReleaseByWhatIsOnDisk(ClaimCase):
+    """C-07, C-15 -- release-claim left locks behind that then blocked everyone."""
+
+    def test_a_reviewer_that_changed_role_releases_both_locks(self):
+        self.claim(0, "rev-1", "qa")
+        out = self.claim(2, "rev-1", "security", "user.list.bulk")
+        self.assertIn("release-claim", out)
+        self.step(0, "release-claim", "--agent", "rev-1")
+        self.assertEqual(self.held_by("rev-1"), [])
+        self.claim(0, "qa-2", "qa")
+
+    def test_a_reviewer_steal_from_a_builder_takes_the_builder_lock_too(self):
+        self.claim(0, "impl-1", "implementer")
+        self.claim(0, "qa-1", "qa", "user.list", "--force-steal", "--reason", "impl-1 stalled")
+        self.assertEqual(self.held_by("impl-1"), [])
+        self.step(0, "release-claim", "--agent", "qa-1")
+        self.claim(0, "sec-1", "security")
+        self.step(0, "release-claim", "--agent", "sec-1")
+        self.claim(0, "impl-2", "implementer")
+
+    def test_a_lock_the_manifest_no_longer_lists_is_still_released(self):
+        self.claim(0, "impl-1", "implementer")
+        data = self.read()
+        for agent in data["agents"]:
+            agent["ownsCapabilities"] = []
+        self.write(data)
+        self.assertIn("user.list", self.step(0, "release-claim", "--agent", "impl-1"))
+        self.assertEqual(self.held_by("impl-1"), [])
+
+    def test_an_unknown_agent_with_no_lock_is_a_conflict_and_writes_nothing(self):
+        before = self.manifest.read_bytes()
+        self.assertIn("not in agents[]", self.step(3, "release-claim", "--agent", "nobody"))
+        self.assertEqual(self.manifest.read_bytes(), before)
+
+    def test_a_non_string_in_owns_capabilities_is_dropped_not_crashed_on(self):
+        self.claim(0, "impl-1", "implementer")
+        data = self.read()
+        for agent in data["agents"]:
+            agent["ownsCapabilities"].extend([{"x": 1}, 5])
+        self.write(data)
+        self.step(0, "release-claim", "--agent", "impl-1")
+        record = {a["id"]: a for a in self.read()["agents"]}["impl-1"]
+        self.assertEqual(record["ownsCapabilities"], [])
+
+
+class TestSetValues(TempProject):
+    """C-04, C-19 -- `set` must neither write an unreadable manifest nor retype a number."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_honest_manifest()
+
+    def test_a_value_nested_past_the_limit_is_refused_and_nothing_is_written(self):
+        deep = self.tmp / "deep.tmp"
+        deep.write_text("[" * 200 + "]" * 200, encoding="utf-8")
+        before = self.manifest.read_bytes()
+        for path in (CAP + ".x-deep", CAP + ".evidence"):
+            code, out, err = self.cli("set", "--path", path, "--value-file", deep)
+            self.assertEqual(code, 2, out + err)
+            self.assertNotIn("Traceback", err)
+            self.assertIn("nested", err)
+            self.assertEqual(self.manifest.read_bytes(), before)
+
+    def test_a_value_that_is_shallow_alone_but_too_deep_where_it_lands_is_refused(self):
+        value = "[" * 98 + "]" * 98
+        before = self.manifest.read_bytes()
+        code, out, err = self.cli("set", "--path", CAP + ".x-deep", "--value", value)
+        self.assertEqual(code, 2, out + err)
+        self.assertEqual(self.manifest.read_bytes(), before)
+        self.assertEqual(self.cli("validate", "--phase", "plan")[0], 0)
+
+    def test_a_float_field_stays_a_number(self):
+        data = self.read()
+        data["platform"]["volumes"]["peakConcurrentOperators"] = 2.5
+        self.write(data)
+        code, _o, err = self.cli("set", "--path", "platform.volumes.peakConcurrentOperators", "--value", "3.5")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read()["platform"]["volumes"]["peakConcurrentOperators"], 3.5)
+        for bad in ("nan", "inf", "many"):
+            code, _o, err = self.cli("set", "--path", "platform.volumes.peakConcurrentOperators", "--value", bad)
+            self.assertEqual(code, 2, bad + err)
+
+
+class TestEmitWhatTheManifestSays(TempProject):
+    """C-10, C-20 -- a document must not hide a gap or present an absent capability as live."""
+
+    def setUp(self):
+        super().setUp()
+        self.data = self.build_honest_manifest()
+
+    def emit(self, fmt):
+        code, out, err = self.cli("emit", "--format", fmt)
+        self.assertEqual(code, 0, out + err)
+        return out
+
+    def test_gaps_without_a_valid_severity_are_still_reported(self):
+        self.data["gaps"] = [
+            {"id": "gap.blocker", "severity": "Critical", "description": "cross-tenant leak",
+             "status": "open", "rationale": "", "evidence": []},
+            {"id": "gap.nosev", "description": "no severity at all", "status": "open",
+             "rationale": "", "evidence": []},
+        ]
+        self.write(self.data)
+        out = self.emit("gap-report")
+        self.assertIn("gap.blocker", out)
+        self.assertIn("gap.nosev", out)
+        self.assertIn("Critical", out)
+        self.assertIn("2 gap(s) have no valid severity", out)
+
+    def test_a_not_applicable_capability_is_not_offered_to_operators(self):
+        capability = self.capability_of(self.data)
+        capability.update({"status": "not-applicable", "risk": "high",
+                           "rationale": "No listing in this product"})
+        self.data["decisions"].append({
+            "id": "dec.na-list", "kind": "not-applicable", "decision": "No user listing",
+            "reason": "owner confirmed", "evidence": [], "status": "confirmed", "appliesTo": ["user.list"]})
+        self.write(self.data)
+        for fmt in ("operator-handbook", "authz-matrix", "test-plan"):
+            out = self.emit(fmt)
+            rows = [line for line in out.splitlines() if "user.list" in line]
+            self.assertTrue(rows, fmt)
+            self.assertTrue(all("not applicable" in line.lower() for line in rows), fmt + "\n" + out)
+        self.assertNotIn("Before a high-risk action", self.emit("operator-handbook"))
+
+
+class TestUsageMessages(TempProject):
+    """C-18, C-21, C-23 -- refusals that say what to do; options that say what they do."""
+
+    def test_a_folder_given_as_the_manifest_is_resolved_or_explained(self):
+        code, out, err = run("validate", "--manifest", self.manifest.parent, "--phase", "plan")
+        self.assertEqual(code, 0, out + err)
+        empty = self.tmp / "empty-folder"
+        empty.mkdir()
+        code, out, err = run("validate", "--manifest", empty)
+        self.assertEqual(code, 2)
+        self.assertIn("is a folder", err)
+        self.assertIn("manifest.json", err)
+
+    def test_init_with_a_folder_as_the_manifest_is_explained(self):
+        folder = self.tmp / "consoles"
+        folder.mkdir()
+        for extra in ((), ("--force",)):
+            code, out, err = run("init", "--project-root", self.root, "--manifest", folder, "--name", "X", *extra)
+            self.assertEqual(code, 2, out + err)
+            self.assertIn("is a folder", err)
+            self.assertNotIn("Traceback", err)
+
+    def test_a_name_without_ascii_letters_gets_a_console_id_and_a_blank_name_is_refused(self):
+        for name in ("!!!", "管理"):
+            root = self.tmp / ("p" + str(len(name)))
+            root.mkdir()
+            code, _o, err = run("init", "--project-root", root, "--name", name, encoding="utf-8")
+            self.assertEqual(code, 0, err)
+            data = json.loads((root / ".admin-console" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertRegex(data["platform"]["id"], r"^console-[0-9a-f]{6}$")
+        blank = self.tmp / "blank"
+        blank.mkdir()
+        code, _o, err = run("init", "--project-root", blank, "--name", "  ")
+        self.assertEqual(code, 2, err)
+        self.assertFalse((blank / ".admin-console").exists())
+
+    def test_lesson_add_opens_only_proposed_lessons(self):
+        code, _o, err = run("lesson", "add", "--title", "t", "--category", "gap", "--scope", "SKILL.md",
+                            "--trigger", "x", "--rule", "y", "--status", "superseded",
+                            "--lessons-dir", self.tmp / "lessons")
+        self.assertEqual(code, 2, err)
+        self.assertFalse((self.tmp / "lessons").exists())
+
+    def test_destructive_options_say_what_they_do(self):
+        for argv, flag, words in (
+            (("init", "--help"), "--force", "discard"),
+            (("emit", "--help"), "--out", "never the manifest"),
+            (("migrate", "--help"), "--write", "dry run"),
+            (("promote", "--help"), "--min-projects", "at least 1"),
+        ):
+            _code, out, _err = run(*argv)
+            text = " ".join(out.split())
+            self.assertIn(words, text, argv[0] + " " + flag)
+        code, _o, err = run("promote", "--min-projects", "0", env={"ADMINWRIGHT_HOME": str(self.tmp / "s")})
+        self.assertEqual(code, 2, err)
+
+
 if __name__ == "__main__":
     unittest.main()

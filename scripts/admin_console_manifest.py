@@ -3990,6 +3990,29 @@ def cell(value):
     return " ".join(text.split()) or "-"
 
 
+def is_not_applicable(capability):
+    return capability.get("status") == "not-applicable"
+
+
+def not_applicable_section(manifest):
+    """Lines listing not-applicable capabilities, so a document never presents them as live."""
+    absent = [capability for _p, _e, capability in iter_capabilities(manifest) if is_not_applicable(capability)]
+    if not absent:
+        return []
+    decisions = {}
+    for _path, decision in iter_named(manifest, "decisions"):
+        if decision_kind(decision) == "not-applicable":
+            for target in str_items(decision.get("appliesTo")):
+                decisions.setdefault(target, text_of(decision.get("id")))
+    lines = ["", "## Not applicable", "",
+             "Recorded as not applicable; they do not exist in this console.", ""]
+    for capability in absent:
+        cid = text_of(capability.get("id"))
+        lines.append("- `" + cid + "`: not applicable" + (
+            " (decision " + decisions[cid] + ")" if decisions.get(cid) else ""))
+    return lines
+
+
 def emit_authz_matrix(manifest):
     roles = {text_of(role.get("id")): role for _p, role in iter_named(manifest, "roles")}
     lines = ["# Authorization matrix", ""]
@@ -3997,6 +4020,8 @@ def emit_authz_matrix(manifest):
     lines.append("|---|---|---|---|---|---|---|---|")
     rows = 0
     for _path, entity, capability in iter_capabilities(manifest):
+        if is_not_applicable(capability):
+            continue
         obligations = []
         obligations.extend(as_list(capability.get("auditEvents")))
         obligations.extend(as_list(capability.get("safeguards")))
@@ -4026,13 +4051,14 @@ def emit_authz_matrix(manifest):
     orphans = [
         text_of(capability.get("id"))
         for _p, _e, capability in iter_capabilities(manifest)
-        if not as_list(capability.get("roles"))
+        if not as_list(capability.get("roles")) and not is_not_applicable(capability)
     ]
     lines.extend(["", "## Capabilities with no actor role", ""])
     if orphans:
         lines.extend("- " + item for item in orphans)
     else:
         lines.append("- none")
+    lines.extend(not_applicable_section(manifest))
     lines.extend(["", "## Denied-by-default expectation", ""])
     lines.append("Any role absent from a capability row must be rejected by the server, not hidden in the UI.")
     return "\n".join(lines) + "\n"
@@ -4049,8 +4075,9 @@ def emit_test_plan(manifest):
             lines.append("- [ ] fixtures exist for every lifecycle state: " + ", ".join(str(s) for s in states))
         if entity.get("tenantScoped") is True:
             lines.append("- [ ] cross-tenant read and write of " + eid + " is rejected server-side")
-        capabilities = [cap for cap in as_list(entity.get("capabilities")) if isinstance(cap, dict)]
-        if not capabilities:
+        modeled = [cap for cap in as_list(entity.get("capabilities")) if isinstance(cap, dict)]
+        capabilities = [cap for cap in modeled if not is_not_applicable(cap)]
+        if not modeled:
             lines.append("- [ ] no capability modeled; entity is unmanaged")
         for capability in capabilities:
             cid = text_of(capability.get("id"))
@@ -4079,6 +4106,7 @@ def emit_test_plan(manifest):
                 lines.append("- [ ] precondition: the operation is rejected from states outside " + cell(entity_states.get("from")))
             if nonempty(capability.get("concurrency")):
                 lines.append("- [ ] concurrency: " + cell(capability.get("concurrency")))
+    lines.extend(not_applicable_section(manifest))
     lines.extend(["", "## screens", ""])
     for _path, screen in iter_named(manifest, "screens"):
         route = text_of(screen.get("route"))
@@ -4196,6 +4224,8 @@ def emit_operator_handbook(manifest):
     lines = ["# Operator handbook", ""]
     caps_by_role = {}
     for _path, entity, capability in iter_capabilities(manifest):
+        if is_not_applicable(capability):
+            continue  # listed once, at the end: an operator cannot do what does not exist
         for role_id in str_items(capability.get("roles")):
             caps_by_role.setdefault(role_id, []).append((entity, capability))
     screens_by_role = {}
@@ -4226,11 +4256,12 @@ def emit_operator_handbook(manifest):
         if not entries:
             lines.append("| - | - | - | - | - | - |")
         for entity, capability in entries:
+            built = capability.get("status") == "implemented"
             lines.append(
                 "| "
                 + " | ".join(
                     [
-                        cell(capability.get("id")),
+                        cell(text_of(capability.get("id")) + ("" if built else " (not built yet)")),
                         cell(entity.get("id")),
                         cell(capability.get("kind")),
                         cell(capability.get("risk")),
@@ -4256,6 +4287,7 @@ def emit_operator_handbook(manifest):
                     + "; recover with "
                     + cell(capability.get("recovery"))
                 )
+    lines.extend(not_applicable_section(manifest))
     return "\n".join(lines) + "\n"
 
 
@@ -4266,24 +4298,30 @@ def emit_gap_report(manifest, profile):
     recorded = list(iter_named(manifest, "gaps"))
     if not recorded:
         lines.append("- none recorded")
-    for severity in GAP_SEVERITIES:
-        rows = [gap for _p, gap in recorded if gap.get("severity") == severity]
+    # A gap whose severity is not one of the four (a hand-written "Critical", none
+    # at all) used to vanish from the one document a stakeholder reads.
+    unclassified = [gap for _p, gap in recorded if gap.get("severity") not in GAP_SEVERITIES]
+    if unclassified:
+        lines.append(str(len(unclassified)) + " gap(s) have no valid severity (one of "
+                     + ", ".join(GAP_SEVERITIES) + "); they are listed under 'unclassified severity'.")
+    for severity in GAP_SEVERITIES + ("unclassified severity",):
+        if severity in GAP_SEVERITIES:
+            rows = [gap for _p, gap in recorded if gap.get("severity") == severity]
+        else:
+            rows = unclassified
         if not rows:
             continue
-        lines.extend(["", "### " + severity, "", "| Gap | Status | Description | Rationale |", "|---|---|---|---|"])
+        unsorted = severity not in GAP_SEVERITIES
+        lines.extend(["", "### " + severity, "",
+                      "| Gap | " + ("Severity as recorded | " if unsorted else "")
+                      + "Status | Description | Rationale |",
+                      "|---|---|---|---|" + ("---|" if unsorted else "")])
         for gap in rows:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        cell(gap.get("id")),
-                        cell(gap.get("status")),
-                        cell(gap.get("description")),
-                        cell(gap.get("rationale")),
-                    ]
-                )
-                + " |"
-            )
+            values = [cell(gap.get("id"))]
+            if unsorted:
+                values.append(cell(label(gap.get("severity"), "none")))
+            values.extend([cell(gap.get("status")), cell(gap.get("description")), cell(gap.get("rationale"))])
+            lines.append("| " + " | ".join(values) + " |")
     lines.extend(["", "## Declared static", ""])
     entries = list(iter_named(manifest, "declaredStatic"))
     if not entries:
@@ -5007,7 +5045,13 @@ def coerce_value(raw, current):
         return raw
     if stripped[:1] in ("{", "["):
         try:
-            return json.loads(stripped)
+            # Bounded like every other JSON this tool reads: an unbounded value
+            # was written, and then no command -- `set --delete` included -- could
+            # load the manifest again.
+            return loads_bounded(stripped)
+        except RecursionError:
+            raise ManifestError("--value is nested too deeply to store safely (more than "
+                                + str(MAX_JSON_DEPTH) + " levels); nothing was written.")
         except ValueError as exc:
             raise ManifestError(
                 "--value starts with '" + stripped[:1] + "', so it must be valid JSON: " + str(exc)
@@ -5023,6 +5067,14 @@ def coerce_value(raw, current):
             "field is an object; pass it as JSON, e.g. --value '{\"from\": [\"a\"], \"to\": []}', "
             "or put the JSON in a file and use --value-file. " + VALUE_POWERSHELL_HINT
         )
+    if isinstance(current, float):
+        try:
+            number = float(stripped)
+        except ValueError:
+            number = None
+        if number is None or number != number or number in (float("inf"), float("-inf")):
+            raise ManifestError("field is a number; --value must be a finite number such as 3.5")
+        return number
     if isinstance(current, int):
         try:
             return int(raw)
@@ -5784,14 +5836,19 @@ def rebuild_lesson_index(lessons_dir):
     index_path = lessons_dir / "index.md"
     consolidation = "unknown"
     if index_path.exists():
-        found = re.search(r"^Last consolidation:\s*(.+)$", index_path.read_text(encoding="utf-8"), re.M)
+        try:
+            previous = decode_text_bytes(index_path.read_bytes(), index_path, allow_utf16=True)
+        except (OSError, ManifestError):
+            previous = ""  # an unreadable index is rebuilt; only its consolidation date is lost
+        found = re.search(r"^Last consolidation:\s*(.+)$", previous, re.M)
         if found:
             consolidation = found.group(1).strip()
     rows = []
     adopted = []
     for path in lesson_files(lessons_dir):
         fields = read_lesson_frontmatter(path)
-        lesson_id = fields.get("id") or path.name[:4]
+        # A hand-edited frontmatter can hold a list where a string belongs.
+        lesson_id = text_of(fields.get("id")) or path.name[:4]
         if fields.get("status") == "adopted":
             adopted.append(lesson_id)
         platforms = fields.get("platforms")
@@ -5832,6 +5889,13 @@ def resolve_manifest_path(value):
     path = Path(value).resolve()
     if not path.exists():
         raise ManifestError("Manifest not found: " + str(path))
+    if path.is_dir():
+        # `--manifest .admin-console` is a common slip; on Windows it used to fail
+        # as "Permission denied", which sent agents to check permissions.
+        inside = path / "manifest.json"
+        if inside.is_file():
+            return inside
+        raise ManifestError(str(path) + " is a folder; pass the manifest file, e.g. " + str(inside))
     return path
 
 
@@ -5896,12 +5960,17 @@ def write_working_gitignore(target_dir):
 
 def cmd_init(args):
     project_root = Path(args.project_root).resolve()
+    if not text_of(args.name):
+        raise ManifestError("--name is blank; give the platform's name, e.g. --name \"Acme Billing\"")
     if args.manifest:
         target = Path(args.manifest).resolve()
         target_dir = target.parent
     else:
         target_dir = project_root / ".admin-console"
         target = target_dir / "manifest.json"
+    if target.is_dir():
+        raise ManifestError("--manifest " + str(target) + " is a folder; pass the manifest file to "
+                            "create, e.g. " + str(target / "manifest.json"))
     if target.exists() and not args.force:
         stderr("Manifest already exists: " + str(target))
         stderr(
@@ -5922,9 +5991,10 @@ def cmd_init(args):
     manifest["platform"]["name"] = args.name
     # A stable handle for the cross-project store: the promotion bar counts
     # distinct projects, and a display name is not one.
-    manifest["platform"]["id"] = (
-        slugify(args.name)[:32].rstrip("-") + "-" + os.urandom(3).hex()
-    )
+    # slugify falls back to "lesson" for a name with no ASCII letters ("!!!", a CJK
+    # or Cyrillic name); a platform id says "console" instead.
+    slug = re.sub(r"[^a-z0-9]+", "-", args.name.lower()).strip("-")[:32].rstrip("-") or "console"
+    manifest["platform"]["id"] = slug + "-" + os.urandom(3).hex()
     archetypes = []
     for raw in args.archetype or []:
         # --archetype a,b used to store the single string "a,b", which resolved to
@@ -6420,6 +6490,7 @@ def cmd_add(args):
                 )
             batch_ids.add(entry_id)
         collection.extend(entries)
+        refuse_too_deep(manifest)
         introduced, warned = new_findings(
             before, manifest, project_root_of(manifest_path, manifest), manifest_path
         )
@@ -6491,6 +6562,18 @@ def sync_profile_decision(manifest, old, new):
         "id": new_id, "kind": "profile", "decision": text, "reason": reason, "appliesTo": ["*"],
     }))
     return "recorded the assumed decision " + new_id + ": '" + text + "'"
+
+
+def refuse_too_deep(manifest):
+    """Refuse a write `load_json` could not read back: a value shallow on its own can
+    still land deep enough to push the manifest past MAX_JSON_DEPTH."""
+    try:
+        loads_bounded(json.dumps(manifest))
+    except RecursionError:
+        raise ManifestError(
+            "Refusing to write: the manifest would be nested more than " + str(MAX_JSON_DEPTH)
+            + " levels deep, and no command could read it again; nothing was written."
+        )
 
 
 def read_value_argument(args):
@@ -6591,6 +6674,7 @@ def cmd_set(args):
             and isinstance(value, str) and previous != value
         ):
             renamed = (segments[-2][0], previous, value)
+        refuse_too_deep(manifest)
         introduced, warned = new_findings(
             before, manifest, project_root_of(manifest_path, manifest), manifest_path,
             renamed=renamed,
@@ -8563,10 +8647,12 @@ def create_outbox_lesson(directory, stem, text):
 
 
 def cmd_lesson_add(args):
-    if args.status == "adopted":
+    if args.status != "proposed":
+        # `rejected` or `superseded` here wrote a closed lesson that was never
+        # proposed, with no rejected-reason or superseded-by.
         raise ManifestError(
-            "a lesson is opened as 'proposed'; adoption is a separate reviewed edit "
-            "(lessons/README.md, section 7), never part of opening it"
+            "a lesson is opened as 'proposed'; adoption, rejection and superseding are each a "
+            "separate reviewed edit (lessons/README.md, section 7), never part of opening it"
         )
     date = lesson_date(args.date) or "unknown"
     if date == "unknown":
@@ -8792,13 +8878,51 @@ def lesson_edit_target(scope, proposed):
     return named[0]
 
 
-def lesson_edit_proof(target, commit):
-    """The commit (full hash) or "working tree" that holds the guidance edit to `target`, else a refusal.
+PORCELAIN_STATES = {"M": "modified", "A": "added", "D": "deleted", "R": "renamed", "C": "copied",
+                    "T": "type changed", "U": "unmerged", "?": "untracked"}
+
+
+def lesson_predates_check(full, lesson_path, lesson_date):
+    """Refuse a commit older than the lesson: the edit a lesson records comes after it.
+
+    A commit that ever touched the target used to be enough -- including the one
+    that created the file, months before the lesson was written.
+    """
+    relative = Path(os.path.relpath(str(lesson_path), str(SKILL_ROOT))).as_posix()
+    added = skill_git("log", "--diff-filter=A", "--format=%H", "--", relative)
+    first_add = added.stdout.split()[-1] if added is not None and added.returncode == 0 and added.stdout.split() else ""
+    if first_add:
+        if full != first_add:
+            older = skill_git("merge-base", "--is-ancestor", full, first_add)
+            if older is not None and older.returncode == 0:
+                raise ManifestError(
+                    "commit %s predates the lesson (it is an ancestor of %s, which added %s); pass the "
+                    "commit that holds this lesson's edit" % (full[:12], first_add[:12], relative))
+        return
+    if not lesson_date or lesson_date == "unknown":
+        raise ManifestError(
+            "%s is not committed and has no date, so --commit cannot be shown to come after it; commit "
+            "the lesson first, or adopt from the working tree" % relative)
+    shown = skill_git("show", "-s", "--format=%cI", full)
+    day = shown.stdout.strip()[:10] if shown is not None and shown.returncode == 0 else ""
+    if day and day < lesson_date:
+        raise ManifestError("commit %s (%s) predates the lesson (dated %s); pass the commit that holds "
+                            "this lesson's edit" % (full[:12], day, lesson_date))
+
+
+def lesson_edit_proof(target, commit, lesson_path=None, lesson_date=None):
+    """(the commit's full hash or "working tree", the change counted), else a refusal.
 
     Adoption records an edit; it does not make one. A lesson closed `adopted` with
     nothing changed would put an id in `Guidance level` that no build is held to.
     """
     first = "make the guidance edit first (adoption records it, it does not make it)"
+    if target == "lessons/index.md" or (
+        target.startswith("lessons/") and LESSON_FILE_PATTERN.match(target[len("lessons/"):])
+    ):
+        raise ManifestError(
+            "%s is written by the lesson commands themselves, so a change to it proves no guidance "
+            "edit; name the file the rule changes" % target)
     if commit:
         found = skill_git("rev-parse", "--verify", "--quiet", commit + "^{commit}")
         if found is None:
@@ -8813,7 +8937,9 @@ def lesson_edit_proof(target, commit):
         changed = [name for name in listing.stdout.split("\0") if name]
         if target not in changed:
             raise ManifestError("commit %s does not change %s; %s" % (full[:12], target, first))
-        return full
+        if lesson_path is not None:
+            lesson_predates_check(full, lesson_path, lesson_date)
+        return full, "commit %s changes %s" % (full[:12], target)
     state = skill_git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--", target)
     if state is None or state.returncode != 0:
         raise ManifestError("git did not answer, so the edit to %s cannot be checked" % target)
@@ -8822,7 +8948,10 @@ def lesson_edit_proof(target, commit):
             "no edit to %s found; %s, then pass --commit <sha> or leave it uncommitted in the "
             "working tree" % (target, first)
         )
-    return "working tree"
+    code = state.stdout.split("\0", 1)[0][:2]
+    words = sorted({PORCELAIN_STATES.get(char, char) for char in code if char.strip()})
+    return "working tree", "uncommitted change to %s (%s); check that it is this lesson's edit" % (
+        target, ", ".join(words) or "changed")
 
 
 def plan_lesson_closure(lessons_dir, lesson_id, adopting, date, reviewer, commit, reason, note):
@@ -8880,10 +9009,12 @@ def plan_lesson_closure(lessons_dir, lesson_id, adopting, date, reviewer, commit
         if problem:
             raise ManifestError("lesson %s scope %s %s; correct it before adopting" % (
                 lesson_id, json.dumps(scope), problem))
-        edited_in = lesson_edit_proof(lesson_edit_target(scope, proposed), commit)
+        lesson_dated = fields.get("date") if isinstance(fields.get("date"), str) else None
+        edited_in, counted = lesson_edit_proof(lesson_edit_target(scope, proposed), commit, path, lesson_dated)
         entry = "- %s adopted by %s; edit in %s" % (date, reviewer, edited_in)
         new_status = "adopted"
     else:
+        counted = None
         entry = "- %s rejected (%s)%s" % (date, reason, (": " + note) if note else "")
         new_status = "rejected"
 
@@ -8920,7 +9051,8 @@ def plan_lesson_closure(lessons_dir, lesson_id, adopting, date, reviewer, commit
             new[at] = reason_line + lesson_line_end(lines[at])
         else:
             new.insert(status_at + 1, reason_line + lesson_line_end(lines[status_at]))
-    return {"path": path, "bom": bom, "old": lines, "new": new, "from": current, "to": new_status}
+    return {"path": path, "bom": bom, "old": lines, "new": new, "from": current, "to": new_status,
+            "counted": counted}
 
 
 def close_lesson(args, kind):
@@ -8953,7 +9085,7 @@ def close_lesson(args, kind):
             write_text_file(plan["path"], ("﻿" if plan["bom"] else "") + "".join(plan["new"]))
             try:
                 level = rebuild_lesson_index(lessons_dir)
-            except OSError as exc:
+            except (OSError, ManifestError, ValueError, TypeError) as exc:
                 raise ManifestError(
                     "lesson %s was written but %s could not be rebuilt (%s); run `lesson index`"
                     % (lesson_id, index_path, exc)
@@ -8970,9 +9102,11 @@ def close_lesson(args, kind):
         print(json.dumps({
             "ok": True, "id": lesson_id, "from": plan["from"], "to": plan["to"],
             "file": str(plan["path"]), "index": None if args.dry_run else str(index_path),
-            "dryRun": bool(args.dry_run),
+            "dryRun": bool(args.dry_run), "counted": plan["counted"],
         }, ensure_ascii=False))
         return 0
+    if plan["counted"]:
+        print("Edit counted: " + plan["counted"])
     if args.dry_run:
         import difflib
 
@@ -9025,6 +9159,16 @@ class VersionAction(argparse.Action):
         parser.exit(0)
 
 
+def at_least_one(raw):
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be a whole number, at least 1; got " + repr(raw))
+    return value
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Model, validate, and audit admin-console capability manifests",
@@ -9062,12 +9206,18 @@ def build_parser():
     init_parser.add_argument("--stack-hosting")
     init_parser.add_argument("--stack-design-system")
     init_parser.add_argument("--stack-admin-framework")
-    init_parser.add_argument("--force", action="store_true")
+    init_parser.add_argument(
+        "--force", action="store_true",
+        help="discard the existing manifest and start over (everything recorded in it is lost)",
+    )
     init_parser.set_defaults(func=cmd_init)
 
     migrate_parser = subparsers.add_parser("migrate", help="Upgrade a 1.0 manifest to 2.0")
     migrate_parser.add_argument("--manifest", required=True)
-    migrate_parser.add_argument("--write", action="store_true")
+    migrate_parser.add_argument(
+        "--write", action="store_true",
+        help="persist the migration; without it this is a dry run that prints the changes",
+    )
     migrate_parser.set_defaults(func=cmd_migrate)
 
     validate_parser = subparsers.add_parser("validate", help="Validate structure, evidence, and coverage")
@@ -9102,7 +9252,11 @@ def build_parser():
         "--manifest", help="the manifest to render (not needed for --format rule-matrix)"
     )
     emit_parser.add_argument("--format", required=True, choices=sorted(EMITTERS) + ["rule-matrix"])
-    emit_parser.add_argument("--out")
+    emit_parser.add_argument(
+        "--out", metavar="FILE",
+        help="write here instead of printing; an existing file is overwritten, but never the "
+             "manifest, the files the tool keeps beside it, or the observation store",
+    )
     emit_parser.set_defaults(func=cmd_emit)
 
     add_parser = subparsers.add_parser("add", help="Append one object to a manifest collection")
@@ -9242,7 +9396,10 @@ def build_parser():
     lesson_add.add_argument("--evidence", action="append", default=[])
     lesson_add.add_argument("--platform", action="append", default=[])
     lesson_add.add_argument("--date", help="caller-supplied date; the script never reads the clock")
-    lesson_add.add_argument("--status", choices=LESSON_STATUSES, default="proposed")
+    lesson_add.add_argument(
+        "--status", choices=LESSON_STATUSES, default="proposed",
+        help="always proposed: adopt and reject close a lesson, and superseded is a reviewed edit",
+    )
     lesson_add.add_argument("--confidence", choices=LESSON_CONFIDENCES, default="observed-once")
     lesson_add.add_argument("--lessons-dir", help="override the skill lessons directory")
     lesson_add.set_defaults(func=cmd_lesson)
@@ -9264,7 +9421,10 @@ def build_parser():
         "promote", help="List observations that clear the promotion bar across projects"
     )
     promote.add_argument("--store", help="defaults to $ADMINWRIGHT_HOME or ~/.adminwright")
-    promote.add_argument("--min-projects", type=int, default=2)
+    promote.add_argument(
+        "--min-projects", type=at_least_one, default=2, metavar="N",
+        help="distinct projects an observation needs to clear the bar (default 2; at least 1)",
+    )
     promote.add_argument(
         "--similarity",
         type=float,
