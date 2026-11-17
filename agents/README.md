@@ -35,8 +35,11 @@ Shape of a healthy run, orchestrated from the main session:
    while a blocking gap is open, and `contested` never goes straight to `reviewed`.
 6. Dispatch `adminwright-harvester` last, with a short digest of this session's conversation:
    corrections the user made, guidance that proved wrong, phases that were skipped. A
-   dispatched agent cannot see the chat. In Claude Code you may instead run the pass as a fork
-   of your session.
+   dispatched agent cannot see the chat. Dispatch it as its own agent type: a fork of your
+   session inherits the chat but is not the harvester, because it never loads the
+   harvester's file, model or tool settings. If a harness can only fork, tell the fork to
+   read `agents/adminwright-harvester.md` in the skill and follow it, and not to dispatch
+   agents.
 
 Dispatch each pass with the inputs in
 [the dispatch template](../references/multi-agent.md#dispatch-and-verify). Each returns a first
@@ -45,7 +48,9 @@ report. Check each pass yourself before starting the next:
 
 - after the architect, `validate --phase plan`;
 - after an implementer, its worklog's `verified` commands;
-- around each review, `review-scope --start` and then the check;
+- around each review, `review-scope --agent <id> --role <role> --start` before dispatch (the
+  reviewer has not registered yet, so the role names its write surface), then
+  `review-scope --agent <id>` when it returns;
 - after qa, the release gates.
 
 The orchestrating session never edits product code, because its fixes would skip review.
@@ -70,15 +75,22 @@ python <skill-dir>/scripts/install_agents.py --harness <name> --project-root <pr
 |---|---|---|---|
 | `claude-code` | `.claude/agents/<name>.md` | — | The source files, frontmatter included. For non-plugin installs; the plugin needs no installer |
 | `opencode` | `.opencode/agents/<name>.md` | — | Frontmatter rebuilt as `description` + `mode: subagent` |
-| `codex` | `.codex/agents/<name>.toml` | `.adminwright/agents/`, `AGENTS.md` block | TOML with `name`, `description`, `developer_instructions`. The block is printed; add `--append-pointer` to write it |
+| `codex` | `.codex/agents/<name>.toml` | `.adminwright/agents/`, `AGENTS.md` block | TOML with `name`, `description`, `developer_instructions`. The block is printed; add `--append-pointer` to write it. Codex loads a project's `.codex/` only once you trust the project; if the agents are missing, trust it, or run the passes in sequence |
 | `antigravity` | `.agents/agents/<name>/agent.md` | `.adminwright/agents/`, `AGENTS.md` block | Frontmatter `name` + `description`. Same flag |
-| `gemini` | `.gemini/agents/<name>.md` | `.adminwright/agents/`, `GEMINI.md` block | Frontmatter `name` + `description`, plus `max_turns: 200` and `timeout_mins: 120`: Gemini CLI's defaults (30 turns, 10 minutes) stop a pass partway. Same flag |
-| `cursor` | `.cursor/agents/<name>.md` | `.adminwright/agents/`, `.cursor/rules/adminwright.mdc` | The `.mdc` is a project rule, always applied, rewritten on every install |
+| `gemini` | `.gemini/agents/<name>.md` | `.adminwright/agents/`, `GEMINI.md` block | Frontmatter `name` + `description`, plus `max_turns: 200` and `timeout_mins: 120`: Gemini CLI's defaults (30 turns, 10 minutes) stop a pass partway. Same flag. Google replaced Gemini CLI with Antigravity CLI for unpaid-tier and Google One users on 18 June 2026; those users install with `--harness antigravity` |
+| `cursor` | `.cursor/agents/<name>.md` | `.adminwright/agents/`, `.cursor/rules/adminwright.mdc` | The `.mdc` is a project rule, always applied |
 | `pi` | none — Pi has no built-in subagents | `.adminwright/agents/`, `AGENTS.md` block | Same flag |
 | `generic` | none | `.adminwright/agents/` | Any other harness: point it at the files, in the printed order |
 
 With the skill outside the project, every harness also gets `.adminwright/skill-dir` (this
 machine's skill path) and a `/.adminwright/skill-dir` line in `.gitignore`; see below.
+
+Rerun the installer after every skill update: installed copies do not change on their own.
+A rerun will not overwrite an agent file, neutral copy or `.mdc` rule whose content you
+changed since the installer last wrote it; it names each such file and leaves it, and
+`--force` overwrites them. `--dry-run` prints every file the run would create, update or
+leave, and writes nothing. There is no uninstall yet, and files of a role the skill no
+longer ships stay until you delete them.
 
 Native files carry only the fields their harness documents; `.adminwright/agents/` is the
 harness-neutral copy of the source files. Everything else in the source frontmatter is
@@ -148,16 +160,18 @@ A reviewer must not edit the code it reviews, yet it still writes its worklog, e
 the manifest, and qa writes new tests, so file writes and the shell stay available. `Agent` is
 removed from every agent but the architect: a subagent can dispatch subagents, and a
 "reviewer" an implementer spawned under a new id would defeat the independence rule
-invisibly. Only Claude Code enforces this; in every other harness the restriction is lost.
-The check that works everywhere is `review-scope`, which reads the working tree after a
-review pass and lists every file the reviewer changed that a reviewer may not. None of them can say "no
+invisibly. Removing Edit is a signal, not a guard: Write rewrites a whole file and the shell
+can change anything, so a reviewer can still change product code in every harness, Claude
+Code included. What catches it is `review-scope`, which the orchestrator runs after a review
+pass and which lists every file the reviewer changed that a reviewer may not. It works the
+same in every harness, and only after the fact. The other harnesses lose even the signal. None of them can say "no
 edit tool, writes allowed" in a project file, and their coarser switches — opencode's
 `permission.edit`, Codex's `sandbox_mode`, Cursor's `readonly` — would block the worklog
 and manifest writes too, so the installer maps the guard to none of them:
 
 | Harness | Guard | What the harness offers |
 |---|---|---|
-| Claude Code | Enforced | `disallowedTools` removes Edit and NotebookEdit; Write and Bash remain, so it stops in-place edits, not every write |
+| Claude Code | Enforced | Only the tool removal: `disallowedTools` takes away Edit and NotebookEdit, while Write and the shell remain and can change any file. `review-scope` is the check |
 | opencode | Not enforced | `permission.edit` gates `edit`, `write` and `apply_patch` together; path patterns under it can scope a reviewer's writes by hand |
 | Codex | Not enforced | No per-tool switch for edits; `sandbox_mode = "read-only"` blocks every write, and a parent session's live sandbox settings override the agent file |
 | Gemini CLI | Not enforced by the installer | `tools` is an allowlist of validated names (omitted, it inherits every tool), so dropping `replace` means listing all the others; a user-level policy rule does it cleanly (below) — project-level policies are currently disabled |
