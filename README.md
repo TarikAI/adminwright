@@ -293,8 +293,9 @@ python /path/to/adminwright/scripts/install_agents.py --harness <name> --project
 | Cursor | the project's `.agents/skills/adminwright/` (or `.cursor/skills/`) | `.cursor/agents/` + `.adminwright/agents/` + `.cursor/rules/adminwright.mdc` |
 | Pi, anything else | Pi: the project's `.agents/skills/adminwright/`; otherwise point the agent at `SKILL.md` | `.adminwright/agents/` (harness `pi` adds the `AGENTS.md` block; `generic` prints it) |
 
-Rerun the installer after each update of the skill. It leaves alone, and names, any
-installed file you edited since it last wrote it (`--force` overwrites), and `--dry-run`
+Rerun the installer after each update of the skill. If you edited an
+installed file since it last wrote it, the rerun names the file and writes nothing
+(`--force` overwrites), and `--dry-run`
 shows what it would write without writing. In Codex, the agents in `.codex/agents/` load
 only once you trust the project.
 

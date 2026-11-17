@@ -262,8 +262,7 @@ class TestDocumentedExamples(unittest.TestCase):
             shutil.rmtree(work, ignore_errors=True)
 
 
-# Fixed separately in the same round; drop it from this set once its text no longer says so.
-CLOSE_STEP_PENDING = {"lessons/README.md"}
+CLOSE_STEP_PENDING = set()
 HAND_PROMOTE = re.compile(r"feedback\[[^\]]*\]\.status'?\s+--value\s+promoted")
 
 

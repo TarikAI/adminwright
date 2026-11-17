@@ -87,8 +87,9 @@ machine's skill path) and a `/.adminwright/skill-dir` line in `.gitignore`; see 
 
 Rerun the installer after every skill update: installed copies do not change on their own.
 A rerun will not overwrite an agent file, neutral copy or `.mdc` rule whose content you
-changed since the installer last wrote it; it names each such file and leaves it, and
-`--force` overwrites them. `--dry-run` prints every file the run would create, update or
+changed since the installer last wrote it (it records what it wrote in
+`.adminwright/installed.json`; commit that file with the agents). It names each such file,
+exits 2 and writes nothing; `--force` overwrites them. `--dry-run` prints every file the run would create, update or
 leave, and writes nothing. There is no uninstall yet, and files of a role the skill no
 longer ships stay until you delete them.
 

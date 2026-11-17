@@ -276,7 +276,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install -g @anthropic-ai/claude-code
+      - run: npm install -g @anthropic-ai/claude-code@2.1.326
         timeout-minutes: 5
       - run: claude plugin validate .claude-plugin/plugin.json
         env:

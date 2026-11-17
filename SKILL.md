@@ -112,7 +112,7 @@ gate, never the truth requirement.
 
 | Profile | Use when | Consequence |
 |---|---|---|
-| `internal` | A small internal tool with named operators | Quality rules warn rather than block; the accessibility and performance gates, and the release flags for MFA, tamper-protected audit, keyboard and responsive checks, may be not applicable with a recorded reason ([list](references/verification.md#profiles-and-the-gate-matrix)); `standard` and `regulated` require them |
+| `internal` | A small internal tool with named operators | Quality rules warn rather than block; the accessibility and performance gates, and the release flags for MFA, tamper-protected audit, keyboard and responsive checks, may be not applicable with a recorded reason ([list](references/verification.md#crosscutting-flags-the-release-gate-requires)); `standard` and `regulated` require them |
 | `standard` | Any console real users depend on | Evidence must resolve; all gates must pass |
 | `regulated` | Money, health, minors, or audited data | Adds test-token matching, separation of duties, privileged-read audit, and forbids unresolved assumptions |
 

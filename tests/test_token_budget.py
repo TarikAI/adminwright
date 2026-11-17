@@ -21,7 +21,9 @@ from cli_helpers import SKILL_ROOT
 
 CEILINGS = {
     # entry point (SKILL.md's "Load references by phase" table) -> ceiling in estimated tokens
-    "full build": 90000,
+    # Raised from 90000 by the 2026-11-17 audit: the crossCutting flag list, the repair path and
+    # the schema integrity section are text an agent could not finish without.
+    "full build": 92000,
     "narrow extension": 18000,
     "audit only": 38000,
     "repair": 16000,

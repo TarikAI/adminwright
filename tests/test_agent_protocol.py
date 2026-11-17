@@ -176,8 +176,6 @@ class TestDocumentedCommandsParse(unittest.TestCase):
         # independence check then never ran.
         failures, checked = [], 0
         for path in doc_files():
-            if path.name == "manifest-cli.md":
-                continue  # the CLI package owns that file and its form; drop this skip once both land
             commands = list(fenced_commands(path)) + list(inline_commands(path))
             for line, command in commands:
                 argv = tokens_of(command)

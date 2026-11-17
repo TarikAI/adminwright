@@ -41,6 +41,10 @@ Everything below has shipped; see [CHANGELOG.md](CHANGELOG.md) for detail.
   - five shell cases for the architect, implementer, security, qa and harvester boundaries;
   - a manual CI workflow, and a free structure test that runs on every push.
 
+- ~~The 2026-11-17 audit~~ — 137 reproduced findings across the gates, the commands, the
+  code-review bridge and installer, the guidance, the agents and evals, and the schema pack;
+  see the changelog for every tightened rule.
+
 ## Next: field test and case study
 
 Publish one of those field builds as a sanitised case study, and hold the first genuine

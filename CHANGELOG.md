@@ -13,6 +13,143 @@ therefore says which rule set judged it, even on an install that updated in betw
 
 ## [Unreleased]
 
+### Audit of 2026-11-17
+
+Six read-only audits (rules, commands, helper scripts, guidance, agents and evals, schema
+pack and CI) produced 137 reproduced findings; seven work packages fixed them, each fix
+pinned by a test that failed first. Tightened checks are breaking by this project's
+definition and are listed by rule id.
+
+#### Validator: newly fails (breaking)
+
+- `gap-fix-unproven` (new, error at every profile): a critical or high gap set to `fixed`
+  must cite evidence; an OCR gap's own review record does not count.
+- `gap-acceptance-undecided` (new, error at every profile): a critical or high gap set to
+  `accepted` needs a confirmed `risk-acceptance` decision naming it, with `confirmedBy`
+  naming a person.
+- `decision-self-confirmed` (new, off/warn/error by profile): a confirmed `not-applicable`
+  or `risk-acceptance` decision records `confirmedBy`, never a registered agent or the
+  owner, implementer or reviewer of a capability it covers. Without it the decision no
+  longer satisfies `gate-not-applicable-undecided` or `not-applicable-undecided`.
+- `not-applicable-undecided` also covers integrations and work queues; a not-applicable
+  query no longer satisfies `entity-query-missing`.
+- `evidence-records-failure` (new, error at every profile): capability, crossCutting or
+  fixed-gap evidence whose last `# exit code:` is not 0.
+- `evidence-not-output`: source code is refused as capability and fixed-gap evidence; files
+  under `.git/`, `node_modules/` or a virtualenv are refused everywhere.
+- `evidence-path-missing`: a file a decision cites must exist at release.
+- `reviewer-identity`, `contest-self-cleared`, `declared-static-self-approved`: ids are
+  compared after folding invisible and look-alike characters; once `agents[]` is non-empty,
+  `reviewedBy` must be a registered qa, security or ux-reviewer agent.
+- `project-root-outside`: the effective project root must contain the manifest.
+- `placeholder-scan`: covers `workQueues[].source`, `integrations[].operations`, a
+  capability's `idempotency`, `recovery` and `concurrency`, and digit look-alikes (`M0ck`).
+- Every non-empty rule (`required-field-empty`, `high-risk-controls`, `audit-events-missing`,
+  `separation-of-duties`): a list of blank strings counts as empty.
+- `evidence-token-match`: only identifier-shaped server operations count; a route under four
+  characters no longer names its screen.
+- `gate-always-required` is an error at `internal` (was a warning).
+- `crosscutting-flag`: `safety.highRiskApprovalOrStepUp` and
+  `safety.bulkPreviewAndPartialFailure` are enforced where they apply.
+- `profile-decision-mismatch`, `platform-id-missing`: stricter reading of the profile
+  sentence and of the template's unfilled id.
+
+#### Validator: false blocks removed, and additions
+
+- Test-file paths are no longer placeholder-scanned; test-result lines in verbose runner
+  output are not scanned, and one `declaredStatic` `#content` entry covers every citation.
+- A test-named file under `support/` or `helpers/` is a test; `Deno.test` is recognised.
+- `evidence/license-check.log` and `evidence/security.md` are accepted; a specific one-line
+  evidence file is no longer `evidence-uninformative`.
+- `crossCutting.<section>.notApplicable.<flag>` (rule `crosscutting-flag-waived`): at
+  `internal`, MFA, tamper-protected audit and keyboard and responsive flows may be waived
+  with a rationale; an error above `internal`. `references/verification.md` lists every flag
+  the release gate requires.
+- `decisions[].confirmedBy`; the template carries `dec.profile` and a `platform.id` to fill.
+
+#### Commands
+
+- `emit --out` and `promote --export` refuse (exit 2) a path that is the manifest, a tool
+  file beside it or a file in the store; they could overwrite them.
+- The store keeps what it cannot read: appends start on a new line, unreadable lines are
+  kept and reported, `store sync` refuses while any exist, and a feedback entry is marked
+  `promoted` only after its record is read back. Non-object lines and malformed community
+  bundles no longer crash `harvest`, `promote` or `store status`.
+- `promote --export` replaces the project's own name and `platform.id` with its fingerprint;
+  `PRIVACY.md` lists what this cannot catch.
+- `review-scope --start` takes `--role` and works before the reviewer registers. Newly
+  fails: a second `--start` without `--restart`; a source or configuration file first cited
+  as evidence during the pass and then edited; a changed git-ignored configuration file.
+  Other registered reviewers' worklogs are named, not counted.
+- Reviewer claim locks are `locks/<capability>@<role>.lock` (old-form locks are renamed on
+  the next claim or release); `release-claim` releases by what is on disk; claiming under
+  another reviewer role while holding a claim is refused.
+- `lesson adopt --commit` refuses a commit older than the lesson and prints the change it
+  counted; `lesson add` opens only `proposed` lessons.
+- `set` refuses values nested too deeply and keeps a float a number; `remove --kind entity`
+  lists references to its capabilities; the gap report shows gaps of unclassified severity;
+  emitted documents list not-applicable capabilities separately; `store init` leaves an
+  existing repository's git identity alone; clearer errors for a folder given as
+  `--manifest` and a repository with no commits.
+
+#### Code-review bridge and installer
+
+- Security: file names reach `ocr` after `--`; `ocr`, `node` and `taskkill` are never
+  resolved from the current directory or the project tree; review text is quoted, capped and
+  labelled as not an instruction; the installer never writes through a link that leaves the
+  project.
+- Newly fails (exit 2): an endpoint reply that is not an object, has no status, or whose
+  findings are not a list; a comment without a usable path, severity or content (the other
+  findings are still recorded); a `record` finding without severity or content; a skip
+  reason shorter than six characters.
+- `install_agents.py --dry-run` and `--force`; a reinstall refuses to overwrite a file
+  edited since the last install, recorded in `.adminwright/installed.json`.
+- No traceback on a non-decimal line number, deeply nested reply, or non-UTF-8 agent file.
+
+#### Admin core schema (breaking for installed copies)
+
+- Every function pins `search_path = pg_catalog, pg_temp` and schema-qualifies what it
+  calls, in all variants: an overload in a writable `public` could re-attribute an approval
+  request, rewrite audit rows or blind `verify_audit_chain()`.
+- New `approval_request_state` trigger enforces the approval state machine; decisions are
+  refused on a closed or expired request; requests are cancelled, never deleted.
+- `audit_event.actor_subject` is captured at insert and hashed; `recorded_at` is the
+  database clock; an impersonation session must belong to the actor.
+- New `admin_actor_role_guard` and `impersonation_session_immutable` triggers; every trigger
+  is `ENABLE ALWAYS`; `scrub_audit_payload` requires an actor.
+- `grants.sql` grants INSERT column by column (never `id`) and stops if the app role owns
+  the objects or can CREATE in the schema.
+- The parity test compares NOT NULL and defaults across variants; Prisma generator
+  `prisma-client`; Rails `Migration[8.1]`.
+
+#### Guidance, agents and evals
+
+- `SKILL.md`: extend, audit and repair modes are completable (see `references/build-order.md`,
+  "Repairing from an audit"); the first `add` example works on a fresh manifest; the
+  description covers repair, admin APIs and support or moderation tooling; only a person
+  confirms a decision or accepts a gap.
+- References: walking-skeleton steps are capabilities; the build order is `dec.build-order`
+  with `docs/admin-build-order.md`; dashboard metrics live in an `x-metric` object;
+  `harvest` is the only step that closes a feedback entry; stack and standards content
+  updated and cited in `resource-index.md`.
+- Agents and `multi-agent.md` agree with the CLI: `review-scope --start --role`, shared
+  lists written with `set --append`, qa proves red runs in a disposable copy, the
+  implementer accepts the contested fix round, reviewer prompts no longer claim an edit
+  guard that does not exist.
+- Behavioural eval graders are anchored so that reading the documentation, rewriting
+  scaffolded source or hand-editing the manifest no longer passes.
+
+#### CI and repository
+
+- The core-schema job sets `ADMINWRIGHT_REQUIRE_DB=1`, so a missing PostgreSQL client, npm
+  or Django fails instead of skipping; superseded pull-request runs are cancelled; Dependabot
+  groups Actions bumps; the weekly promotion review stays quiet when there is nothing to
+  review; the Claude Code CLI is pinned in both workflows that install it.
+- `SECURITY.md` counts flaws in the schema pack as in scope; a test keeps the fixture copies
+  of the manifest schema identical to the shipped one.
+- The full-build token ceiling in `tests/test_token_budget.py` is raised from 90,000 to
+  92,000 for the text this audit added.
+
 ### Added
 
 - **`lesson adopt` and `lesson reject`**: close a `proposed` lesson without hand-editing its
