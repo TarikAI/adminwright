@@ -18,8 +18,8 @@ on:
         description: "Model under test (pin it, so a model rollout is not read as a plugin regression)"
         default: "claude-sonnet-5"
       max_cost_usd:
-        description: "Hard ceiling on the run's list-price cost"
-        default: "25"
+        description: "Hard ceiling on the run's list-price cost. Empty: 10 for smoke, 60 for shell, 70 for all"
+        default: ""
 
 permissions:
   contents: read
@@ -29,10 +29,12 @@ jobs:
     name: claude plugin eval (${{ inputs.tag }})
     runs-on: ubuntu-latest
     timeout-minutes: 240
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    # The API key is set on the two steps that read it, never job-wide: the apt and npm
+    # installs and the third-party actions run without it.
     steps:
       - name: Require the API key secret
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "::error::Add an ANTHROPIC_API_KEY repository secret to run the behavioural evals."
@@ -50,15 +52,27 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bubblewrap socat
       - name: Install Claude Code
         timeout-minutes: 5
-        run: npm install -g @anthropic-ai/claude-code
+        # Pinned: an unpinned global install runs whatever was published last, with its
+        # install script. Its postinstall fetches the native binary, so scripts stay on.
+        run: npm install -g @anthropic-ai/claude-code@2.1.326
       - name: Run the suite
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DISABLE_AUTOUPDATER: "1"
           TAG: ${{ inputs.tag }}
           RUNS: ${{ inputs.runs }}
           MODEL: ${{ inputs.model }}
           MAX_COST: ${{ inputs.max_cost_usd }}
         run: |
+          # A ceiling below the set's cost stops the run partway and wastes it
+          # (evals/behavior/README.md has the estimates).
+          if [ -z "$MAX_COST" ]; then
+            case "$TAG" in
+              smoke) MAX_COST=10 ;;
+              shell) MAX_COST=60 ;;
+              all) MAX_COST=70 ;;
+            esac
+          fi
           # The target comes first: --tag, --allow-tools and --json each take a value.
           args=(. --scaffold --trust-plugin --no-publish --json results.json
                 --runs "$RUNS" --model "$MODEL" --judge-model claude-haiku-4-5

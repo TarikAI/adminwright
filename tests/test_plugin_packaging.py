@@ -16,6 +16,13 @@ from pathlib import Path
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = SKILL_ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE = SKILL_ROOT / ".claude-plugin" / "marketplace.json"
+SUPPORTED_AGENT_KEYS = {
+    "name", "description", "model", "effort", "maxTurns", "autoCompactWindow", "tools",
+    "disallowedTools", "skills", "memory", "background", "omitClaudeMd", "isolation", "color",
+    "experimental",
+}
+IGNORED_AGENT_KEYS = {"permissionMode", "hooks", "mcpServers", "initialPrompt"}
+AGENT_COLORS = {"red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"}
 
 
 def load(path):
@@ -118,6 +125,37 @@ class TestPluginContents(unittest.TestCase):
                              path.name + ": name must equal the file stem")
             self.assertTrue(str(fields.get("description", "")).strip(),
                             path.name + ": description is required")
+
+    def test_agent_frontmatter_uses_only_keys_claude_code_reads(self):
+        """Claude Code ignores an unknown or misspelled key silently: `disallowedtools`
+        would drop a reviewer's tool restriction with no signal anywhere (A-15).
+
+        The lists are the plugin-agent fields in
+        https://code.claude.com/docs/en/plugins/components ("Frontmatter fields in plugin
+        agents"), checked 2026-11-17.
+        """
+        for relative in load(PLUGIN).get("agents", []):
+            path = (SKILL_ROOT / relative.lstrip("./")).resolve()
+            fields = strict_frontmatter(path)
+            ignored = sorted(set(fields) & IGNORED_AGENT_KEYS)
+            self.assertEqual(ignored, [], path.name + ": " + ", ".join(ignored)
+                             + " is ignored for plugin agents; ship it as plugin hooks or MCP servers")
+            unknown = sorted(set(fields) - SUPPORTED_AGENT_KEYS)
+            self.assertEqual(unknown, [], path.name + ": not a plugin-agent frontmatter key")
+            if "color" in fields:
+                self.assertIn(fields["color"], AGENT_COLORS, path.name + ": color")
+
+    def test_the_reviewers_cannot_edit_or_dispatch(self):
+        for name in ("adminwright-qa", "adminwright-security", "adminwright-ux-reviewer"):
+            fields = strict_frontmatter(SKILL_ROOT / "agents" / (name + ".md"))
+            denied = {t.strip() for t in str(fields.get("disallowedTools", "")).split(",")}
+            self.assertTrue({"Edit", "NotebookEdit", "Agent"} <= denied, name + ": " + str(sorted(denied)))
+
+    def test_the_key_check_catches_a_misspelling(self):
+        broken = ("---" + chr(10) + "name: x" + chr(10) + "description: d" + chr(10)
+                  + "disallowedtools: Edit" + chr(10) + "---" + chr(10))
+        fields = parse_frontmatter_text(broken, "broken.md")
+        self.assertEqual(set(fields) - SUPPORTED_AGENT_KEYS, {"disallowedtools"})
 
     def test_skill_frontmatter_is_strictly_valid(self):
         fields = strict_frontmatter(SKILL_ROOT / "SKILL.md")
