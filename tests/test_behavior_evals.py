@@ -244,7 +244,9 @@ class TestScaffolds(unittest.TestCase):
                 for capability in entity.get("capabilities", []):
                     if capability["id"] == "tenant.suspend":
                         capability["reviewStatus"] = "contested"
-            manifest.write_text(json.dumps(data, indent=2), encoding="utf-8", newline="\n")
+            # Python 3.9's write_text has no newline= argument.
+            with open(manifest, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(data, indent=2))
             self.assertTrue(initial_outcome(workspace, graders["contested"][0]))
             self.assertFalse(initial_outcome(workspace, graders["verdict-through-the-cli"][0]),
                              "a hand-written verdict must not pass the process grader")

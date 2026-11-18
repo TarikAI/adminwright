@@ -1228,7 +1228,9 @@ class TestLinksOutOfTheProject(InstallBase):
         code, out, err = run("--harness", "claude-code", "--project-root", self.project)
         self.assertEqual(code, 2, out + err)
         self.assertIn("link", err)
-        self.assertIn(str(self.project / ".claude" / "agents"), err)
+        # The message carries the resolved path, and a runner's temp folder may be spelt with
+        # a short name (RUNNER~1), so compare the part below the project.
+        self.assertIn(os.path.join(".claude", "agents") + " is a link", err)
         self.assertNotIn("Traceback", err)
         self.assertEqual(snapshot(outside), before, "nothing may land outside the project")
         self.assertFalse((self.project / ".adminwright").exists(), "nothing is written on refusal")
@@ -1284,8 +1286,9 @@ class TestEditedFiles(InstallBase):
         before = snapshot(self.project)
         code, out, err = self.install()
         self.assertEqual(code, 2, out + err)
-        self.assertIn(str(native), err)
-        self.assertIn(str(neutral), err)
+        # Resolved paths in the message: compare below the project (see the link test).
+        self.assertIn(os.path.relpath(str(native), str(self.project)) + ": edited", err)
+        self.assertIn(os.path.relpath(str(neutral), str(self.project)) + ": edited", err)
         self.assertIn("--force", err)
         self.assertEqual(snapshot(self.project), before, "a refused reinstall writes nothing")
         code, out, err = self.install("--force")

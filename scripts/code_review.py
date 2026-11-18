@@ -1621,7 +1621,16 @@ def endpoint_verdict(document, returncode):
         ranked.append((STATE_RANK[category], category, label))
         if category == "failed":
             verdict.reasons.append(label)
-    if returncode != 0:
+    # ocr exited 0 on a partial review until 1.13.5; later versions exit 1 and still
+    # print the reply. A non-zero exit beside a stated partial outcome is that partial
+    # review, whose findings are worth keeping; any other non-zero exit is a failure.
+    stated_partial = (
+        isinstance(document, dict)
+        and bool(ranked)
+        and all(category in ("partial", "complete") for _rank, category, _label in ranked)
+        and any(category == "partial" for _rank, category, _label in ranked)
+    )
+    if returncode != 0 and not stated_partial:
         verdict.reasons.insert(0, "exit code " + str(returncode))
     elif document is None:
         verdict.reasons.append("no parseable JSON on stdout")

@@ -864,6 +864,18 @@ class RealReplies(TempConsole):
         self.assertEqual(self.lines_of(self.gaps()), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
         self.assertEqual(len(self.raw_files()), 1)
 
+    def test_a_partial_review_that_exits_one_still_records_what_it_found(self):
+        # ocr after 1.13.5 exits 1 on a partial review and still prints the reply.
+        recorded = recorded_reply("review-partial")
+        recorded["returncode"] = 1
+        path = self.tmp / "partial-exit-one.json"
+        path.write_text(json.dumps(recorded), encoding="utf-8")
+        code, out, err = self.replay("review-partial", path)
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("2 finding(s) recorded as gaps", out)
+        self.assertIn("src/b.py (provider: provider or subtask request failed)", err)
+        self.assertEqual(self.lines_of(self.gaps()), [("high", "src/a.py:2"), ("medium", "src/c.py:2")])
+
     def test_a_failed_review_records_nothing_and_says_why(self):
         code, out, err = self.replay("review-failed")
         self.assertEqual(code, 2, out + err)
@@ -2364,10 +2376,15 @@ class MalformedInput(TempConsole):
             "diff", "--manifest", self.manifest, "--engine", "ocr", env={"FAKE_REPLAY": str(reply)}
         )
         self.assertEqual(code, 2, out + err)
-        self.assertIn("no parseable JSON", err)
+        # An interpreter whose JSON parser has no depth limit (CPython 3.14 on Linux) reads
+        # the array, which is then refused as a reply that is not an object.
+        self.assertTrue("no parseable JSON" in err or "not an object" in err, err)
         self.assertNotIn("Traceback", err)
-        with self.assertRaises(bridge.ReviewError):
-            bridge.parse_json(deep, "ocr delegate preview")
+        try:
+            parsed = bridge.parse_json(deep, "ocr delegate preview")
+        except bridge.ReviewError:
+            parsed = None
+        self.assertNotIsInstance(parsed, dict)
 
     def test_an_unexpected_error_exits_two_not_one(self):
         def boom(_args):
